@@ -1,0 +1,19 @@
+[Unit]
+Description=OmniGate2API - OpenAI compatible proxy for CodeArts Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/omnigate2api
+EnvironmentFile=/opt/omnigate2api/.env
+ExecStart=/opt/omnigate2api/bin/omnigate2api -config /opt/omnigate2api/config.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/omnigate2api/auths /opt/omnigate2api/data
+
+[Install]
+WantedBy=multi-user.target

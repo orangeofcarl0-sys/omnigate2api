@@ -1,0 +1,13 @@
+auths/
+data/
+bin/
+config.json
+.env
+*.key
+*.pem
+*.exe
+*.backup2
+*.backup
+*.bak
+*.backup2
+*.log

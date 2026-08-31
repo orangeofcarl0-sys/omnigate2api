@@ -1,0 +1,15 @@
+services:
+  omnigate2api:
+    build: .
+    container_name: omnigate2api
+    restart: unless-stopped
+    ports:
+      - "7866:7866"
+    environment:
+      OMNIGATE_API_KEY: ${OMNIGATE_API_KEY:-change-me}
+      TZ: Asia/Shanghai
+      OMNIGATE_DEBUG_PROMPTS: /app/data/prompts
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
