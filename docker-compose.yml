@@ -4,7 +4,9 @@ services:
     container_name: omnigate2api
     restart: unless-stopped
     ports:
-      - "7866:7866"
+      # 默认本地：仅本机可达（API Key 无需作为防线；局域网共享/远程管理时
+      # 改为 "7866:7866" 即为开放方案，需配合 OMNIGATE_API_KEY 使用）。
+      - "127.0.0.1:7866:7866"
     environment:
       OMNIGATE_API_KEY: ${OMNIGATE_API_KEY:-change-me}
       TZ: Asia/Shanghai
