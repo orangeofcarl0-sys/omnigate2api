@@ -216,6 +216,10 @@ go test -race ./...  # 竞争检测（需 CGO）
 
 仅供学习和研究使用。使用者需遵守华为云服务条款，自行承担使用风险。
 
+## 仓库与出处
+
+- **公开仓库**：[github.com/orangeofcarl0-sys/omnigate2api](https://github.com/orangeofcarl0-sys/omnigate2api)
+
 ## License
 
-MIT（基于上游 MIT 实现的增强分支；版权与许可声明遵循原项目）
+MIT（基于上游 MIT 实现的增强分支；版权与许可声明遵循原项目）。
