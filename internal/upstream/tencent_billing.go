@@ -86,15 +86,18 @@ func (c *TencentClient) DailyCheckin(acct *auth.Auth) error {
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("daily-checkin http %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
-	}
+	// 真实形态：已签到以 HTTP 400 + code=10001 返回（8f 实测），必须优先判定
+	// 幂等再报错——否则每天都会显示 "failed"（尽管实际已签到）。
 	var env struct {
 		Code int64  `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if err := json.Unmarshal(raw, &env); err == nil && env.Code != 0 && env.Code != 10001 {
-		return fmt.Errorf("daily-checkin failed code=%d msg=%s", env.Code, truncateStr(env.Msg, 200))
+	_ = json.Unmarshal(raw, &env)
+	if env.Code == 10001 {
+		return nil // 今天已签到：幂等成功
+	}
+	if resp.StatusCode >= 400 || env.Code != 0 {
+		return fmt.Errorf("daily-checkin failed http=%d code=%d msg=%s", resp.StatusCode, env.Code, truncateStr(env.Msg, 200))
 	}
 	return nil
 }

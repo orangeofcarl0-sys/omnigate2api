@@ -34,6 +34,21 @@ func TestTencentDailyCheckinIdempotent(t *testing.T) {
 	}
 }
 
+// 真实形态（8f 实测）：已签到 = HTTP 400 + code 10001 → 幂等成功。
+func TestTencentDailyCheckin400Idempotent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":10001,"msg":"今天已签到，请明天再来"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	if err := c.DailyCheckin(billingAuth()); err != nil {
+		t.Fatalf("400+10001 must be idempotent success: %v", err)
+	}
+}
+
 func TestTencentDailyCheckinBusinessError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
