@@ -362,7 +362,7 @@ function render(data){
     ? models.map(m => `<span class="chip mono">${escapeHtml(m.id || m)}</span>`).join("")
     : `<span class="muted">暂无模型</span>`;
 
-  const sch = data.schedule || {};
+  const sch = (data.schedule || {}).watch || {}; // 调度配置在 schedule.watch 层
   const chips = [];
   if (sch.enabled){
     chips.push(`<span class="chip">监视 ${sch.poll_minutes??"-"}m 轮询</span>`);
