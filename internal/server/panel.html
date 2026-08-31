@@ -364,9 +364,13 @@ function render(data){
 
   const sch = data.schedule || {};
   const chips = [];
-  if (sch.checkin_hours?.length) chips.push(`<span class="chip">签到 ${sch.checkin_hours.map(h=>String(h).padStart(2,"0")+":00").join(" / ")}</span>`);
-  if (sch.keepalive_hours?.length) chips.push(`<span class="chip">保活 ${sch.keepalive_hours.map(h=>String(h).padStart(2,"0")+":00").join(" / ")}</span>`);
-  $("schedChips").innerHTML = chips.join("") || `<span class="muted">未配置</span>`;
+  if (sch.enabled){
+    chips.push(`<span class="chip">监视 ${sch.poll_minutes??"-"}m 轮询</span>`);
+    chips.push(`<span class="chip">到期前 ${sch.refresh_skew_minutes??"-"}m 自动刷新</span>`);
+    chips.push(`<span class="chip">保活 ${sch.keepalive_interval??"-"}m</span>`);
+    chips.push(`<span class="chip">每日福利领取 / 腾讯签到</span>`);
+  }
+  $("schedChips").innerHTML = chips.join("") || `<span class="muted">监视器未启用</span>`;
 }
 
 function escapeHtml(s){
