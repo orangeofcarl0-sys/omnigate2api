@@ -746,7 +746,8 @@ type ChatAPI interface {
 ### 24.2 scheduler 分支
 
 - benefit 福利领取：仅华为（`ProfileID=="codearts"`）执行；
-- 腾讯签到/积分：**本期不做**（参考实现有 daily-checkin，列为后续）；
+- 腾讯签到/积分：**已实现**（每日北京时间一次，DailyCheckin 幂等 + UserResource
+  余额日志，BillingAPI 断言分发；`claimTencentCheckin` 与华为 benefit 并行）；
 - keepalive/保活：共用。
 
 ### 24.3 登录 CLI
@@ -813,7 +814,7 @@ toolchain:
 
 ## 27. 明确不做 / 已实证定稿 / 待实测（v0.3.1）
 
-1. **不做**：腾讯 daily-checkin/积分接入（§24.2）；workbuddy 指纹增量默认开启
+1. **不做**：workbuddy 指纹增量默认开启
    （§21.2 保持全量）；Account 凭证类型独立化重构（§21.2 已拍板单结构）；
    设备指纹头（官方 CLI 无此形态，§28.1 实证）。
 2. **已实证定稿**（原"待实测"转正，依据 §28.1 参考实现对账）：腾讯会话无状态

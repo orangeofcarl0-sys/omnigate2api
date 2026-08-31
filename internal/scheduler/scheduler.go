@@ -32,6 +32,7 @@ type Config struct {
 type Scheduler struct {
 	cfg              Config
 	lastBenefitClaim string // 最近一次福利领取日期（北京时间）
+	lastTencentCheck string // 最近一次腾讯签到日期（北京时间）
 }
 
 // New 构造调度器。
@@ -92,6 +93,7 @@ func (s *Scheduler) Tick(ctx context.Context) {
 		}
 	}
 	s.claimBenefit(ctx)
+	s.claimTencentCheckin(ctx)
 }
 
 // benefitTZ 福利额度按北京时间 24 点重置。
@@ -125,4 +127,32 @@ func (s *Scheduler) claimBenefit(ctx context.Context) {
 		_ = rec
 	}
 	s.lastBenefitClaim = today
+}
+
+// claimTencentCheckin 每自然日（北京时间）为腾讯账号签到一次（幂等）并查询
+// 余额日志；与华为福利领取（claimBenefit）并行、互不阻塞（SPEC §24.2 落地）。
+func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
+	today := time.Now().In(benefitTZ).Format("2006-01-02")
+	if today == s.lastTencentCheck {
+		return
+	}
+	for _, acct := range s.cfg.Pool.Accounts() {
+		if acct.ProfileID != "workbuddy" {
+			continue // 华为侧走 claimBenefit
+		}
+		api, ok := acct.Client.(upstream.BillingAPI)
+		if !ok {
+			continue
+		}
+		if err := api.DailyCheckin(acct.Auth); err != nil {
+			log.Printf("tencent checkin account=%s failed err=%v", acct.Name, err)
+			continue
+		}
+		if remain, err := api.UserResource(acct.Auth); err == nil {
+			log.Printf("tencent checkin account=%s ok remaining=%d", acct.Name, remain)
+		} else {
+			log.Printf("tencent checkin account=%s ok (balance query failed: %v)", acct.Name, err)
+		}
+	}
+	s.lastTencentCheck = today
 }

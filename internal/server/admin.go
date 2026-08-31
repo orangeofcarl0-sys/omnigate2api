@@ -10,6 +10,7 @@ import (
 
 	"omnigate2api/internal/adapt"
 	"omnigate2api/internal/auth"
+	"omnigate2api/internal/upstream"
 )
 
 // adminOverview 面板总览。
@@ -70,7 +71,8 @@ type actionResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// adminCredits CodeArts 无积分；复用为 Validate/刷新状态。
+// adminCredits 按家族分发：华为（无积分面）→ Validate/刷新状态；
+// 腾讯 → 真实积分余额查询（SPEC §24.2 落地）。
 func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 	body, err := readUIDBody(r)
 	if err != nil {
@@ -93,6 +95,14 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 			res := actionResult{UID: uid}
 			if acct == nil {
 				res.Message = "no account"
+			} else if api, ok := acct.Client.(upstream.BillingAPI); ok && acct.ProfileID == "workbuddy" {
+				if remain, err := api.UserResource(acct.Auth); err != nil {
+					res.Message = err.Error()
+				} else {
+					res.OK = true
+					res.Message = "积分余额 " + strconv.FormatInt(remain, 10)
+					res.Credits = remain
+				}
 			} else if ok, err := h.cfg.Pool.Validate(acct); err != nil {
 				res.Message = err.Error()
 			} else if !ok {

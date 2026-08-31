@@ -175,3 +175,29 @@ func Test29NoAuthDefaultLocal(t *testing.T) {
 		t.Fatalf("real key must require auth: %d", resp2.StatusCode)
 	}
 }
+
+// adminCredits 家族分发：腾讯账号 → 真实余额查询（假 billing 端点）。
+func Test29AdminCreditsTencentBalance(t *testing.T) {
+	huawei := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	balance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Response":{"Data":{"Accounts":[{"CapacityRemain":888,"CycleCapacitySize":0,"CycleCapacityRemain":0,"CycleCapacityUsed":0}]}}}`))
+	}))
+	defer balance.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", balance.URL)
+	srv, _, _, h := buildTestServer(t, huawei.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+
+	req, _ := http.NewRequest("POST", srv.URL+"/admin/api/credits", strings.NewReader(`{"uid":"u2"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(raw), `"credits":888`) || !strings.Contains(string(raw), "积分余额") {
+		t.Fatalf("tencent balance must surface: %s", raw)
+	}
+}
