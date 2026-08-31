@@ -11,6 +11,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -30,9 +31,10 @@ type Config struct {
 
 // Scheduler 定时任务。
 type Scheduler struct {
-	cfg              Config
-	lastBenefitClaim string // 最近一次福利领取日期（北京时间）
-	lastTencentCheck string // 最近一次腾讯签到日期（北京时间）
+	cfg Config
+	// lastDaily 每日动作（label → 最近执行日期，北京时间）：华为福利领取 /
+	// 腾讯签到共用同日前去重（claimDaily 模板）。
+	lastDaily map[string]string
 }
 
 // New 构造调度器。
@@ -46,7 +48,8 @@ func New(cfg Config) *Scheduler {
 	if cfg.KeepaliveInterval <= 0 {
 		cfg.KeepaliveInterval = 15 * time.Minute // 15 分钟保活一次
 	}
-	return &Scheduler{cfg: cfg}
+	s := &Scheduler{cfg: cfg, lastDaily: map[string]string{}}
+	return s
 }
 
 // Run 启动定时循环。
@@ -99,62 +102,62 @@ func (s *Scheduler) Tick(ctx context.Context) {
 // benefitTZ 福利额度按北京时间 24 点重置。
 var benefitTZ = time.FixedZone("CST", 8*3600)
 
-// claimBenefit 每自然日（北京时间）为各账号领取一次活动福利额度。
+// claimDaily 每自然日（北京时间）为指定家族账号执行一次每日动作；同日前去重。
+// fn 返回（日志消息, error）：错误记 failed，空消息跳过日志。各家族分别调用
+// （claimBenefit / claimTencentCheckin），并行互不阻塞。
+func (s *Scheduler) claimDaily(ctx context.Context, label, family string, fn func(*pool.Account) (string, error)) {
+	today := time.Now().In(benefitTZ).Format("2006-01-02")
+	if today == s.lastDaily[label] {
+		return
+	}
+	for _, acct := range s.cfg.Pool.Accounts() {
+		if acct.ProfileID != family {
+			continue
+		}
+		if msg, err := fn(acct); err != nil {
+			log.Printf("%s account=%s failed err=%v", label, acct.Name, err)
+		} else if msg != "" {
+			log.Printf("%s account=%s %s", label, acct.Name, msg)
+		}
+	}
+	s.lastDaily[label] = today
+}
+
+// claimBenefit 每自然日（北京时间）为各华为账号领取一次活动福利额度。
 // benefit/claim 幂等，重复调用返回既有记录；官方客户端登录时也做同样调用。
 func (s *Scheduler) claimBenefit(ctx context.Context) {
 	if s.cfg.Client == nil {
 		return
 	}
-	today := time.Now().In(benefitTZ).Format("2006-01-02")
-	if today == s.lastBenefitClaim {
-		return
-	}
-	for _, acct := range s.cfg.Pool.Accounts() {
-		if acct.ProfileID != "codearts" {
-			continue // 福利领取仅华为（SPEC §24.2：腾讯签到本期不做）
+	s.claimDaily(ctx, "benefit claim", "codearts", func(acct *pool.Account) (string, error) {
+		if _, err := s.cfg.Client.ClaimBenefit(ctx, acct.Auth); err != nil {
+			return "", err
 		}
-		rec, err := s.cfg.Client.ClaimBenefit(ctx, acct.Auth)
+		bal, err := s.cfg.Client.FetchTokensBalance(ctx, acct.Auth)
 		if err != nil {
-			log.Printf("benefit claim account=%s failed err=%v", acct.Name, err)
-			continue
+			return "ok (balance query failed: " + err.Error() + ")", nil
 		}
-		if bal, err := s.cfg.Client.FetchTokensBalance(ctx, acct.Auth); err == nil {
-			acct.SetQuota(pool.AccountQuota{Remain: bal.TotalBalance, Total: bal.TotalQuota, Used: bal.UsedAmount, UpdatedAt: time.Now().Unix()})
-			log.Printf("benefit claim account=%s ok balance=%d/%d used=%d",
-				acct.Name, bal.TotalBalance, bal.TotalQuota, bal.UsedAmount)
-		} else {
-			log.Printf("benefit claim account=%s ok (balance query failed: %v)", acct.Name, err)
-		}
-		_ = rec
-	}
-	s.lastBenefitClaim = today
+		acct.SetQuota(pool.AccountQuota{Remain: bal.TotalBalance, Total: bal.TotalQuota, Used: bal.UsedAmount, UpdatedAt: time.Now().Unix()})
+		return fmt.Sprintf("ok balance=%d/%d used=%d", bal.TotalBalance, bal.TotalQuota, bal.UsedAmount), nil
+	})
 }
 
 // claimTencentCheckin 每自然日（北京时间）为腾讯账号签到一次（幂等）并查询
 // 余额日志；与华为福利领取（claimBenefit）并行、互不阻塞（SPEC §24.2 落地）。
 func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
-	today := time.Now().In(benefitTZ).Format("2006-01-02")
-	if today == s.lastTencentCheck {
-		return
-	}
-	for _, acct := range s.cfg.Pool.Accounts() {
-		if acct.ProfileID != "workbuddy" {
-			continue // 华为侧走 claimBenefit
-		}
+	s.claimDaily(ctx, "tencent checkin", "workbuddy", func(acct *pool.Account) (string, error) {
 		api, ok := acct.Client.(upstream.BillingAPI)
 		if !ok {
-			continue
+			return "", nil // 无计费能力（非腾讯客户端）：跳过
 		}
 		if err := api.DailyCheckin(acct.Auth); err != nil {
-			log.Printf("tencent checkin account=%s failed err=%v", acct.Name, err)
-			continue
+			return "", err
 		}
-		if remain, err := api.UserResource(acct.Auth); err == nil {
-			acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
-			log.Printf("tencent checkin account=%s ok remaining=%d", acct.Name, remain)
-		} else {
-			log.Printf("tencent checkin account=%s ok (balance query failed: %v)", acct.Name, err)
+		remain, err := api.UserResource(acct.Auth)
+		if err != nil {
+			return "ok (balance query failed: " + err.Error() + ")", nil
 		}
-	}
-	s.lastTencentCheck = today
+		acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
+		return fmt.Sprintf("ok remaining=%d", remain), nil
+	})
 }

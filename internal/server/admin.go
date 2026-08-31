@@ -73,14 +73,9 @@ type actionResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// adminCredits 按家族分发：华为（无积分面）→ Validate/刷新状态；
-// 腾讯 → 真实积分余额查询（SPEC §24.2 落地）。
-func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
-	body, err := readUIDBody(r)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "bad json: " + err.Error()})
-		return
-	}
+// runForTargets 按 uid 批量并发执行账号动作（并发上限 5，顺序无关）：
+// accounts 类批量接口（查余额/保活）共用。fn 返回 actionResult（UID 由本函数补）。
+func (h *Handler) runForTargets(body uidBody, action string, fn func(*pool.Account) actionResult) ([]actionResult, string) {
 	targets := h.pickTargets(body.UID)
 	results := make([]actionResult, 0, len(targets))
 	var mu sync.Mutex
@@ -93,63 +88,87 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			acct := h.cfg.Pool.Get(uid)
-			res := actionResult{UID: uid}
-			if acct == nil {
-				res.Message = "no account"
-			} else if api, ok := acct.Client.(upstream.BillingAPI); ok && acct.ProfileID == "workbuddy" {
-				if remain, err := api.UserResource(acct.Auth); err != nil {
-					res.Message = err.Error()
-				} else {
-					acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
-					res.OK = true
-					res.Message = "积分余额 " + strconv.FormatInt(remain, 10)
-					res.Credits = remain
-				}
-			} else if ok, err := h.cfg.Pool.Validate(acct); err != nil {
-				res.Message = err.Error()
-			} else if !ok {
-				res.Message = "token invalid"
-			} else {
-				res.OK = true
-				res.Message = "ok"
-			}
+			res := fn(h.cfg.Pool.Get(uid))
+			res.UID = uid
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
+	return results, summaryMsg(action, results)
+}
+
+// singleAction 单账号动作：uid 必填、账号存在性校验，enable/disable/clear 共用。
+func (h *Handler) singleAction(w http.ResponseWriter, r *http.Request, action string, fn func(acct *pool.Account) (bool, string)) {
+	body, err := readUIDBody(r)
+	if err != nil || body.UID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "uid required"})
+		return
+	}
+	acct := h.cfg.Pool.Get(body.UID)
+	if acct == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "account not found"})
+		return
+	}
+	ok, msg := fn(acct)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
+}
+
+// adminCredits 按家族分发：华为（无积分面）→ Validate/刷新状态；
+// 腾讯 → 真实积分余额查询（SPEC §24.2 落地）。
+func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
+	body, err := readUIDBody(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "bad json: " + err.Error()})
+		return
+	}
+	results, msg := h.runForTargets(body, "刷新状态", func(acct *pool.Account) actionResult {
+		res := actionResult{}
+		if acct == nil {
+			res.Message = "no account"
+			return res
+		}
+		if api, ok := acct.Client.(upstream.BillingAPI); ok && acct.ProfileID == "workbuddy" {
+			if remain, err := api.UserResource(acct.Auth); err != nil {
+				res.Message = err.Error()
+			} else {
+				acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
+				res.OK = true
+				res.Message = "积分余额 " + strconv.FormatInt(remain, 10)
+				res.Credits = remain
+			}
+			return res
+		}
+		if ok, verr := h.cfg.Pool.Validate(acct); verr != nil {
+			res.Message = verr.Error()
+		} else if !ok {
+			res.Message = "token invalid"
+		} else {
+			res.OK = true
+			res.Message = "ok"
+		}
+		return res
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": allOK(results), "message": summaryMsg("刷新状态", results), "results": results,
+		"ok": allOK(results), "message": msg, "results": results,
 	})
 }
 
-// adminCheckin 无签到；映射为全员保活（refresh）。
-func (h *Handler) adminCheckin(w http.ResponseWriter, r *http.Request) {
-	h.adminKeepalive(w, r)
-}
-
-// adminKeepalive 刷新即将过期的 token。
+// adminKeepalive 刷新即将过期的 token（Validate 内部临近过期自动 Refresh）。
 func (h *Handler) adminKeepalive(w http.ResponseWriter, r *http.Request) {
 	body, err := readUIDBody(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "bad json: " + err.Error()})
 		return
 	}
-	targets := h.pickTargets(body.UID)
-	results := make([]actionResult, 0, len(targets))
-	for _, uid := range targets {
-		acct := h.cfg.Pool.Get(uid)
-		res := actionResult{UID: uid}
+	results, msg := h.runForTargets(body, "保活", func(acct *pool.Account) actionResult {
+		res := actionResult{}
 		if acct == nil {
 			res.Message = "no account"
-			results = append(results, res)
-			continue
+			return res
 		}
-		// Validate 内部会在临近过期时自动 Refresh
-		ok, verr := h.cfg.Pool.Validate(acct)
-		if verr != nil {
+		if ok, verr := h.cfg.Pool.Validate(acct); verr != nil {
 			res.Message = verr.Error()
 		} else if !ok {
 			res.Message = "token invalid"
@@ -157,11 +176,40 @@ func (h *Handler) adminKeepalive(w http.ResponseWriter, r *http.Request) {
 			res.OK = true
 			res.Message = "refreshed/validated"
 		}
-		results = append(results, res)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": allOK(results), "message": summaryMsg("保活", results), "results": results,
+		return res
 	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": allOK(results), "message": msg, "results": results,
+	})
+}
+
+// adminEnable / adminDisable / adminClearCooldown：单账号动作（singleAction）。
+func (h *Handler) adminEnable(w http.ResponseWriter, r *http.Request) {
+	h.singleAction(w, r, "启用", func(acct *pool.Account) (bool, string) {
+		return h.cfg.Pool.Enable(acct.UID), "已启用 " + acct.UID
+	})
+}
+
+func (h *Handler) adminDisable(w http.ResponseWriter, r *http.Request) {
+	h.singleAction(w, r, "禁用", func(acct *pool.Account) (bool, string) {
+		reason := "manual disable"
+		if qr := r.URL.Query().Get("reason"); qr != "" {
+			reason = qr
+		}
+		h.cfg.Pool.Disable(acct.UID, reason)
+		return true, "已禁用 " + acct.UID
+	})
+}
+
+func (h *Handler) adminClearCooldown(w http.ResponseWriter, r *http.Request) {
+	h.singleAction(w, r, "清冷却", func(acct *pool.Account) (bool, string) {
+		return h.cfg.Pool.ClearCooldown(acct.UID), "已清冷却 " + acct.UID
+	})
+}
+
+// adminCheckin 无签到；映射为全员保活（refresh）。
+func (h *Handler) adminCheckin(w http.ResponseWriter, r *http.Request) {
+	h.adminKeepalive(w, r)
 }
 
 func (h *Handler) adminReload(w http.ResponseWriter, r *http.Request) {
@@ -179,46 +227,6 @@ func (h *Handler) adminReload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "message": "已重载 auths", "loaded": len(auths), "total": total, "healthy": healthy,
 	})
-}
-
-func (h *Handler) adminEnable(w http.ResponseWriter, r *http.Request) {
-	body, err := readUIDBody(r)
-	if err != nil || body.UID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "uid required"})
-		return
-	}
-	if !h.cfg.Pool.Enable(body.UID) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "account not found"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已启用 " + body.UID})
-}
-
-func (h *Handler) adminDisable(w http.ResponseWriter, r *http.Request) {
-	body, err := readUIDBody(r)
-	if err != nil || body.UID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "uid required"})
-		return
-	}
-	reason := body.Reason
-	if reason == "" {
-		reason = "manual disable"
-	}
-	h.cfg.Pool.Disable(body.UID, reason)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已禁用 " + body.UID})
-}
-
-func (h *Handler) adminClearCooldown(w http.ResponseWriter, r *http.Request) {
-	body, err := readUIDBody(r)
-	if err != nil || body.UID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "uid required"})
-		return
-	}
-	if !h.cfg.Pool.ClearCooldown(body.UID) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "account not found"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已清冷却 " + body.UID})
 }
 
 func (h *Handler) pickTargets(uid string) []string {
