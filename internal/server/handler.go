@@ -347,6 +347,12 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 		model = req.Model
 	}
 	profile := h.resolveProfile(explicit, model)
+	if profile == nil {
+		// 模型在路由表禁用集（C1）：明确拒绝，不回落缺省渠道
+		writeProtoError(proto, w, http.StatusNotFound, "model_not_found",
+			"model "+model+" is disabled")
+		return
+	}
 	// Profile 非文本块占位模板（§13.3）：parse 期用内置默认，此处统一替换
 	if ph := h.mediaPlaceholder(profile); ph != nil {
 		req.Messages = reapplyMediaPlaceholder(req.Messages, ph)

@@ -245,6 +245,11 @@ select option{ background:#fff; color:var(--text); }
           <button class="btn primary" id="btnSaveRoutes">保存路由表</button>
         </div>
       </div>
+      <div class="foot" style="margin-top:8px">
+        <span class="muted">已禁用（删除 = 禁用，请求返回 404）：</span>
+        <span id="blockedChips"></span>
+      </div>
+      </div>
     </div>
   </div>
 
@@ -609,13 +614,26 @@ $("oauthCopy").onclick = async () => {
 showApp();
 
 // ── 模型与路由（SPEC §29.4）────────────────────────────────────────────
+let pendingBlocked = new Set(); // 本次会话待保存的禁用模型
+
 async function loadRoutes(){
   const res = await api("/admin/api/routes");
   const routes = Array.isArray(res) ? res : ((res && res.routes) || []);
+  const blocked = (res && res.blocked) || [];
+  pendingBlocked = new Set(blocked);
   const body = $("routeBody");
   body.innerHTML = "";
   if (!routes.length) body.innerHTML = '<tr><td colspan="3" class="empty">路由表为空</td></tr>';
   routes.forEach(r => addRouteRow(r.model, r.family));
+  renderBlocked();
+}
+function renderBlocked(){
+  $("blockedChips").innerHTML = [...pendingBlocked].map(m =>
+    `<span class="chip">${escapeHtml(m)} <a href="javascript:void 0" data-unblock="${escapeAttr(m)}">恢复</a></span>`
+  ).join("") || `<span class="muted">无</span>`;
+  document.querySelectorAll('[data-unblock]').forEach(a => {
+    a.onclick = () => { pendingBlocked.delete(a.dataset.unblock); renderBlocked(); };
+  });
 }
 function routeFamOptions(sel){
   return ["codearts","workbuddy"].map(f => `<option value="${f}"${f===sel?" selected":""}>${f}</option>`).join("");
@@ -624,8 +642,11 @@ function addRouteRow(model, family){
   const tr = document.createElement("tr");
   tr.innerHTML = `<td><input class="route-model" value="${escapeAttr(model||"")}" placeholder="模型名"/></td>
     <td><select class="route-fam">${routeFamOptions(family||"codearts")}</select></td>
-    <td><button class="btn danger" data-act="route-del">删除</button></td>`;
-  tr.querySelector('[data-act="route-del"]').onclick = () => tr.remove();
+    <td><button class="btn danger" data-act="route-block">禁用</button></td>`;
+  tr.querySelector('[data-act="route-block"]').onclick = () => {
+    const m = tr.querySelector(".route-model").value.trim();
+    if (m) { pendingBlocked.add(m); tr.remove(); renderBlocked(); toast("已加入禁用（保存后生效）"); }
+  };
   $("routeBody").appendChild(tr);
 }
 async function saveRoutes(){
@@ -634,7 +655,7 @@ async function saveRoutes(){
     const family = tr.querySelector(".route-fam")?.value || "codearts";
     return model ? {model, family} : null;
   }).filter(Boolean);
-  const res = await api("/admin/api/routes", {method:"PUT", body: JSON.stringify({routes: rows})});
+  const res = await api("/admin/api/routes", {method:"PUT", body: JSON.stringify({routes: rows, blocked: [...pendingBlocked]})});
   if (res && res.ok){ toast("路由表已保存并生效"); loadRoutes(); }
   else { toast("保存失败: " + ((res && res.error) || "未知错误"), false); }
 }
@@ -643,8 +664,17 @@ async function loadFamilyModels(){
   const res = await api("/admin/api/models?family=" + encodeURIComponent(fam));
   const rows = (res && res.data) || [];
   $("famBody").innerHTML = rows.map(m =>
-    `<tr><td class="mono">${escapeHtml(m.id)}</td><td class="mono muted">${escapeHtml(String(m.context_length ?? ""))}</td><td class="mono muted">${escapeHtml(String(m.max_output_tokens ?? ""))}</td></tr>`
+    `<tr><td><button class="btn" data-add="${escapeAttr(m.id)}" title="追加到路由表">＋</button> <span class="mono">${escapeHtml(m.id)}</span></td><td class="mono muted">${escapeHtml(String(m.context_length ?? ""))}</td><td class="mono muted">${escapeHtml(String(m.max_output_tokens ?? ""))}</td></tr>`
   ).join("") || '<tr><td colspan="3" class="empty">暂无模型</td></tr>';
+  document.querySelectorAll('#famBody [data-add]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.add, fam = $("famSelect").value;
+      const exists = [...document.querySelectorAll("#routeBody .route-model")].some(i => i.value.trim() === id);
+      if (exists) { toast("已在路由表中", false); return; }
+      addRouteRow(id, fam);
+      toast("已加入路由表，保存后生效");
+    };
+  });
 }
 $("btnAddRoute").onclick = () => addRouteRow("", "codearts");
 $("btnSaveRoutes").onclick = saveRoutes;

@@ -45,7 +45,10 @@ func (h *Handler) resolveProfile(explicit, model string) *adapt.UpstreamProfile 
 		}
 		log.Printf("provider %q not registered, falling back to route table", explicit)
 	}
-	fam := h.routesTable().Resolve(model, "")
+	fam, allowed := h.routesTable().Resolve(model, "")
+	if !allowed {
+		return nil // 模型已禁用：调用方拒绝（C1）
+	}
 	if p := h.profiles().Get(fam); p != nil {
 		return p
 	}

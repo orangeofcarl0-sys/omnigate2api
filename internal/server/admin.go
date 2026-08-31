@@ -282,16 +282,20 @@ func summaryMsg(action string, results []actionResult) string {
 // 模型/路由管理（SPEC §29.4，Bearer 保护与既有 /admin/api/* 一致）
 // ---------------------------------------------------------------------------
 
-// adminRoutesGet 当前路由表（model/family 数组）。
+// adminRoutesGet 当前路由表与禁用集（C1）。
 func (h *Handler) adminRoutesGet(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.routesTable().Routes())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"routes":  h.routesTable().Routes(),
+		"blocked": h.routesTable().Blocked(),
+	})
 }
 
 // adminRoutesPut 全量替换路由表：校验（家族已注册/表内唯一）→ 落盘 → 热生效。
 // 校验失败 409 且保持当前表不变。
 func (h *Handler) adminRoutesPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Routes []adapt.ModelRoute `json:"routes"`
+		Routes  []adapt.ModelRoute `json:"routes"`
+		Blocked []string           `json:"blocked"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request: " + err.Error()})
@@ -310,6 +314,7 @@ func (h *Handler) adminRoutesPut(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	table.SetBlocked(body.Blocked) // 全量语义：空列表清空全部禁用
 	if h.cfg.RoutesFile != "" {
 		if err := adapt.SaveRouteTableFile(h.cfg.RoutesFile, table); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "save routes: " + err.Error()})
@@ -320,7 +325,10 @@ func (h *Handler) adminRoutesPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "routes": h.routesTable().Routes()})
+	h.routesTable().SetBlocked(body.Blocked)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "routes": h.routesTable().Routes(), "blocked": h.routesTable().Blocked(),
+	})
 }
 
 // adminModelsGet 模型全貌：?family=codearts|workbuddy → 该家族清单；

@@ -15,7 +15,7 @@ import (
 )
 
 // routeTestEnv 组装：华为 fake + 腾讯 fake + 双账号 + 双 Profile 注册表。
-func routeTestEnv(t *testing.T, tencentRec *[]string) *httptest.Server {
+func routeTestEnv(t *testing.T, tencentRec *[]string) (*httptest.Server, *Handler) {
 	t.Helper()
 	huawei := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
 	tencent := fakeTencentUpstream(t, tencentRec)
@@ -29,13 +29,13 @@ func routeTestEnv(t *testing.T, tencentRec *[]string) *httptest.Server {
 	if f, ok := h.routesTable().FamilyOf("kimi-k2.7"); !ok || f != "workbuddy" {
 		t.Fatalf("default route kimi-k2.7: %q %v", f, ok)
 	}
-	return srv
+	return srv, h
 }
 
 // 无 X-Provider + 表内腾讯模型 → 路由表决策落 workbuddy（dsh 场景）。
 func Test29RouteWithoutProvider(t *testing.T) {
 	var tencentRec []string
-	srv := routeTestEnv(t, &tencentRec)
+	srv, _ := routeTestEnv(t, &tencentRec)
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"kimi-k2.7","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -57,7 +57,7 @@ func Test29RouteWithoutProvider(t *testing.T) {
 // 显式 X-Provider 覆盖优先于路由表（表内 codearts 模型显式走 workbuddy）。
 func Test29ExplicitOverrideWins(t *testing.T) {
 	var tencentRec []string
-	srv := routeTestEnv(t, &tencentRec)
+	srv, _ := routeTestEnv(t, &tencentRec)
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"q"}]}`))
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -77,7 +77,7 @@ func Test29ExplicitOverrideWins(t *testing.T) {
 // /v1/models 无渠道 → 唯一视图：无重复 id，且带 family 字段。
 func Test29UnifiedModelView(t *testing.T) {
 	var tencentRec []string
-	srv := routeTestEnv(t, &tencentRec)
+	srv, _ := routeTestEnv(t, &tencentRec)
 	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
 	resp, err := http.DefaultClient.Do(req)
@@ -110,7 +110,7 @@ func Test29UnifiedModelView(t *testing.T) {
 // 管理 API：GET 表；PUT 非法（撞名）→ 409 且表不变；PUT 合法 → 热生效。
 func Test29AdminRoutesAPI(t *testing.T) {
 	var tencentRec []string
-	srv := routeTestEnv(t, &tencentRec)
+	srv, _ := routeTestEnv(t, &tencentRec)
 	put := func(body string) (int, map[string]any) {
 		req, _ := http.NewRequest("PUT", srv.URL+"/admin/api/routes", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer test-key")
@@ -129,6 +129,18 @@ func Test29AdminRoutesAPI(t *testing.T) {
 	code, out := put(`{"routes":[{"model":"glm-5.2","family":"codearts"},{"model":"glm-5.2","family":"workbuddy"}]}`)
 	if code != http.StatusConflict {
 		t.Fatalf("duplicate must 409, got %d %v", code, out)
+	}
+	// 禁用后 blocked:[] 保存 = 清空（全量语义）
+	code, out = put(`{"routes":[{"model":"hy3","family":"workbuddy"},{"model":"glm-5.2","family":"codearts"}],"blocked":["hy3"]}`)
+	if code != http.StatusOK || out["blocked"] == nil || len(out["blocked"].([]any)) != 1 {
+		t.Fatalf("block must persist: %d %v", code, out)
+	}
+	code, out = put(`{"routes":[{"model":"hy3","family":"workbuddy"},{"model":"glm-5.2","family":"codearts"}],"blocked":[]}`)
+	if code != http.StatusOK {
+		t.Fatalf("clear blocked: %d %v", code, out)
+	}
+	if bl, ok := out["blocked"].([]any); !ok || len(bl) != 0 {
+		t.Fatalf("blocked must be cleared by empty list: %v", out["blocked"])
 	}
 	// 合法替换（hy3→workbuddy 显式）→ 200 且热生效
 	code, out = put(`{"routes":[{"model":"hy3","family":"workbuddy"},{"model":"glm-5.2","family":"codearts"}]}`)
@@ -199,5 +211,43 @@ func Test29AdminCreditsTencentBalance(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(raw), `"credits":888`) || !strings.Contains(string(raw), "积分余额") {
 		t.Fatalf("tencent balance must surface: %s", raw)
+	}
+}
+
+// C1：禁用模型请求 → 404 model_not_found（不回落缺省渠道）。
+func Test29BlockedModelRejected(t *testing.T) {
+	var tencentRec []string
+	srv, h := routeTestEnv(t, &tencentRec)
+	h.routesTable().Block("kimi-k2.7")
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"kimi-k2.7","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(raw), "disabled") {
+		t.Fatalf("blocked model must 404: %d %s", resp.StatusCode, raw)
+	}
+	if len(tencentRec) != 0 {
+		t.Fatalf("blocked model must not reach upstream: %d recs", len(tencentRec))
+	}
+	// 恢复后可调用
+	h.routesTable().Unblock("kimi-k2.7")
+	req2, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"kimi-k2.7","messages":[{"role":"user","content":"hi"}]}`))
+	req2.Header.Set("Authorization", "Bearer test-key")
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("unblocked must work: %d", resp2.StatusCode)
 	}
 }
