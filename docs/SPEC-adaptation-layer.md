@@ -1010,6 +1010,7 @@ sequenceDiagram
 | 同名模型收敛 | **撞名 fail-fast**：同一裸模型名只能注册给一个渠道（家族）；重复注册在加载/保存时直接报错，绝不静默回退。未持有裸名的一方由部署者给独立注册名（如 `glm-5.2-tcb`），该命名是一次性部署动作，用户日常不接触 |
 | 默认路由 | 内置路由表 = 两家族清单合并 + 撞名组裁决给 codearts（保持现状缺省语义）：glm-5.2/glm-5.1/deepseek-v4-flash/glm-5.3-flash → codearts；腾讯固有模型（kimi-*/hy*/glm-5.3/glm-5v-turbo/minimax-m3*/deepseek-v4-pro/auto）→ workbuddy；未声明模型 → 缺省 codearts |
 | 显式覆盖 | `X-Provider`/`body.provider` 保留为最高优先级的显式覆盖（现有请求语义不变，向后兼容） |
+| 删除 = 禁用 | 路由表条目可**禁用**（blocked 集）：禁用模型请求 → `404 model_not_found`，不回落缺省渠道，显式渠道亦不可绕过；`blocked` 随 PUT 全量保存（空列表清空全部禁用），`data/routes.json` 结构 `{routes, blocked}`（兼容旧顶层数组格式） |
 | 管理入口 | WebUI 新增「模型与路由」区块：查看两渠道模型全貌、路由表增删改（PUT 全量替换、校验后热生效 + 落盘 `data/routes.json`） |
 | 持久化 | `data/routes.json`（WebUI 保存）；启动加载（缺失 → 内置默认表；文件非法 → fail-fast 拒绝启动，与 Profiles 目录同哲学） |
 | 管道不变 | 路由只决定 Profile/家族；折叠/roles、指纹/熔断（按 Profile 隔离）、账号池（按家族）全部复用，零改动 |
@@ -1034,7 +1035,8 @@ sequenceDiagram
 | 端点 | 语义 |
 |---|---|
 | `GET /admin/api/routes` | 当前路由表（model/family 数组） |
-| `PUT /admin/api/routes` | 全量替换：校验（模型名非空且唯一、家族已注册、非空表）→ 落盘 + 热生效；非法 → 409 + 原因 |
+| `PUT /admin/api/routes` | 全量替换：校验（模型名非空且唯一、家族已注册、非空表）→ 落盘 + 热生效；非法 → 409 + 原因。body 含 `blocked[]`（全量语义：空列表清空禁用） |
+| `GET /admin/api/routes` | 返回 `{routes, blocked}`（禁用集供面板「已禁用」chips 展示与恢复） |
 | `GET /admin/api/models` | 家族全貌（family 过滤可选；每模型含 context/max_output/owned_by） |
 
 ### 29.5 交付件与验收
