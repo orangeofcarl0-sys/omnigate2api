@@ -201,6 +201,7 @@ func (p *Pool) List() []map[string]any {
 			"uid":               a.UID,
 			"nickname":          a.UserName,
 			"user_name":         a.UserName,
+			"family":            a.ProfileID, // 渠道标识（codearts/workbuddy；账号不跨渠道互通）
 			"default_model":     a.DefaultModel,
 			"credits":           a.quota.Remain,
 			"quota_total":       a.quota.Total,

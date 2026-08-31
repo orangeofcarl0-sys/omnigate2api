@@ -137,6 +137,9 @@ select option{ background:#fff; color:var(--text); }
 .route-model{ padding:5px 9px; font-family:var(--font-mono); font-size:12.5px; max-width:230px; }
 .route-fam{ padding:5px 9px; font-size:12.5px; }
 .route-model:focus, .route-fam:focus{ box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 16%,transparent); }
+/* 渠道徽章：账号归属标识（codearts 蓝 / workbuddy 绿） */
+.badge[data-fam="workbuddy"]{background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:color-mix(in srgb,var(--ok) 42%,transparent);color:color-mix(in srgb,var(--ok) 84%,#0F172A)}
+.badge[data-fam="codearts"]{background:color-mix(in srgb,var(--info) 12%,transparent);border-color:color-mix(in srgb,var(--info) 40%,transparent);color:color-mix(in srgb,var(--info) 82%,#0F172A)}
 </style>
 
 
@@ -369,7 +372,8 @@ function render(data){
       const until = a.cooling ? fmtTime(a.until) : "—";
       return `<tr>
         <td>
-          <div><strong>${escapeHtml(a.nickname || "未命名")}</strong></div>
+          <div><strong>${escapeHtml(a.nickname || "未命名")}</strong>
+            <span class="badge" data-fam="${escapeAttr(a.family||"")}">${a.family==="workbuddy"?"workbuddy":"codearts"}</span></div>
           <div class="mono muted" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div>
         </td>
         <td><strong>${Number(a.credits||0).toLocaleString()}</strong>${
