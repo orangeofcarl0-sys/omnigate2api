@@ -187,6 +187,34 @@ input{font:inherit}
   </div>
 
   <div class="card">
+  <div class="card" id="mrouteCard">
+    <div class="card-h"><h2>模型与路由</h2><span class="muted">裸模型名 → 渠道（SPEC §29）</span></div>
+    <div class="card-b">
+      <div class="chips">
+        <select id="famSelect" class="btn" style="padding:4px 8px">
+          <option value="codearts">codearts（华为）</option>
+          <option value="workbuddy">workbuddy（腾讯）</option>
+        </select>
+        <button class="btn" id="btnFamLoad">查看渠道模型</button>
+        <span class="muted" style="margin-left:auto">模型名全局唯一 · 撞名 fail-fast · X-Provider 仍可显式覆盖</span>
+      </div>
+      <table class="table">
+        <thead><tr><th>模型</th><th>context</th><th>max_output</th></tr></thead>
+        <tbody id="famBody"></tbody>
+      </table>
+      <div class="foot" style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between">
+        <table class="table" style="margin:0;flex:1">
+          <thead><tr><th style="width:55%">模型名（裸名）</th><th>渠道</th><th></th></tr></thead>
+          <tbody id="routeBody"></tbody>
+        </table>
+        <div style="display:flex;gap:8px;flex-direction:column">
+          <button class="btn" id="btnAddRoute">＋ 追加</button>
+          <button class="btn primary" id="btnSaveRoutes">保存路由表</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
     <div class="card-h"><h2>调度</h2></div>
     <div class="card-b">
       <div class="chips" id="schedChips"></div>
@@ -536,6 +564,51 @@ $("oauthCopy").onclick = async () => {
 // 经由 hub 反代时 hub 会自动注入服务 api_key，直接尝试加载；
 // 失败（如直连且未带 key）再回退到登录表单。
 showApp();
+
+// ── 模型与路由（SPEC §29.4）────────────────────────────────────────────
+async function loadRoutes(){
+  const res = await api("/admin/api/routes");
+  const routes = Array.isArray(res) ? res : ((res && res.routes) || []);
+  const body = $("routeBody");
+  body.innerHTML = "";
+  if (!routes.length) body.innerHTML = '<tr><td colspan="3" class="empty">路由表为空</td></tr>';
+  routes.forEach(r => addRouteRow(r.model, r.family));
+}
+function routeFamOptions(sel){
+  return ["codearts","workbuddy"].map(f => `<option value="${f}"${f===sel?" selected":""}>${f}</option>`).join("");
+}
+function addRouteRow(model, family){
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td><input class="route-model" value="${escapeAttr(model||"")}" placeholder="模型名"/></td>
+    <td><select class="route-fam">${routeFamOptions(family||"codearts")}</select></td>
+    <td><button class="btn danger" data-act="route-del">删除</button></td>`;
+  tr.querySelector('[data-act="route-del"]').onclick = () => tr.remove();
+  $("routeBody").appendChild(tr);
+}
+async function saveRoutes(){
+  const rows = [...document.querySelectorAll("#routeBody tr")].map(tr => {
+    const model = (tr.querySelector(".route-model")?.value || "").trim();
+    const family = tr.querySelector(".route-fam")?.value || "codearts";
+    return model ? {model, family} : null;
+  }).filter(Boolean);
+  const res = await api("/admin/api/routes", {method:"PUT", body: JSON.stringify({routes: rows})});
+  if (res && res.ok){ toast("路由表已保存并生效"); loadRoutes(); }
+  else { toast("保存失败: " + ((res && res.error) || "未知错误"), false); }
+}
+async function loadFamilyModels(){
+  const fam = $("famSelect").value;
+  const res = await api("/admin/api/models?family=" + encodeURIComponent(fam));
+  const rows = (res && res.data) || [];
+  $("famBody").innerHTML = rows.map(m =>
+    `<tr><td class="mono">${escapeHtml(m.id)}</td><td class="mono muted">${escapeHtml(String(m.context_length ?? ""))}</td><td class="mono muted">${escapeHtml(String(m.max_output_tokens ?? ""))}</td></tr>`
+  ).join("") || '<tr><td colspan="3" class="empty">暂无模型</td></tr>';
+}
+$("btnAddRoute").onclick = () => addRouteRow("", "codearts");
+$("btnSaveRoutes").onclick = saveRoutes;
+$("btnFamLoad").onclick = loadFamilyModels;
+loadRoutes();
+loadFamilyModels();
+
 </script>
 </body>
 </html>

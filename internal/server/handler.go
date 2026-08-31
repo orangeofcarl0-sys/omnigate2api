@@ -21,29 +21,12 @@ import (
 	"omnigate2api/internal/upstream"
 )
 
-// profileFor 请求所属 Profile：头部 X-Provider 或 body.provider，缺省 codearts。
+// profiles 请求所属 Profile 注册表：nil 时使用内置 codearts。
 func (h *Handler) profiles() *adapt.Registry {
 	if h.cfg.Profiles != nil {
 		return h.cfg.Profiles
 	}
 	return adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
-}
-
-// profileFor 请求所属 Profile：头部 X-Provider 或 body.provider，缺省 codearts。
-func (h *Handler) profileFor(r *http.Request, req *chatRequest) *adapt.UpstreamProfile {
-	id := r.Header.Get("X-Provider")
-	if id == "" {
-		id = req.Provider
-	}
-	if id == "" {
-		id = "codearts"
-	}
-	p := h.profiles().Get(id)
-	if p == nil {
-		log.Printf("profile %q not registered, falling back to codearts", id)
-		p = &adapt.Codearts
-	}
-	return p
 }
 
 // indexFor 请求所属 Profile 的会话指纹表（惰性创建，隔离于其它上游）。
@@ -182,6 +165,9 @@ type Config struct {
 	ToolchainOverride string
 	// Profiles 上游注册表（SPEC §4.4）；nil 时使用内置 codearts。
 	Profiles *adapt.Registry
+	// Routes 裸模型名路由表（SPEC §29，nil → 内置默认表）；RoutesFile 供 WebUI 保存。
+	Routes     *adapt.RouteTable
+	RoutesFile string
 }
 
 const maxBodyBytes = 8 << 20
@@ -203,6 +189,8 @@ type Handler struct {
 	// 守卫熔断器（SPEC §5.3）：按 Profile 隔离。
 	breakMu  sync.Mutex
 	breakers map[string]*adapt.CircuitBreaker
+	// 裸模型名路由表（SPEC §29，构造时固化；热更新走 Replace 线程安全）。
+	routes *adapt.RouteTable
 }
 
 // NewHandler 构建 handler。
@@ -229,6 +217,12 @@ func NewHandler(cfg Config) *Handler {
 		indexes:  map[string]*sessionIndex{},
 		breakers: map[string]*adapt.CircuitBreaker{},
 	}
+	// SPEC §29：路由表 = 外部文件加载（main 已 fail-fast）或内置默认表。
+	if cfg.Routes != nil {
+		h.routes = cfg.Routes
+	} else if rt, err := adapt.NewRouteTable(buildDefaultRoutes()); err == nil {
+		h.routes = rt
+	}
 	h.loadChats()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))
@@ -248,6 +242,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/keepalive", h.withAuth(h.adminKeepalive))
 	h.mux.HandleFunc("POST /admin/api/reload", h.withAuth(h.adminReload))
 	h.mux.HandleFunc("POST /admin/api/accounts/enable", h.withAuth(h.adminEnable))
+	h.mux.HandleFunc("GET /admin/api/routes", h.withAuth(h.adminRoutesGet))
+	h.mux.HandleFunc("PUT /admin/api/routes", h.withAuth(h.adminRoutesPut))
+	h.mux.HandleFunc("GET /admin/api/models", h.withAuth(h.adminModelsGet))
 	h.mux.HandleFunc("POST /admin/api/accounts/disable", h.withAuth(h.adminDisable))
 	h.mux.HandleFunc("POST /admin/api/accounts/clear-cooldown", h.withAuth(h.adminClearCooldown))
 	h.mux.HandleFunc("POST /admin/api/oauth/start", h.withAuth(h.adminOAuthStart))
@@ -336,7 +333,17 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 		req.ConversationID = r.Header.Get("X-Codearts-Chat-Id")
 	}
 
-	profile := h.profileFor(r, req)
+	// SPEC §29.2：显式渠道（X-Provider/body.provider）优先，否则按裸模型名
+	// 查路由表；未命中 → codearts 缺省。
+	explicit := r.Header.Get("X-Provider")
+	if explicit == "" {
+		explicit = req.Provider
+	}
+	model := h.cfg.DefaultModel
+	if req.Model != "" && req.Model != "auto" {
+		model = req.Model
+	}
+	profile := h.resolveProfile(explicit, model)
 	// Profile 非文本块占位模板（§13.3）：parse 期用内置默认，此处统一替换
 	if ph := h.mediaPlaceholder(profile); ph != nil {
 		req.Messages = reapplyMediaPlaceholder(req.Messages, ph)
@@ -348,10 +355,6 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 	}
 
 	toolsOn := toolsActive(req)
-	model := h.cfg.DefaultModel
-	if req.Model != "" && req.Model != "auto" {
-		model = req.Model
-	}
 
 	// 工具层（SPEC §14）：默认全关；project 有损 ⇒ forceNative（与增量互斥）。
 	// 指纹计算输入 = toolchain 变换后的最终消息数组（§15.1）。

@@ -1,6 +1,6 @@
 # OmniGate2API
 
-**v1.2.0** · MIT · [release notes](#特性总览) · 华为云 CodeArts Agent 的 OpenAI 兼容代理**增强版**
+**v1.3.0** · MIT · [release notes](#特性总览) · 华为云 CodeArts Agent 的 OpenAI 兼容代理**增强版**
 
 ![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/orangeofcarl0-sys/omnigate2api?label=latest%20tag)
 
@@ -79,6 +79,13 @@
   `auths/workbuddy-{uid}.json`（独立命名空间，与华为并存）。
 - 腾讯侧 sanitize 默认开启（上游内容审核对 client 合规模板误伤是实证刚需）；
   会话默认全量（指纹增量待真链路实测后评估）；签到/积分本期不做。
+- **裸模型名路由（v1.3）**：客户端只发模型名，渠道完全由网关侧路由表决定
+  （默认表 = 两渠道清单合并，撞名组裁决给 codearts，撞名 fail-fast 拒绝重复注册）；
+  `X-Provider` 保留为显式覆盖。`/v1/models` 无渠道时返回唯一视图（每模型名一条，
+  附 `family` 字段）。
+- **WebUI 管理入口（v1.3）**：控制台新增「模型与路由」——查看各渠道模型全貌、
+  路由表增删改（保存即热生效并落盘 `data/routes.json`）；账户管理（启用/禁用/
+  清冷却/保活/授权登录）沿用。
 
 ### 工具层（v1.1，默认全关，显式 opt-in）
 - `OMNIGATE_TOOLCHAIN=none|project|sanitize|project,sanitize` 或 Profile `toolchain.*` 开启：
@@ -168,6 +175,7 @@ docker compose up -d --build
 | `OMNIGATE_PROFILES_DIR` | 外部 Profile YAML 目录（多上游声明化接入） | 空 |
 | `OMNIGATE_UPSTREAM_BASE` | 覆盖华为引擎地址（测试/实验，一般不设） | 内置 |
 | `OMNIGATE_TENCENT_BASE` | 覆盖腾讯 copilot 地址（测试/实验） | copilot.tencent.com |
+| `OMNIGATE_ROUTES_FILE` | 裸模型名路由表（WebUI 保存；缺省 `data/routes.json`） | 自动 |
 
 ## 目录结构（增补要点）
 

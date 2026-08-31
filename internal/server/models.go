@@ -54,16 +54,21 @@ const (
 	modelsFetchFailCooldown = 5 * time.Minute
 )
 
-// models 返回模型列表：按请求 X-Provider 分家族（§28.4 决策 B），
-// 优先动态（缓存 1h），失败回退静态表。
+// models 返回模型列表（SPEC §29.3）：X-Provider 显式家族 → 该家族全量清单；
+// 无渠道标记 → 唯一视图（按路由表，模型名全局唯一 + family 字段）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
-	family := "codearts"
-	if id := r.Header.Get("X-Provider"); id == "workbuddy" {
-		family = "workbuddy"
+	if fam := r.Header.Get("X-Provider"); fam != "" {
+		if h.profiles().Get(fam) != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"object": "list",
+				"data":   h.modelListFor(fam),
+			})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelListFor(family),
+		"data":   h.unifiedModelList(),
 	})
 }
 

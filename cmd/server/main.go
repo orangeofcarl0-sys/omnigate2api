@@ -40,6 +40,11 @@ func main() {
 	if cfg.StateFile != "" {
 		_ = os.MkdirAll(filepath.Dir(cfg.StateFile), 0o700)
 	}
+	// 路由表文件（SPEC §29.4）：OMNIGATE_ROUTES_FILE 或 data/routes.json
+	routesFile := os.Getenv("OMNIGATE_ROUTES_FILE")
+	if routesFile == "" && cfg.StateFile != "" {
+		routesFile = filepath.Join(filepath.Dir(cfg.StateFile), "routes.json")
+	}
 	p, err := pool.New(auths, cfg.ToPoolConfig(), cfg.StateFile)
 	if err != nil {
 		log.Fatalf("build pool: %v", err)
@@ -78,6 +83,8 @@ func main() {
 		DebugPromptDir:    os.Getenv("OMNIGATE_DEBUG_PROMPTS"),
 		SessionMode:       os.Getenv("OMNIGATE_SESSION_MODE"),
 		ToolchainOverride: os.Getenv("OMNIGATE_TOOLCHAIN"),
+		RoutesFile:        routesFile,
+		Routes:            loadRouteTable(routesFile),
 		Profiles:          buildProfiles(),
 		Listen:            cfg.Listen,
 		OAuthCallbackHost: cfg.OAuthCallbackHost,
@@ -104,6 +111,16 @@ func main() {
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// loadRouteTable 加载裸模型名路由表（SPEC §29）：文件缺失 → 内置默认表
+// （NewHandler 兜底）；文件非法 → fail-fast 拒绝启动。
+func loadRouteTable(file string) *adapt.RouteTable {
+	rt, err := adapt.LoadRouteTableFile(file)
+	if err != nil {
+		log.Fatalf("routes: %v", err)
+	}
+	return rt
 }
 
 // buildProfiles 组装 Profile 注册表：内置 codearts + workbuddy + OMNIGATE_PROFILES_DIR 外部覆盖。

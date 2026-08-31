@@ -999,9 +999,55 @@ sequenceDiagram
 
 ---
 
-*文档状态：Draft v0.3.1。v0.1 阶段 1→3、v0.2 阶段 4→7、v0.3 阶段 8a→8d
-已实施并审计通过；阶段 8e（§28.4 六缺口修复：原生 tool_calls 拼装 / refresh
-envelope / 官方 CLI 头保真+区域 / 错误语义迁移 / family 动态模型 / tool_choice
-归一化）已实施并审计通过（全量测试 + race + vet/gofmt 干净）；阶段 8f 真链路
-校准完成（§28.6：腾讯账号实测——登录设备流/三协议/原生工具调用/模型清单/
-会话无状态均验证通过；429 形态与 refresh 自然到期轮换留待观察）。
+## 29. 裸模型名路由与 WebUI 管理入口（v0.4 设计）
+
+### 29.1 设计决策（拍板结论）
+
+| 决策点 | 结论 |
+|---|---|
+| 渠道与模型名的关系 | **彻底解耦**：模型名保持裸字符串（客户端唯一认知对象），渠道选择完全后移到网关侧路由表；客户端零感知、零长后缀 |
+| 同名模型收敛 | **撞名 fail-fast**：同一裸模型名只能注册给一个渠道（家族）；重复注册在加载/保存时直接报错，绝不静默回退。未持有裸名的一方由部署者给独立注册名（如 `glm-5.2-tcb`），该命名是一次性部署动作，用户日常不接触 |
+| 默认路由 | 内置路由表 = 两家族清单合并 + 撞名组裁决给 codearts（保持现状缺省语义）：glm-5.2/glm-5.1/deepseek-v4-flash/glm-5.3-flash → codearts；腾讯固有模型（kimi-*/hy*/glm-5.3/glm-5v-turbo/minimax-m3*/deepseek-v4-pro/auto）→ workbuddy；未声明模型 → 缺省 codearts |
+| 显式覆盖 | `X-Provider`/`body.provider` 保留为最高优先级的显式覆盖（现有请求语义不变，向后兼容） |
+| 管理入口 | WebUI 新增「模型与路由」区块：查看两渠道模型全貌、路由表增删改（PUT 全量替换、校验后热生效 + 落盘 `data/routes.json`） |
+| 持久化 | `data/routes.json`（WebUI 保存）；启动加载（缺失 → 内置默认表；文件非法 → fail-fast 拒绝启动，与 Profiles 目录同哲学） |
+| 管道不变 | 路由只决定 Profile/家族；折叠/roles、指纹/熔断（按 Profile 隔离）、账号池（按家族）全部复用，零改动 |
+
+### 29.2 调用路径（路由后）
+
+```
+客户端  model="deepseek-v4-flash"（无渠道信息）
+  → serveCompletion: explicit = X-Provider / body.provider（非空 → 直接该 Profile）
+  → 路由表解析：命中 → 对应家族 Profile；未命中 → codearts Profile
+  → 既有管线（会话路由/折叠/工具链/账号池/出站）—— 全部不变
+```
+
+### 29.3 /v1/models 视图
+
+- 无渠道标记：**唯一视图**（按路由表，每模型名一条，附 `family` 字段）——客户端拿到的模型 ID 全局唯一；
+- 带 `X-Provider: codearts|workbuddy`：该家族全量清单（调试/管理视角，可能含未注册裸名）；
+- WebUI 管理页基于家族视图展示渠道全貌 + 路由表编辑。
+
+### 29.4 管理 API（Bearer 保护，与既有 /admin/api/* 一致）
+
+| 端点 | 语义 |
+|---|---|
+| `GET /admin/api/routes` | 当前路由表（model/family 数组） |
+| `PUT /admin/api/routes` | 全量替换：校验（模型名非空且唯一、家族已注册、非空表）→ 落盘 + 热生效；非法 → 409 + 原因 |
+| `GET /admin/api/models` | 家族全貌（family 过滤可选；每模型含 context/max_output/owned_by） |
+
+### 29.5 交付件与验收
+
+- adapt 层：`RouteTable`（内置默认表、`Resolve(model, explicit)`、加载/校验/落盘）；
+- server：serveCompletion 路由接入、/v1/models 唯一视图、admin routes/models API；
+- WebUI：「模型与路由」面板区块（表格 + 编辑 + 保存）；
+- 测试：默认表与现状行为一致性（无 provider 请求零回归）、撞名 fail-fast、X-Provider 覆盖优先级、PUT 校验/持久化/热生效、面板 API 鉴权；
+- v0.4 版本面随实现提交同步。
+
+### 29.6 触发回退
+
+路由表解析失败（文件损坏）→ 拒绝启动（fail-fast）；运行期 PUT 校验失败 → 409 且保持当前表不变；X-Provider 覆盖遇到未注册家族 → 回退 codearts（既有行为）。
+
+---
+
+*文档状态：Draft v0.4。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口为 v0.4 设计（阶段 R1-R4）。*

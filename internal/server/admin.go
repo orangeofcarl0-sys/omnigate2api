@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"omnigate2api/internal/adapt"
 	"omnigate2api/internal/auth"
 )
 
@@ -254,4 +255,64 @@ func summaryMsg(action string, results []actionResult) string {
 		return action + "完成: " + strconv.Itoa(ok) + " 成功"
 	}
 	return action + "完成: " + strconv.Itoa(ok) + " 成功 / " + strconv.Itoa(fail) + " 失败"
+}
+
+// ---------------------------------------------------------------------------
+// 模型/路由管理（SPEC §29.4，Bearer 保护与既有 /admin/api/* 一致）
+// ---------------------------------------------------------------------------
+
+// adminRoutesGet 当前路由表（model/family 数组）。
+func (h *Handler) adminRoutesGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.routesTable().Routes())
+}
+
+// adminRoutesPut 全量替换路由表：校验（家族已注册/表内唯一）→ 落盘 → 热生效。
+// 校验失败 409 且保持当前表不变。
+func (h *Handler) adminRoutesPut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Routes []adapt.ModelRoute `json:"routes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request: " + err.Error()})
+		return
+	}
+	table, err := adapt.NewRouteTable(body.Routes)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(body.Routes) > 0 {
+		for _, rt := range body.Routes {
+			if h.profiles().Get(rt.Family) == nil {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "unknown family " + rt.Family})
+				return
+			}
+		}
+	}
+	if h.cfg.RoutesFile != "" {
+		if err := adapt.SaveRouteTableFile(h.cfg.RoutesFile, table); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "save routes: " + err.Error()})
+			return
+		}
+	}
+	if err := h.routesTable().Replace(body.Routes); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "routes": h.routesTable().Routes()})
+}
+
+// adminModelsGet 模型全貌：?family=codearts|workbuddy → 该家族清单；
+// 缺省 → 唯一视图（与 /v1/models 无渠道一致）。
+func (h *Handler) adminModelsGet(w http.ResponseWriter, r *http.Request) {
+	fam := r.URL.Query().Get("family")
+	if fam != "" {
+		if h.profiles().Get(fam) == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown family"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"family": fam, "data": h.modelListFor(fam)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": h.unifiedModelList()})
 }
