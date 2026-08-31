@@ -107,6 +107,33 @@ input{font:inherit}
   *{animation:none!important;transition:none!important}
   .btn:hover{transform:none}
 }
+
+/* ── 统一表单控件：文本框 / 下拉（面板登录、路由编辑器共用） ───────────── */
+input[type="text"], input[type="password"], select, textarea{
+  font:inherit; color:var(--text); background:rgba(255,255,255,.82);
+  border:1px solid var(--line); border-radius:var(--radius-sm);
+  padding:9px 12px; outline:none;
+  transition:border-color .15s, box-shadow .15s, background .15s, transform .12s;
+}
+input[type="text"]:hover, input[type="password"]:hover, select:hover{
+  border-color:color-mix(in srgb,var(--accent) 42%,var(--line));
+}
+input[type="text"]:focus, input[type="password"]:focus, select:focus{
+  border-color:var(--accent); background:#fff;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent);
+}
+input::placeholder{ color:color-mix(in srgb,var(--muted) 58%,transparent); }
+select{
+  cursor:pointer; appearance:none; -webkit-appearance:none; padding-right:30px;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2355657E' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+  background-repeat:no-repeat; background-position:right 10px center; background-size:13px;
+}
+select:focus{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%230284C7' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>"); }
+select option{ background:#fff; color:var(--text); }
+/* 行内紧凑控件（模型路由编辑器表格） */
+.route-model{ padding:5px 9px; font-family:var(--font-mono); font-size:12.5px; max-width:230px; }
+.route-fam{ padding:5px 9px; font-size:12.5px; }
+.route-model:focus, .route-fam:focus{ box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 16%,transparent); }
 </style>
 
 
@@ -191,7 +218,7 @@ input{font:inherit}
     <div class="card-h"><h2>模型与路由</h2><span class="muted">裸模型名 → 渠道（SPEC §29）</span></div>
     <div class="card-b">
       <div class="chips">
-        <select id="famSelect" class="btn" style="padding:4px 8px">
+        <select id="famSelect">
           <option value="codearts">codearts（华为）</option>
           <option value="workbuddy">workbuddy（腾讯）</option>
         </select>
