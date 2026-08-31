@@ -125,10 +125,13 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus{
 input::placeholder{ color:color-mix(in srgb,var(--muted) 58%,transparent); }
 select{
   cursor:pointer; appearance:none; -webkit-appearance:none; padding-right:30px;
-  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2355657E' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
-  background-repeat:no-repeat; background-position:right 10px center; background-size:13px;
+  /* 简写一次性声明（image/repeat/position/size），避免部分浏览器在
+     appearance:none 下只覆盖 background-image 时丢失 repeat 约束导致平铺 */
+  background:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2355657E' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 13px auto, rgba(255,255,255,.82);
 }
-select:focus{ background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%230284C7' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>"); }
+select:focus{
+  background:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%230284C7' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 13px auto, #fff;
+}
 select option{ background:#fff; color:var(--text); }
 /* 行内紧凑控件（模型路由编辑器表格） */
 .route-model{ padding:5px 9px; font-family:var(--font-mono); font-size:12.5px; max-width:230px; }
