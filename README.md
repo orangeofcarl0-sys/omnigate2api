@@ -8,7 +8,31 @@
 
 ## 特性总览
 
-### 通用协议适配层（架构卖点）
+### 通用协议适配层
+
+```mermaid
+flowchart TB
+    subgraph CLI["客户端"]
+        A["dsh / ZCode / Claude Code / Codex CLI"]
+    end
+    subgraph GW["omnigate2api 网关"]
+        B["入站归一化<br/>chat · anthropic · responses"]
+        C["工具层<br/>project / sanitize"]
+        D["会话路由<br/>指纹续接 · 守卫熔断"]
+        E["裸模型名路由表<br/>模型 → 渠道"]
+        F["账号池<br/>codearts · workbuddy 家族隔离"]
+        G["出站重建<br/>协议无关中间流 → 三 writer"]
+    end
+    subgraph UP["上游"]
+        H["华为云 CodeArts<br/>AK/SK 签名 + STS"]
+        I["腾讯 WorkBuddy/CodeBuddy<br/>Bearer + 官方 CLI 头保真"]
+    end
+    A -- 三协议任一 --> B --> C --> D --> E --> F --> G
+    E -- 路由 --> H
+    E -- 路由 --> I
+    G -- 协议重建 --> A
+```
+
 
 同类反代通常把上游适配逻辑散写在代码里；本项目把「非标准上游 → OpenAI 语义」做成**规范化、声明式、可复用**的三层管线（规范见 `docs/SPEC-adaptation-layer.md`）：
 
@@ -23,8 +47,8 @@
   code 正常下发后换取 STS 临时凭证（PKCE 全链路）。
 - 标配：多账号轮转、token 到期自动 refresh 续期、保活心跳、凭证目录 `auths/`。
 
-### 活动（福利）模型
-- 支持官方活动模型 `glm-5.3-flash` / `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813`：
+### 华为云活动（福利）模型
+- 支持华为云官方活动（福利）模型 `glm-5.3-flash` / `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813`：
   与普通模型共用 `POST /v1/chat/completions`，自动追加 `maas_type: benefit` 请求头，
   由后端路由到 MaaS 福利网关（缺失该头会得到 `InferHub.002002009.404 model not registered`）。
 - **每日自动领取**：复刻官方客户端登录时的领取调用
@@ -162,6 +186,22 @@ cp config.example.json config.json   # 注意：示例须为严格 JSON
 docker compose up -d --build
 ```
 
+### 腾讯渠道（workbuddy）登录与使用
+
+```bash
+# 登录（设备流）：打印授权链接 → 浏览器完成授权 → poll 取凭证落盘
+docker compose exec omnigate2api omnigate2api-login-tencent url
+docker compose exec omnigate2api omnigate2api-login-tencent poll
+docker compose restart omnigate2api          # 新账号加载进池
+```
+
+- 凭证落盘 `auths/workbuddy-{uid}.json`（与华为 `codearts-*` 命名空间并存，家族隔离）；
+- 使用：显式渠道用请求头 `X-Provider: workbuddy`；v1.3 起无需渠道头——直接发裸模型名，
+  网关按路由表自动分流（`kimi-k2.7` / `hy3` 等 → 腾讯，`glm-5.2` 等 → 华为），
+  路由表可在 WebUI「模型与路由」里增删改；
+- 腾讯侧功能：每日自动签到（幂等）+ 积分余额查询（`daily-checkin` /
+  `get-user-resource`），随调度器（北京时间）运行。
+
 ## 环境变量
 
 | 变量名 | 说明 | 默认值 |
@@ -211,6 +251,14 @@ go test -race ./...  # 竞争检测（需 CGO）
 - **密钥纪律**：`auths/`（凭证）、`data/`、`config.json`、`.env` 一律 git 忽略且不入库；凭证文件写盘权限 0600、目录 0700；日志与标准输出不含任何凭证值（oauth 回调仅记字节长度）。
 - **暴露面**：compose 默认绑定 `127.0.0.1:7866` 且 **`OMNIGATE_API_KEY` 默认为空 = 免密**（本地单用户：API Key 与面板密钥均无需填写，`change-me` 同样视为未配置）；局域网/远程共享请改回 `7866:7866` 并**必须**设置真实 `OMNIGATE_API_KEY`（此时 Bearer 与面板 localStorage 密码即防线）；公网部署请置于受控网络或前置反代鉴权。
 - **面板密钥**：浏览器输入的 API key 仅存于本机 localStorage（panel.html 内有明示），共享机器慎用。
+
+## 参考项目
+
+本项目的协议逆向与实现参照以下开源项目（MIT，版权归原作者所有）：
+
+- **HITZY2002/codearts2api** — 华为云 CodeArts 反向适配的上游项目（本仓库 fork 祖先）
+- **Sliverkiss/workbuddy2api** — 腾讯 WorkBuddy/CodeBuddy 上游协议实证（Go，端点/头/计费形态的直接参照）
+- **ShouZhuo0413/codebuddy2api** — 腾讯 CodeBuddy 协议适配（Python，参照其事件流与刷新形态）
 
 ## 免责声明
 
