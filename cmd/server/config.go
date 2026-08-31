@@ -81,9 +81,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	applyEnv(c)
-	if c.APIKey == "" {
-		c.APIKey = "dummy-key-for-codearts"
-	}
+	// 默认本地免密：空 key = 未配置鉴权（withAuth 跳过；开放方案须设 OMNIGATE_API_KEY）。
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}

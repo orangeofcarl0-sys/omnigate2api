@@ -147,3 +147,31 @@ func Test29AdminRoutesAPI(t *testing.T) {
 		t.Fatalf("routes not hot-updated: %s", raw)
 	}
 }
+
+// 默认本地免密：change-me / 空 APIKey 视为未配置鉴权（开放方案须设真 key）。
+func Test29NoAuthDefaultLocal(t *testing.T) {
+	huawei := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	srv, _, _, h := buildTestServer(t, huawei.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
+	h.cfg.APIKey = "change-me" // 默认值 = 未配置
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("change-me must disable auth (default local): %d", resp.StatusCode)
+	}
+	h.cfg.APIKey = "real-key"
+	req2, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("real key must require auth: %d", resp2.StatusCode)
+	}
+}

@@ -8,7 +8,8 @@ services:
       # 改为 "7866:7866" 即为开放方案，需配合 OMNIGATE_API_KEY 使用）。
       - "127.0.0.1:7866:7866"
     environment:
-      OMNIGATE_API_KEY: ${OMNIGATE_API_KEY:-change-me}
+      # 本地默认免密（空 = 关闭鉴权）；开放方案（7866:7866）必须设置真实 Key
+      OMNIGATE_API_KEY: ${OMNIGATE_API_KEY:-}
       TZ: Asia/Shanghai
       OMNIGATE_DEBUG_PROMPTS: /app/data/prompts
     volumes:

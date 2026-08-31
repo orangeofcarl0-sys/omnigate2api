@@ -205,7 +205,7 @@ go test -race ./...  # 竞争检测（需 CGO）
 ## 安全
 
 - **密钥纪律**：`auths/`（凭证）、`data/`、`config.json`、`.env` 一律 git 忽略且不入库；凭证文件写盘权限 0600、目录 0700；日志与标准输出不含任何凭证值（oauth 回调仅记字节长度）。
-- **暴露面**：compose 默认绑定 `127.0.0.1:7866`（仅本机可达，本地单用户无需管理密码）；局域网/远程共享请改回 `7866:7866`（开放方案），此时账号/状态类 API 的 `Authorization: Bearer` 与面板 localStorage 密钥就是防线；`/healthz` 公开。公网部署请置于受控网络或前置反代鉴权。
+- **暴露面**：compose 默认绑定 `127.0.0.1:7866` 且 **`OMNIGATE_API_KEY` 默认为空 = 免密**（本地单用户：API Key 与面板密钥均无需填写，`change-me` 同样视为未配置）；局域网/远程共享请改回 `7866:7866` 并**必须**设置真实 `OMNIGATE_API_KEY`（此时 Bearer 与面板 localStorage 密码即防线）；公网部署请置于受控网络或前置反代鉴权。
 - **面板密钥**：浏览器输入的 API key 仅存于本机 localStorage（panel.html 内有明示），共享机器慎用。
 
 ## 免责声明

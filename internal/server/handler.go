@@ -259,7 +259,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
+		// 默认本地：空/change-me 视为未配置鉴权（本机单用户免密，SPEC §29 配套
+		// 部署语义）；开放方案（7866:7866）必须设置真实 OMNIGATE_API_KEY。
+		apiKey := strings.TrimSpace(h.cfg.APIKey)
+		if apiKey != "" && !strings.EqualFold(apiKey, "change-me") {
 			authz := r.Header.Get("Authorization")
 			const prefix = "Bearer "
 			if len(authz) < len(prefix) || !strings.EqualFold(authz[:len(prefix)], prefix) {
@@ -267,7 +270,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			key := authz[len(prefix):]
-			if subtle.ConstantTimeCompare([]byte(key), []byte(h.cfg.APIKey)) != 1 {
+			if subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) != 1 {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
