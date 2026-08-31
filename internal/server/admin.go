@@ -155,14 +155,15 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminKeepalive 刷新即将过期的 token（Validate 内部临近过期自动 Refresh）。
+// adminKeepalive 手动触发 Validate：校验账号、token 临近过期自动续期、清除误禁用/冷却。
+// 与调度器自动保活（心跳）不同——这是按需的手动刷新入口。
 func (h *Handler) adminKeepalive(w http.ResponseWriter, r *http.Request) {
 	body, err := readUIDBody(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "bad json: " + err.Error()})
 		return
 	}
-	results, msg := h.runForTargets(body, "保活", func(acct *pool.Account) actionResult {
+	results, msg := h.runForTargets(body, "刷新状态", func(acct *pool.Account) actionResult {
 		res := actionResult{}
 		if acct == nil {
 			res.Message = "no account"
@@ -174,7 +175,7 @@ func (h *Handler) adminKeepalive(w http.ResponseWriter, r *http.Request) {
 			res.Message = "token invalid"
 		} else {
 			res.OK = true
-			res.Message = "refreshed/validated"
+			res.Message = "已校验（token 有效）"
 		}
 		return res
 	})
