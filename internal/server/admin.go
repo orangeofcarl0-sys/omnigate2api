@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"omnigate2api/internal/adapt"
 	"omnigate2api/internal/auth"
+	"omnigate2api/internal/pool"
 	"omnigate2api/internal/upstream"
 )
 
@@ -99,6 +101,7 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 				if remain, err := api.UserResource(acct.Auth); err != nil {
 					res.Message = err.Error()
 				} else {
+					acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
 					res.OK = true
 					res.Message = "积分余额 " + strconv.FormatInt(remain, 10)
 					res.Credits = remain

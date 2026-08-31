@@ -170,7 +170,7 @@ input{font:inherit}
         <thead>
           <tr>
             <th>账号</th>
-            <th>积分</th>
+            <th>余额 / 额度</th>
             <th>状态</th>
             <th>原因 / 冷却至</th>
             <th>操作</th>
@@ -339,7 +339,9 @@ function render(data){
           <div><strong>${escapeHtml(a.nickname || "未命名")}</strong></div>
           <div class="mono muted" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div>
         </td>
-        <td><strong>${Number(a.credits||0).toLocaleString()}</strong></td>
+        <td><strong>${Number(a.credits||0).toLocaleString()}</strong>${
+          a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()} · 用 ${Number(a.quota_used||0).toLocaleString()}</div>` : ""
+        }</td>
         <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}</td>
         <td><div class="muted">${escapeHtml(reason)}</div><div class="mono muted" style="font-size:11px">${escapeHtml(until)}</div></td>
         <td><div class="row-actions">

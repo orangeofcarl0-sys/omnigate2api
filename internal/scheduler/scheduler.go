@@ -119,6 +119,7 @@ func (s *Scheduler) claimBenefit(ctx context.Context) {
 			continue
 		}
 		if bal, err := s.cfg.Client.FetchTokensBalance(ctx, acct.Auth); err == nil {
+			acct.SetQuota(pool.AccountQuota{Remain: bal.TotalBalance, Total: bal.TotalQuota, Used: bal.UsedAmount, UpdatedAt: time.Now().Unix()})
 			log.Printf("benefit claim account=%s ok balance=%d/%d used=%d",
 				acct.Name, bal.TotalBalance, bal.TotalQuota, bal.UsedAmount)
 		} else {
@@ -149,6 +150,7 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 			continue
 		}
 		if remain, err := api.UserResource(acct.Auth); err == nil {
+			acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
 			log.Printf("tencent checkin account=%s ok remaining=%d", acct.Name, remain)
 		} else {
 			log.Printf("tencent checkin account=%s ok (balance query failed: %v)", acct.Name, err)

@@ -38,6 +38,7 @@ type Account struct {
 	ProfileID string
 
 	mu                sync.Mutex
+	quota             AccountQuota // 额度快照（华为活动 token 余额 / 腾讯积分）
 	lastValidated     time.Time
 	errCount          int
 	coolUntil         time.Time
@@ -48,6 +49,21 @@ type Account struct {
 	activeConcurrent  int       // 当前活跃并发请求数
 	maxConcurrent     int       // 最大允许并发数
 	keepaliveLastPing time.Time // 最后保活心跳时间
+}
+
+// AccountQuota 账号额度快照（面板展示用，非持久化状态）。
+type AccountQuota struct {
+	Total     int64 `json:"total,omitempty"` // 总额（华为活动额度；腾讯无）
+	Used      int64 `json:"used,omitempty"`  // 已用（华为）
+	Remain    int64 `json:"remain"`          // 剩余
+	UpdatedAt int64 `json:"updated_at"`      // 查询时间（Unix）
+}
+
+// SetQuota 写回额度快照（华为 benefit / 腾讯积分查询后落账）。
+func (a *Account) SetQuota(q AccountQuota) {
+	a.mu.Lock()
+	a.quota = q
+	a.mu.Unlock()
 }
 
 // Config 池配置。
@@ -186,7 +202,10 @@ func (p *Pool) List() []map[string]any {
 			"nickname":          a.UserName,
 			"user_name":         a.UserName,
 			"default_model":     a.DefaultModel,
-			"credits":           int64(0), // CodeArts 无积分字段；面板仍显示
+			"credits":           a.quota.Remain,
+			"quota_total":       a.quota.Total,
+			"quota_used":        a.quota.Used,
+			"quota_updated_at":  a.quota.UpdatedAt,
 			"disabled":          a.disabled,
 			"cooling":           cooling,
 			"until":             until,
