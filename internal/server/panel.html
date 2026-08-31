@@ -219,8 +219,9 @@ input{font:inherit}
     <div class="card-b">
       <div class="chips" id="schedChips"></div>
       <div class="foot">
-        <span>OpenAI base: <span class="mono" id="baseUrl"></span></span>
-        <span>API: <span class="mono">/v1/chat/completions</span></span>
+        <span>OpenAI base: <span class="mono" id="baseUrl"></span> <span class="muted">→ /v1/chat/completions</span></span>
+        <span>Anthropic base: <span class="mono" id="baseUrlAn"></span> <span class="muted">→ /v1/messages（不带 /v1）</span></span>
+        <span>Responses base: <span class="mono" id="baseUrlRsp"></span> <span class="muted">→ /v1/responses</span></span>
       </div>
     </div>
   </div>
@@ -324,6 +325,8 @@ function render(data){
   $("sCredits").textContent = Number(st.credits||0).toLocaleString();
   $("updatedAt").textContent = "更新于 " + new Date().toLocaleTimeString();
   $("baseUrl").textContent = location.origin + BASE + "/v1";
+  $("baseUrlAn").textContent = location.origin + BASE;
+  $("baseUrlRsp").textContent = location.origin + BASE + "/v1";
   $("subTitle").textContent = (data.service || SERVICE) + " · " + (data.region || "cn");
 
   const body = $("acctBody");
