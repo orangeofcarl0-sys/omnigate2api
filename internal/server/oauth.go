@@ -58,6 +58,12 @@ func (s *oauthStore) get(id string) *oauthSession {
 	return s.byID[id]
 }
 
+// tencentState 一条进行中的腾讯设备流（state → 过期时间）。
+type tencentState struct {
+	AuthURL string `json:"auth_url"`
+	Expires int64  `json:"expires"` // Unix 秒
+}
+
 // getBySecret 按 portal 回调携带的 secret 定位会话（code 通道用）。
 func (s *oauthStore) getBySecret(secret string) *oauthSession {
 	s.mu.Lock()

@@ -180,6 +180,9 @@ type Handler struct {
 
 	convMu sync.Mutex
 	chats  map[string]string // account → 最近 chat_id
+	// 腾讯设备流进行中状态（面板 OAuth 轮询用，state → 过期时间）
+	tencentMu     sync.Mutex
+	tencentStates map[string]tencentState
 	// 黏性路由：conversation_id → account_name（多轮续接锁定同一账号，减少上游并发会话占用）。
 	convAcct map[string]string
 
@@ -212,10 +215,11 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{
 		cfg: cfg, mux: http.NewServeMux(), oauth: newOAuthStore(),
-		chats:    map[string]string{},
-		convAcct: map[string]string{},
-		indexes:  map[string]*sessionIndex{},
-		breakers: map[string]*adapt.CircuitBreaker{},
+		chats:         map[string]string{},
+		convAcct:      map[string]string{},
+		tencentStates: map[string]tencentState{},
+		indexes:       map[string]*sessionIndex{},
+		breakers:      map[string]*adapt.CircuitBreaker{},
 	}
 	// SPEC §29：路由表 = 外部文件加载（main 已 fail-fast）或内置默认表。
 	if cfg.Routes != nil {
@@ -245,6 +249,8 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/routes", h.withAuth(h.adminRoutesGet))
 	h.mux.HandleFunc("PUT /admin/api/routes", h.withAuth(h.adminRoutesPut))
 	h.mux.HandleFunc("GET /admin/api/models", h.withAuth(h.adminModelsGet))
+	h.mux.HandleFunc("POST /admin/api/oauth/tencent/start", h.withAuth(h.adminTencentOAuthStart))
+	h.mux.HandleFunc("POST /admin/api/oauth/tencent/poll", h.withAuth(h.adminTencentOAuthPoll))
 	h.mux.HandleFunc("POST /admin/api/accounts/disable", h.withAuth(h.adminDisable))
 	h.mux.HandleFunc("POST /admin/api/accounts/clear-cooldown", h.withAuth(h.adminClearCooldown))
 	h.mux.HandleFunc("POST /admin/api/oauth/start", h.withAuth(h.adminOAuthStart))

@@ -274,6 +274,14 @@ select option{ background:#fff; color:var(--text); }
       <button class="btn ghost" id="oauthClose" type="button">关闭</button>
     </div>
     <div class="modal-b">
+      <div class="chips" style="margin-bottom:10px">
+        <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px">
+          <input type="radio" name="oauthChannel" value="huawei" checked/> 华为云
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:4px">
+          <input type="radio" name="oauthChannel" value="tencent"/> 腾讯 WorkBuddy
+        </label>
+      </div>
       <div class="steps">
         <div><b>1.</b> 点击下方按钮在浏览器打开授权页</div>
         <div><b>2.</b> 使用目标账号完成登录 / 授权</div>
@@ -490,10 +498,12 @@ $("acctBody").addEventListener("click", async (e) => {
   }
 });
 
-/* ---------- OAuth 授权登录 ---------- */
+/* ---------- OAuth 授权登录（华为 PKCE / 腾讯设备流） ---------- */
 let oauthSessionId = "";
+let oauthTencentState = "";
 let oauthTimer = null;
 let oauthBusy = false;
+function oauthChannel(){ return (document.querySelector('input[name="oauthChannel"]:checked')||{}).value || "huawei"; }
 
 function setOAuthStatus(html, ok){
   const el = $("oauthStatus");
@@ -506,6 +516,7 @@ function stopOAuthPoll(){
 function openOAuthModal(){
   $("oauthModal").classList.remove("hidden");
   oauthSessionId = "";
+  oauthTencentState = "";
   stopOAuthPoll();
   $("oauthUrl").textContent = "（发起后显示）";
   $("oauthCopy").disabled = true;
@@ -516,6 +527,7 @@ function openOAuthModal(){
 function closeOAuthModal(){
   stopOAuthPoll();
   oauthSessionId = "";
+  oauthTencentState = "";
   $("oauthModal").classList.add("hidden");
 }
 
@@ -525,9 +537,13 @@ async function startOAuth(){
   $("oauthStart").disabled = true;
   setOAuthStatus('<span class="spin"></span>正在向服务端申请授权链接…', null);
   try {
-    const data = await api("/admin/api/oauth/start", {method:"POST", body:"{}"});
+    const chan = oauthChannel();
+    const data = chan === "tencent"
+      ? await api("/admin/api/oauth/tencent/start", {method:"POST", body:"{}"})
+      : await api("/admin/api/oauth/start", {method:"POST", body:"{}"});
     if (!data.ok || !data.auth_url) throw new Error(data.message || "发起失败");
-    oauthSessionId = data.session_id;
+    oauthSessionId = data.session_id || "";
+    oauthTencentState = data.state || "";
     $("oauthUrl").textContent = data.auth_url;
     $("oauthCopy").disabled = false;
     $("oauthOpen").disabled = false;
@@ -549,15 +565,15 @@ async function startOAuth(){
 }
 
 async function pollOAuth(silent){
-  if (!oauthSessionId || oauthBusy) return;
+  const chan = oauthChannel();
+  if ((chan === "tencent" ? !oauthTencentState : !oauthSessionId) || oauthBusy) return;
   oauthBusy = true;
   if (!silent) setOAuthStatus('<span class="spin"></span>正在确认授权结果…', null);
   try {
-    const data = await api("/admin/api/oauth/poll", {
-      method:"POST",
-      body: JSON.stringify({session_id: oauthSessionId})
-    });
-    if (data.status === "pending") {
+    const data = chan === "tencent"
+      ? await api("/admin/api/oauth/tencent/poll", {method:"POST", body: JSON.stringify({state: oauthTencentState})})
+      : await api("/admin/api/oauth/poll", {method:"POST", body: JSON.stringify({session_id: oauthSessionId})});
+    if (data.waiting || data.status === "pending") {
       setOAuthStatus('<span class="spin"></span>' + (data.message || "等待浏览器完成授权…"), null);
       return;
     }
