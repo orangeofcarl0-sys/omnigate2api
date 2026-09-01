@@ -131,9 +131,13 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	}
 	if terminal {
 		log.Printf("chat stream account=%s upstream error frame: %s", acct.Name, lastUpErr)
-		if profile.IsRateLimit(lastUpErr) {
+		switch {
+		case isQuotaError(lastUpErr):
+			// 额度不足（华为 MaaS 福利 4291 分钟级限流）：软冷却 60s 不累计
+			h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, 60*time.Second, lastUpErr)
+		case profile.IsRateLimit(lastUpErr):
 			h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, 45*time.Second, lastUpErr)
-		} else {
+		default:
 			h.cfg.Pool.NoteError(acct.Name, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 		}
 		h.turnFailure(profile, matchedKey)

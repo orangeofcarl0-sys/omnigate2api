@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"time"
 
 	"omnigate2api/internal/pool"
 	"omnigate2api/internal/upstream"
@@ -15,6 +16,23 @@ import (
 // 或账号异常，不应计入错误计数或触发冷却。
 func isClientCancel(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// quotaMarkers 华为/上游额度耗尽关键词（InferHub.4291 insufficient quota 等）。
+var quotaMarkers = []string{
+	"insufficient quota", "quota exhausted", "quota exceeded", "no quota",
+	"out of quota", "额度不足", "配额不足", "额度用尽", "inferhub.4291", "4291",
+}
+
+// isQuotaError 判定额度耗尽类错误（华为常规引擎月度配额/福利额度用尽）。
+func isQuotaError(msg string) bool {
+	low := strings.ToLower(msg)
+	for _, m := range quotaMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleUpstreamError 按上游错误分类结算账号：401 禁用、429 软冷却、
@@ -52,6 +70,12 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, err error) {
 	case ae.Status >= 500:
 		h.cfg.Pool.Cooldown(acct.Name, pool.CoolErr, h.cfg.ErrCooldown, ae.Error())
 	default:
+		if isQuotaError(ae.Error()) {
+			// 额度不足（华为 MaaS 福利 InferHub.4291 多为分钟级限流，可自恢复）：
+			// 软冷却 60s 不累计；月度配额耗尽时持续失败由面板/日志暴露，换模型即可
+			h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, time.Minute, ae.Error())
+			return
+		}
 		h.cfg.Pool.NoteError(acct.Name, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 	}
 }
