@@ -31,7 +31,7 @@ func postProto(t *testing.T, srv *httptest.Server, path, body string) ([]byte, i
 
 // allProtoProfile 全协议开放的 Profile（覆盖内置 codearts 仅 chat 的门控）。
 func allProtoProfile() *adapt.Registry {
-	p := adapt.Codearts
+	p := *textOnlyTestProfile() // §31：协议归一化测试基底维持 text-only 语义
 	p.Inbound.Protocols = []string{"chat", "anthropic", "responses"}
 	return adapt.NewRegistry(&p)
 }

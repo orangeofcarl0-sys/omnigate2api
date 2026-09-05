@@ -25,10 +25,11 @@ func TestProfileValidate(t *testing.T) {
 		mut  func(*UpstreamProfile)
 	}{
 		{"id required", func(p *UpstreamProfile) { p.ID = "" }},
-		{"text-only needs folding", func(p *UpstreamProfile) { p.Message.Folding = nil }},
-		{"implicit needs trust", func(p *UpstreamProfile) { p.Session.Trust = "" }},
+		// §31 后 Codearts 内置为 roles：text-only/implicit 用例显式声明形态
+		{"text-only needs folding", func(p *UpstreamProfile) { p.Message.Model = "text-only"; p.Message.Folding = nil }},
+		{"implicit needs trust", func(p *UpstreamProfile) { p.Session.Kind = "implicit"; p.Session.Trust = "" }},
 		{"bad kind", func(p *UpstreamProfile) { p.Session.Kind = "magic" }},
-		{"bad trust", func(p *UpstreamProfile) { p.Session.Trust = "extreme" }},
+		{"bad trust", func(p *UpstreamProfile) { p.Session.Kind = "implicit"; p.Session.Trust = "extreme" }},
 		{"no rate hints", func(p *UpstreamProfile) { p.Limits.RateLimitHints = nil }},
 	}
 	for _, c := range cases {

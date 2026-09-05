@@ -205,7 +205,7 @@ func TestMediaPassthroughValidation(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatalf("roles+passthrough must be valid: %v", err)
 	}
-	c := adapt.Codearts
+	c := *textOnlyTestProfile()
 	c.Message.Media = "passthrough"
 	if err := c.Validate(); err == nil {
 		t.Fatal("text-only+passthrough must fail validation")

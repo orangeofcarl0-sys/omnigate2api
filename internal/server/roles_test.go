@@ -11,6 +11,23 @@ import (
 	"omnigate2api/internal/auth"
 )
 
+// textOnlyTestProfile SPEC §31 后 codearts 内置已 roles 化；折叠/指纹机制
+// 的测试以显式 text-only 变体承载（机制保留于 Profile 体系）。
+func textOnlyTestProfile() *adapt.UpstreamProfile {
+	p := adapt.Codearts
+	p.Message.Model = "text-only"
+	p.Message.Media = "placeholder"
+	p.Message.Folding = &adapt.FoldingConfig{Markers: map[string]string{
+		"system":    "[系统指令]",
+		"assistant": "[助手]",
+		"tool":      "[工具 {n} 返回结果]",
+		"call":      "[助手调用工具 {n} 参数 {json}]",
+	}}
+	p.Session.Kind = "implicit"
+	p.Session.Trust = "low"
+	return &p
+}
+
 // rolesProfile Message.Model="roles" 的 Profile（echo 风格）。
 func rolesProfile() *adapt.Registry {
 	p := adapt.Codearts
@@ -58,9 +75,44 @@ func TestBuildUpstreamMessagesRolesVsTextOnly(t *testing.T) {
 		t.Fatalf("roles must pass through 4 messages: %+v", rm)
 	}
 
-	textOnly := buildUpstreamMessages(req, &adapt.Codearts, false, false, nil)
+	textOnly := buildUpstreamMessages(req, textOnlyTestProfile(), false, false, nil)
 	if len(textOnly) != 1 || textOnly[0].Role != "user" {
 		t.Fatalf("text-only must fold to single user message: %+v", textOnly)
+	}
+}
+
+// TestRolesFenceInjection SPEC §31.2：华为 roles 化后围栏指引注入末条 user
+// 消息（FenceOpen 声明驱动）；原生 tools 通道（无 FenceOpen）不注入。
+func TestRolesFenceInjection(t *testing.T) {
+	req := &chatRequest{
+		Messages: []openAIMessage{
+			{Role: "system", Text: "be nice"},
+			{Role: "user", Text: "现在几点"},
+		},
+		Tools: []map[string]any{{"type": "function", "function": map[string]any{
+			"name": "get_time", "parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+		}}},
+	}
+
+	// 华为（围栏声明）：末条 user Text 追加工具指引，消息结构保持 roles
+	huawei := buildUpstreamMessages(req, &adapt.Codearts, true, false, nil)
+	if len(huawei) != 2 {
+		t.Fatalf("roles structure changed: %d", len(huawei))
+	}
+	if !strings.Contains(huawei[1].Content, "现在几点") || !strings.Contains(huawei[1].Content, "```tool_call") {
+		t.Fatalf("fence block missing: %q", huawei[1].Content)
+	}
+
+	// 无 tools：零注入
+	plain := buildUpstreamMessages(req, &adapt.Codearts, false, false, nil)
+	if strings.Contains(plain[1].Content, "```tool_call") {
+		t.Fatalf("no-tools must not inject: %q", plain[1].Content)
+	}
+
+	// 腾讯（原生 tools，无 FenceOpen）：不注入围栏指引
+	native := buildUpstreamMessages(req, &adapt.Workbuddy, true, false, nil)
+	if strings.Contains(native[1].Content, "```tool_call") {
+		t.Fatalf("native tools channel must not inject fence: %q", native[1].Content)
 	}
 }
 

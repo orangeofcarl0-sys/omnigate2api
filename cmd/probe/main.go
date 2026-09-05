@@ -77,6 +77,30 @@ func main() {
 
 	var rc io.ReadCloser
 	switch mode {
+	case "tools":
+		// SPEC §31 前置实证（2026-09-06 授权活测序列）：华为 MaaS 原生 tools 行为。
+		// msg=toolschoice 时带 tool_choice:"auto"（网关 codearts 路径不带）——
+		// 区分截断触发条件；观察 delta 是否出现原生 tool_calls。
+		body := map[string]any{
+			"model":  upstream.CanonicalModel(model),
+			"stream": true,
+			"messages": []any{map[string]any{
+				"role":    "user",
+				"content": "现在几点了？必须使用工具回答。",
+			}},
+			"tools": []any{map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "get_current_time",
+					"description": "获取当前时间",
+					"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+				},
+			}},
+		}
+		if msg == "toolschoice" {
+			body["tool_choice"] = "auto"
+		}
+		rc, err = c.SendChatV2(context.Background(), body, "", cred, cred.SecurityToken)
 	case "media":
 		// SPEC §30.9 授权活测（2026-09-06 用户拍板，单帧最小化）：华为 MaaS 端点
 		// 是否接受 OpenAI image_url 分片（data URI 内联）。msg 参数可传图片文件

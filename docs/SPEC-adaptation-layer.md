@@ -1246,3 +1246,40 @@ sequenceDiagram
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
 *文档状态：Draft v0.4。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+
+---
+
+## 31. 华为通道 roles 化（根治，v0.6 设计）
+
+### 31.1 实证基础（2026-09-06 授权活测序列，`cmd/probe`）
+
+| 帧 | 结果 |
+|---|---|
+| `media` → Qwen3-VL-235B | 接受 OpenAI `image_url` 分片（data URI 内联），正确答「红色」 |
+| `tools` + `tool_choice:"auto"` → GLM-5.2 ×3 | **一致截断**：~3 个推理 token 后 `[DONE]`，无 tool_calls、无 finish_reason——`tool_choice` 字段是截断触发器 |
+| `tools`（无 tool_choice）→ GLM-5.2 | 流正常（44 行），**0 个原生 tool_calls**——tools 参数被上游吞掉不执行 |
+| chat_id 传输审计 | chat_id 从不进 body/请求头——**上游对网关完全无状态** |
+
+### 31.2 设计决策（拍板结论）
+
+| 决策点 | 结论 |
+|---|---|
+| 落地形态 | **整通道 roles 透传**（用户拍板 2026-09-06「追求根治而非混合兼容最小」）：真实多轮历史数组直传，转录折叠渲染/标记体系对 codearts 退役 |
+| 消息/媒体 | `message.model: "roles"` + `message.media: "passthrough"`（§30 机制全复用：图片原生分片、URL→base64 转换层） |
+| 会话 | `session.kind: "none"`（上游无状态实证；roles 全量数组与 native 全量折叠同 token 量级，零回退）；**指纹续接对 codearts 退役**，增量折叠机制保留于 Profile 体系（text-only profile 可用） |
+| 工具 | **围栏模拟保留**（原生 tools 实证不可用，非兼容妥协而是唯一机制）：注入点从折叠块迁移到 roles **末条 user 消息 Text 追加** `buildToolsPrompt`；输出转录（streamfilter/extractToolCalls）渠道无关零改动；body `tools` 继续原样透传（上游吞掉无害）；`tool_choice` 继续不对华为透传（截断触发器实证；现网行为不变） |
+| 护栏/回声 | fold 护栏块随折叠退役；转录标记消失 → 「叙述/编造」的可模仿面消失；TRANSCRIPT_ECHO 检测保留作观测 |
+| 兼容面 | X-Provider/路由表/账号池/福利领取/调度/三协议入站全部不变；`X-Codearts-Chat-Id` 透传语义保留（响应头/非流式 chat_id 字段） |
+| 风险 | 多轮历史经 MaaS 的模型表现需活测验收（转录渲染 → 真实历史的行为差异） |
+
+### 31.3 验收
+
+1. 多轮历史活测（≥3 轮，模型引用前文）；
+2. 带图活测：qwen3-vl-235b 经**路由表**（裸名）答对图片内容；
+3. 围栏工具活测：glm-5.2 出 `tool_calls` + `finish_reason=tool_calls`；
+4. 无 tools 文本请求零回归；`go test ./...` 全绿。
+
+### 31.4 明确不做
+
+- 混合语义（折叠基底 + 带图轮分片）——用户拍板根治否决；
+- 华为原生 tools——实证不可用（截断/吞掉），围栏模拟即终态。

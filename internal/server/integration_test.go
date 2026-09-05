@@ -225,6 +225,7 @@ func TestIntegrationFingerprintContinue(t *testing.T) {
 	fake := fakeUpstreamSized(t, map[string]func(w http.ResponseWriter){"*": okStream(false)}, &sizes)
 	srv, _, _, h := buildTestServer(t, fake.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
 	h.cfg.SessionMode = "incremental"
+	h.cfg.Profiles = adapt.NewRegistry(textOnlyTestProfile()) // §31：折叠/指纹机制测试载体
 
 	mk := func(extra string) string {
 		return `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a"},{"role":"user","content":"` + extra + `"}]}`
@@ -267,6 +268,7 @@ func TestIntegrationCircuitBreakerForcesNative(t *testing.T) {
 	fake := fakeUpstreamSized(t, map[string]func(w http.ResponseWriter){"*": okStream(false)}, &sizes)
 	srv, _, _, h := buildTestServer(t, fake.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
 	h.cfg.SessionMode = "incremental"
+	h.cfg.Profiles = adapt.NewRegistry(textOnlyTestProfile()) // §31：折叠/指纹机制测试载体
 
 	mk := func(extra string) string {
 		return `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a"},{"role":"user","content":"one"},{"role":"user","content":"two"},{"role":"user","content":"` + extra + `"}]}`

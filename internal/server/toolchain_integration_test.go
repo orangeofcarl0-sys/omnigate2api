@@ -51,7 +51,7 @@ func TestIntegrationProjectForcesNative(t *testing.T) {
 	var sizes []string
 	fake := fakeUpstreamSized(t, map[string]func(w http.ResponseWriter){"*": okStream(false)}, &sizes)
 	srv, _, _, h := buildTestServer(t, fake.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
-	p := adapt.Codearts
+	p := *textOnlyTestProfile() // §31：project(有损⇒forceNative)依赖 text-only+implicit
 	p.Toolchain.Project = &adapt.ProjectConfig{}
 	h.cfg.Profiles = adapt.NewRegistry(&p)
 	h.cfg.SessionMode = "incremental" // 若互斥失效，第二轮会走 tail 增量

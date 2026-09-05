@@ -634,11 +634,22 @@ func (h *Handler) completeChat(w http.ResponseWriter, acct *pool.Account, rc io.
 // buildUpstreamMessages 按 Profile.message.model 渲染（SPEC §22.2）：
 // roles → 归一化数组逐条映射原生 OpenAI messages（不经折叠）；
 // text-only → 现有折叠（system 提前/转录渲染/护栏），单条 user 消息。
+// roles + 工具（§31.2）：华为原生 tools 实证不可用，围栏指引注入**末条 user
+// 消息 Text 追加**；输出转录（streamfilter/extractToolCalls）渠道无关零改动。
 func buildUpstreamMessages(req *chatRequest, profile *adapt.UpstreamProfile, toolsOn bool, continueChat bool, tailMsgs []openAIMessage) []upstream.ChatMessage {
 	if profile.Message.Model == "roles" {
 		msgs := req.Messages
 		if continueChat && tailMsgs != nil {
 			msgs = tailMsgs
+		}
+		if block := rolesFenceBlock(req, profile, toolsOn); block != "" {
+			msgs = append([]openAIMessage(nil), msgs...) // 拷贝后再改，避免污染调用方切片
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role == "user" {
+					msgs[i].Text += block
+					break
+				}
+			}
 		}
 		return renderRolesMessages(msgs)
 	}
@@ -662,6 +673,15 @@ func buildUpstreamMessages(req *chatRequest, profile *adapt.UpstreamProfile, too
 // toolsBlockFor 工具注入块（text-only 模拟层用；roles 上游不经折叠无此块）。
 func toolsBlockFor(req *chatRequest, toolsOn bool) string {
 	if !toolsOn {
+		return ""
+	}
+	return buildToolsPrompt(normalizeTools(req.Tools), req.ToolChoice)
+}
+
+// rolesFenceBlock roles 通道的围栏注入（§31.2）：仅当 Profile 声明围栏模拟
+// （Tool.FenceOpen，如华为；腾讯原生 tools 不注入——注入会误导模型弃用原生调用）。
+func rolesFenceBlock(req *chatRequest, profile *adapt.UpstreamProfile, toolsOn bool) string {
+	if !toolsOn || profile.Tool.FenceOpen == "" {
 		return ""
 	}
 	return buildToolsPrompt(normalizeTools(req.Tools), req.ToolChoice)

@@ -74,6 +74,7 @@ func TestRegistryRegisterRejectsInvalid(t *testing.T) {
 	r := NewRegistry(&Codearts)
 	p := Codearts
 	p.ID = "dup"
+	p.Session.Kind = "implicit" // §31 后内置为 none：显式造非法形态
 	p.Session.Trust = ""
 	if err := r.Register(&p); err == nil {
 		t.Fatalf("invalid profile must be rejected")

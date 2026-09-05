@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"omnigate2api/internal/adapt"
 	"strings"
 	"testing"
 )
@@ -16,7 +15,7 @@ func TestBuildUpstreamMessagesNewChat(t *testing.T) {
 			{Role: "user", Text: "again"},
 		},
 	}
-	msgs := buildUpstreamMessages(req, &adapt.Codearts, false, false, nil)
+	msgs := buildUpstreamMessages(req, textOnlyTestProfile(), false, false, nil)
 	if len(msgs) != 1 {
 		t.Fatalf("msgs=%d", len(msgs))
 	}
@@ -36,7 +35,7 @@ func TestBuildUpstreamMessagesContinueChat(t *testing.T) {
 			{Role: "user", Text: "again"},
 		},
 	}
-	msgs := buildUpstreamMessages(req, &adapt.Codearts, false, true, nil)
+	msgs := buildUpstreamMessages(req, textOnlyTestProfile(), false, true, nil)
 	if len(msgs) != 1 {
 		t.Fatalf("msgs=%d", len(msgs))
 	}

@@ -51,7 +51,7 @@ func TestIntegrationDualUpstreamCoexist(t *testing.T) {
 	t.Setenv("OMNIGATE_TENCENT_BASE", tencent.URL) // TencentClient 构造时读取
 
 	srv, _, _, h := buildTestServer(t, huawei.URL, []*auth.Auth{fakeAuth("u1", "tok1"), tencentFakeAuth("u2", "tok2")})
-	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+	h.cfg.Profiles = adapt.NewRegistry(textOnlyTestProfile(), &adapt.Workbuddy)
 
 	// 1) 默认（codearts）→ 华为账号与折叠
 	if _, code := postChat(t, srv, `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
@@ -94,7 +94,7 @@ func TestIntegrationPoolPickByProfile(t *testing.T) {
 	// u1 华为账号先禁用；u2 腾讯健康
 	auths := []*auth.Auth{fakeAuth("u1", "tok1"), tencentFakeAuth("u2", "tok2")}
 	srv, p, _, h := buildTestServer(t, huawei.URL, auths)
-	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+	h.cfg.Profiles = adapt.NewRegistry(textOnlyTestProfile(), &adapt.Workbuddy)
 	p.Disable("u1", "manual")
 
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",

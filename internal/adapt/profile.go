@@ -167,7 +167,10 @@ var Defaults = struct {
 	TrustReanchor: map[string]int{"low": 5, "medium": 10, "high": 20},
 }
 
-// Codearts 内置 Profile（对应当前实现的全部适配结论）。
+// Codearts 内置 Profile：华为 MaaS 实证为标准 OpenAI 兼容多模态端点（§31.1：
+// image_url 分片接受 / 原生 tools 不可用 / 对网关无状态），整通道 roles 透传
+// （SPEC §31.2 根治拍板）：真实历史数组直传 + 图片分片；工具走围栏模拟
+// （注入 roles 末条 user，输出转录渠道无关）。
 var Codearts = UpstreamProfile{
 	ID:      "codearts",
 	Display: "Huawei Cloud CodeArts Agent",
@@ -175,16 +178,8 @@ var Codearts = UpstreamProfile{
 		// 三协议全部实现（§13.4 缺省=全开）；需收窄时由 YAML 覆盖
 	},
 	Message: MessageProfile{
-		Model: "text-only",
-		Media: "placeholder", // SPEC §30.2：text-only 无像素通道，声明即语义
-		Folding: &FoldingConfig{
-			Markers: map[string]string{
-				"system":    "[系统指令]",
-				"assistant": "[助手]",
-				"tool":      "[工具 {n} 返回结果]",
-				"call":      "[助手调用工具 {n} 参数 {json}]",
-			},
-		},
+		Model: "roles",
+		Media: "passthrough", // §31.2：图片分片原生直传（MaaS 实证接受）
 	},
 	Stream: StreamProfile{
 		DeltaEvents:      []string{"", "message", "delta", "content", "onanswer", "answer"},
@@ -193,8 +188,7 @@ var Codearts = UpstreamProfile{
 		SynthesizeFinish: true,
 	},
 	Session: SessionProfile{
-		Kind:  "implicit",
-		Trust: "low", // 实测会话记忆不可靠（失忆事件），默认保守
+		Kind: "none", // §31.2：上游无状态实证（chat_id 不上线），每轮全量数组
 	},
 	Auth: AuthProfile{
 		RefreshSupported: false, // 华为 OAuth 授权码流程不返回 refresh_token
