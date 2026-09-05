@@ -252,10 +252,10 @@ go test -race ./...  # 竞争检测（需 CGO）
   长会话下 flash 系模型漂移概率更高。
 - **多模态图片（v1.4）**：三协议入站图片统一归一化；华为（text-only）通道折叠为
   占位文本（模型知道有附件但看不到像素，视觉模型经华为通道无视觉能力）；
-  腾讯通道支持图片透传（`message.media: passthrough` / `OMNIGATE_MEDIA`，URL 图片
-  由网关转 base64，带 SSRF 防护）——**内置声明当前仍为占位**：上游 chat 端点对
-  图片分片的接受度尚无实证（风控约束下不做主动探测，SPEC §30.9），透传通道已就绪
-  可显式开启自测。
+  **腾讯通道支持图片透传**（`message.media: passthrough` 已实证落地，SPEC §30.9）：
+  OpenAI 标准 `image_url` 分片 + data URI 内联直送上游，URL 图片由网关转 base64
+  （SSRF 防护）；单图 ≤10MB、每消息 ≤8 张，上游/客户端另有 ~1MB 模型级裁断；
+  华为通道如需图片可 `OMNIGATE_MEDIA=passthrough` 显式覆盖（需上游支持，未实证）。
 - 以上均为本地增强实现，回馈上游不在本仓库范围内。
 
 ## 安全

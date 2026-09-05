@@ -224,7 +224,9 @@ var Workbuddy = UpstreamProfile{
 	Display: "Tencent WorkBuddy/CodeBuddy (copilot.tencent.com)",
 	Message: MessageProfile{
 		Model: "roles",
-		Media: "placeholder", // SPEC §30.9：声明切换由 probe 实测触发（阶段 3）
+		// SPEC §30.9 实证（2026-09-06）：官方客户端源码证实 chat 图片 = OpenAI
+		// image_url 分片 + data URI 内联（user/tool 同机制），切 passthrough 落地
+		Media: "passthrough",
 	},
 	Stream: StreamProfile{
 		DeltaEvents:      []string{"", "message", "delta", "content"},

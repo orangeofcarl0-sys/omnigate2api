@@ -1190,9 +1190,23 @@ sequenceDiagram
     图片进 chat 的真实通道**（§30.10，拍板：独立上传端点/COS 凭证/引用格式）；
   - codearts MaaS：不主动探测（同风控拍板）；仅在有华为侧官方客户端图片实证时
     评估升级（text-only 折叠被绕过 = 会话语义大变更，另行拍板）。
-- **当前结论（2026-09-05）**：证据不足，workbuddy 内置声明维持 `placeholder`；
-  用户可用 `OMNIGATE_MEDIA=passthrough` 显式开启透传通道做单次自测（自担风控），
-  声明切换待捕获实证。
+- **当前结论（2026-09-06 实证闭环：用户官方客户端实测 + 本地工件捕获 + 客户端源码）**：
+  - **chat 接受图片**：用户在官方 CodeBuddy 发图（模型 hy4-preview，其元数据
+    `"supportsImages":true`、`maxAllowedSize:1000000`≈1MB、`disabledMultimodal:false`），
+    上游理解并正确描述图片（营养表内容复述）；
+  - **无独立上传，data URI 内联进 chat**：chat 请求体 663,906 字节 = 文本 ~1KB +
+    base64 图 567,891 字符 + JSON 开销（客户端 `[CustomFetch] Request body gzipped`
+    日志佐证）；
+  - **wire = OpenAI 标准 image_url 分片**：客户端自带转换层源码（genie 扩展
+    `out/extension/index.js` 内 AI SDK provider）——`case "image": return
+    {type:"image_url", image_url:{url:"data:<mt>;base64,…", detail}}`；tool_result
+    内图片走同一转换（§30.2「tool 同机制」拍板被源码证实）；同源码存在 Responses
+    线 `input_image` 映射（备查）；
+  - 消息层为 AI SDK v5 形态 `{type:"image", image:"data:…"}`（本地会话 JSON 实证），
+    由客户端 API 层转 OpenAI 线格式——本网关 parse 期直接归一化到同一目标形态。
+  - **拍板树命中分支 1：workbuddy 内置声明切 `passthrough`，全量落地（user/tool）**。
+    网关侧单图上限 10MB 不变（上游 maxAllowedSize≈1MB 由上游/客户端裁断，超限错误
+    按 §30.2 透传语义暴露）。
 
 ### 30.10 分期实现计划（逐阶段完整实现，每阶段审计测试）
 
