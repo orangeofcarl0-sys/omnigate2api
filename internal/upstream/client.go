@@ -248,11 +248,50 @@ func (c *Client) PollTicket(ctx context.Context, cfg LoginConfig, ticketID, secr
 // ChatMessage 统一线格式消息（SPEC §22.1）：text-only 折叠与 roles 透传共用。
 // text-only 时 Role="user"、Content=折叠文本；roles 时逐条保留
 // system/user/assistant(tool_calls)/tool(tool_call_id) 语义。
+// ContentParts 非空（多模态，SPEC §30.5）→ MarshalJSON 输出 content 分片数组
+// （文本合并为首片）；否则与历史线格式字节级一致（string content）。
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role         string            `json:"role"`
+	Content      string            `json:"content"`
+	ContentParts []ChatContentPart `json:"-"`
+	ToolCalls    []ChatToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string            `json:"tool_call_id,omitempty"`
+}
+
+// ChatContentPart content 分片（roles 多模态透传，SPEC §30.5）。
+type ChatContentPart struct {
+	Type     string       `json:"type"` // "text" | "image_url"
+	Text     string       `json:"text,omitempty"`
+	ImageURL *ChatImageURL `json:"image_url,omitempty"`
+}
+
+// ChatImageURL OpenAI 图片分片负载。
+type ChatImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// MarshalJSON 双形态线格式：无分片 → string content（零回归）；有分片 → 数组。
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	if len(m.ContentParts) == 0 {
+		return json.Marshal(struct {
+			Role       string         `json:"role"`
+			Content    string         `json:"content"`
+			ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
+			ToolCallID string         `json:"tool_call_id,omitempty"`
+		}{m.Role, m.Content, m.ToolCalls, m.ToolCallID})
+	}
+	parts := make([]ChatContentPart, 0, len(m.ContentParts)+1)
+	if m.Content != "" {
+		parts = append(parts, ChatContentPart{Type: "text", Text: m.Content})
+	}
+	parts = append(parts, m.ContentParts...)
+	return json.Marshal(struct {
+		Role       string            `json:"role"`
+		Content    []ChatContentPart `json:"content"`
+		ToolCalls  []ChatToolCall    `json:"tool_calls,omitempty"`
+		ToolCallID string            `json:"tool_call_id,omitempty"`
+	}{m.Role, parts, m.ToolCalls, m.ToolCallID})
 }
 
 // ChatToolCall 完整工具调用（OpenAI 线格式，arguments 为 JSON 字符串）。

@@ -50,6 +50,7 @@ func newSessionIndex(reanchorEvery int) *sessionIndex {
 }
 
 // fingerprint 计算消息数组的滚动哈希链：out[i] = H 前 i+1 条消息。
+// 图片以 canonical URL 参与（SPEC §30.6）：同图重发 → 前缀命中可续接，改图 → 回退全量。
 func fingerprint(msgs []openAIMessage) []string {
 	out := make([]string, len(msgs))
 	var h [32]byte
@@ -61,6 +62,13 @@ func fingerprint(msgs []openAIMessage) []string {
 		buf = append(buf, 0)
 		buf = append(buf, m.Text...)
 		buf = append(buf, 0)
+		for _, im := range m.Images {
+			buf = append(buf, "img"...)
+			buf = append(buf, im.URL...)
+			buf = append(buf, 0)
+			buf = append(buf, im.Detail...)
+			buf = append(buf, 0)
+		}
 		for _, c := range m.ToolCalls {
 			buf = append(buf, c.ID...)
 			buf = append(buf, c.Name...)

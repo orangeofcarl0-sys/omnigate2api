@@ -83,6 +83,7 @@ func main() {
 		DebugPromptDir:    os.Getenv("OMNIGATE_DEBUG_PROMPTS"),
 		SessionMode:       os.Getenv("OMNIGATE_SESSION_MODE"),
 		ToolchainOverride: os.Getenv("OMNIGATE_TOOLCHAIN"),
+		MediaOverride:     os.Getenv("OMNIGATE_MEDIA"),
 		RoutesFile:        routesFile,
 		Routes:            loadRouteTable(routesFile),
 		Profiles:          buildProfiles(),

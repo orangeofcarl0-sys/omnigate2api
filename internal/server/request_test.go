@@ -155,26 +155,91 @@ func TestFingerprintStableAndReplay(t *testing.T) {
 	}
 }
 
-func TestFlattenContent(t *testing.T) {
-	if flattenContent(json.RawMessage(`"plain"`)) != "plain" {
-		t.Fatal("string content")
+// TestParseChatContentParts SPEC §30.3：chat 分片 content——文本入 Text、
+// 图片结构化入 Images、其余类型块入 Deferred、畸形跳过。
+func TestParseChatContentParts(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":[
+		{"type":"text","text":"a"},
+		{"type":"image_url","image_url":{"url":"https://example.com/x.png","detail":"high"}},
+		{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,aGk="}},
+		{"type":"image_url","image_url":{"url":"not-a-url"}},
+		{"type":"file"},
+		{"foo":"malformed"}
+	]}]}`
+	req, err := parseChatRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// SPEC §30 阶段 1：非文本块占位（此前静默丢图，与 anthropic/responses 不一致）
-	if got := flattenContent(json.RawMessage(`[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}}]`)); got != "a[用户发送了一个附件：image_url]" {
-		t.Fatalf("parts content=%q", got)
+	m := req.Messages[0]
+	if m.Text != "a" {
+		t.Fatalf("text=%q", m.Text)
 	}
-	if flattenContent(json.RawMessage(`null`)) != "" {
-		t.Fatal("null content")
+	if len(m.Images) != 2 {
+		t.Fatalf("images=%d (%+v)", len(m.Images), m.Images)
 	}
-	// 畸形块（无 text 无 type）跳过，不产生空占位
-	if got := flattenContent(json.RawMessage(`[{"foo":1},{"type":"file"}]`)); got != "[用户发送了一个附件：file]" {
-		t.Fatalf("malformed parts=%q", got)
+	if m.Images[0].URL != "https://example.com/x.png" || m.Images[0].Detail != "high" {
+		t.Fatalf("img0=%+v", m.Images[0])
+	}
+	if m.Images[1].URL != "data:image/jpeg;base64,aGk=" || m.Images[1].Detail != "" {
+		t.Fatalf("img1=%+v", m.Images[1])
+	}
+	// 非法 URL 形态不会入 Images；本例中超限由 TestParseChatImageOversize 单测
+	if len(m.Deferred) != 2 || m.Deferred[0].Type != "image" || m.Deferred[1].Type != "file" {
+		t.Fatalf("deferred=%+v", m.Deferred)
 	}
 }
 
-// TestMediaPlaceholderTriProtocol SPEC §30 阶段 1 验收：三协议对同一图片消息
-// 折叠出同机制的占位文本（type 取各线块类型，机制与模板一致）。
+// TestParseChatImageOversize SPEC §30.7：data URI 超 maxImageB64 → 固定占位降级。
+func TestParseChatImageOversize(t *testing.T) {
+	big := strings.Repeat("A", maxImageB64+1)
+	body := `{"model":"m","messages":[{"role":"user","content":[
+		{"type":"image_url","image_url":{"url":"data:image/png;base64,` + big + `"}}
+	]}]}`
+	req, err := parseChatRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := req.Messages[0]
+	if len(m.Images) != 0 || len(m.Deferred) != 1 || m.Deferred[0].Fixed != deferredOversize {
+		t.Fatalf("images=%d deferred=%+v", len(m.Images), m.Deferred)
+	}
+}
+
+// TestParseChatImageCap SPEC §30.7：单消息图片上限 8，第 9 张起降级占位。
+func TestParseChatImageCap(t *testing.T) {
+	var parts []string
+	for i := 0; i < 10; i++ {
+		parts = append(parts, `{"type":"image_url","image_url":{"url":"data:image/png;base64,aGk="}}`)
+	}
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"imgs"},` +
+		strings.Join(parts, ",") + `]}]}`
+	req, err := parseChatRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := req.Messages[0]
+	if len(m.Images) != maxImagesPerMsg {
+		t.Fatalf("images=%d", len(m.Images))
+	}
+	if len(m.Deferred) != 2 {
+		t.Fatalf("deferred=%d", len(m.Deferred))
+	}
+}
+
+// TestDetailWhitelist SPEC §30.5：detail 仅 auto/low/high 透传。
+func TestDetailWhitelist(t *testing.T) {
+	for d, want := range map[string]string{"auto": "auto", "low": "low", "high": "high", "bogus": "", "": ""} {
+		if got := normalizeImageDetail(d); got != want {
+			t.Fatalf("detail %q → %q, want %q", d, got, want)
+		}
+	}
+}
+
+// TestMediaPlaceholderTriProtocol SPEC §30 验收：三协议对同一图片消息归一化为
+// 结构化 Images，placeholder 渲染后折叠出同模板占位（canonical type=image）。
 func TestMediaPlaceholderTriProtocol(t *testing.T) {
+	ph := mediaTemplate(nil)
+
 	// chat 线
 	chatReq, err := parseChatRequest([]byte(`{"model":"glm-5.2","messages":[
 		{"role":"user","content":[
@@ -184,34 +249,35 @@ func TestMediaPlaceholderTriProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(chatReq.Messages[0].Text, "看这张图") ||
-		!strings.Contains(chatReq.Messages[0].Text, "[用户发送了一个附件：image_url]") {
-		t.Fatalf("chat placeholder missing: %q", chatReq.Messages[0].Text)
-	}
-
-	// anthropic 线（既有行为回归）
+	// anthropic 线
 	anReq, err := parseAnthropicRequest([]byte(`{"max_tokens":100,"messages":[{"role":"user","content":[
 		{"type":"text","text":"看这张图"},
-		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
-	]}]}`), nil)
+		{"type":"image","source":{"type":"url","url":"https://example.com/x.png"}}
+	]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(anReq.Messages[0].Text, "[用户发送了一个附件：image]") {
-		t.Fatalf("anthropic placeholder missing: %q", anReq.Messages[0].Text)
-	}
-
-	// responses 线（既有行为回归）
+	// responses 线
 	rsReq, err := parseResponsesRequest([]byte(`{"model":"glm-5.2","input":[
 		{"type":"message","role":"user","content":[
 			{"type":"input_text","text":"看这张图"},
 			{"type":"input_image","image_url":"https://example.com/x.png"}
-		]}]}`), nil)
+		]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rsReq.Messages[0].Text, "看这张图") ||
-		!strings.Contains(rsReq.Messages[0].Text, "[用户发送了一个附件：input_image]") {
-		t.Fatalf("responses placeholder missing: %q", rsReq.Messages[0].Text)
+
+	for _, req := range []*chatRequest{chatReq, anReq, rsReq} {
+		if len(req.Messages[0].Images) != 1 || req.Messages[0].Images[0].URL != "https://example.com/x.png" {
+			t.Fatalf("parse images=%+v", req.Messages[0].Images)
+		}
+		renderMedia(req.Messages, "placeholder", ph, nil)
+		if !strings.Contains(req.Messages[0].Text, "看这张图") ||
+			!strings.Contains(req.Messages[0].Text, "[用户发送了一个附件：image]") {
+			t.Fatalf("placeholder missing: %q", req.Messages[0].Text)
+		}
+		if len(req.Messages[0].Images) != 0 {
+			t.Fatal("placeholder mode must clear images")
+		}
 	}
 }

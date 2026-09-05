@@ -246,7 +246,7 @@ func (h *Handler) anthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 		writeProtoError(protoAnthropic, w, http.StatusBadRequest, "invalid_request", "bad request body")
 		return
 	}
-	req, err := parseAnthropicRequest(body, nil)
+	req, err := parseAnthropicRequest(body)
 	if err != nil {
 		writeProtoError(protoAnthropic, w, http.StatusBadRequest, "invalid_request", err.Error())
 		return

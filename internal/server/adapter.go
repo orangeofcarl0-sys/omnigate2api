@@ -1,6 +1,7 @@
 // 入站协议归一化（SPEC §13）：anthropic /v1/messages 与 responses /v1/responses
 // 解析为统一内部模型 openAIMessage 数组，与 chat 共用指纹/折叠/工具模拟管线。
-// 全部为无状态纯函数；非文本块折叠为占位文本（§13.3），未知块/思考链丢弃
+// 全部为无状态纯函数；图片/非文本块 parse 期结构化（Images/Deferred，SPEC §30.3），
+// 占位/透传推迟到 Profile 裁决后的渲染期（media.go）；未知块/思考链丢弃
 // （客户端不回发 → 参与指纹会破坏前缀可复算性，见 SPEC §13.2 注）。
 package server
 
@@ -9,53 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"omnigate2api/internal/adapt"
 )
-
-// defaultMediaPlaceholder 非文本块缺省占位模板（Profile.folding.media_placeholder 可覆盖）。
-func defaultMediaPlaceholder(typ string) string {
-	return "[用户发送了一个附件：" + typ + "]"
-}
-
-// mediaPlaceholder Profile 模板 → 占位函数（§13.3：{type} 占位符替换）。
-// 返回 nil 表示使用内置默认（无需替换）。
-func (h *Handler) mediaPlaceholder(p *adapt.UpstreamProfile) func(string) string {
-	if p == nil || p.Message.Folding == nil || p.Message.Folding.MediaPlaceholder == "" {
-		return nil
-	}
-	tmpl := p.Message.Folding.MediaPlaceholder
-	return func(typ string) string {
-		if !strings.Contains(tmpl, "{type}") {
-			return tmpl
-		}
-		return strings.ReplaceAll(tmpl, "{type}", typ)
-	}
-}
-
-// reapplyMediaPlaceholder 把 parse 期内置默认占位文本替换为 Profile 模板
-// （parse 不依赖 Profile；模板应用统一在拿到 profile 后，§13.3）。
-func reapplyMediaPlaceholder(msgs []openAIMessage, ph func(string) string) []openAIMessage {
-	const prefix = "[用户发送了一个附件："
-	for i := range msgs {
-		s := msgs[i].Text
-		for {
-			start := strings.Index(s, prefix)
-			if start < 0 {
-				break
-			}
-			rest := s[start+len(prefix):]
-			end := strings.Index(rest, "]")
-			if end < 0 {
-				break
-			}
-			typ := rest[:end]
-			s = s[:start] + ph(typ) + rest[end+1:]
-		}
-		msgs[i].Text = s
-	}
-	return msgs
-}
 
 // ---------------------------------------------------------------------------
 // anthropic（/v1/messages）
@@ -74,10 +29,7 @@ type anthropicBlock struct {
 }
 
 // parseAnthropicRequest 解析 /v1/messages → 统一请求模型（SPEC §13.2 矩阵）。
-func parseAnthropicRequest(body []byte, mediaPlaceholder func(string) string) (*chatRequest, error) {
-	if mediaPlaceholder == nil {
-		mediaPlaceholder = defaultMediaPlaceholder
-	}
+func parseAnthropicRequest(body []byte) (*chatRequest, error) {
 	var raw struct {
 		Model      string            `json:"model"`
 		System     json.RawMessage   `json:"system"` // string | []{type,text}
@@ -109,7 +61,7 @@ func parseAnthropicRequest(body []byte, mediaPlaceholder func(string) string) (*
 		req.Messages = append(req.Messages, openAIMessage{Role: "system", Text: anthropicSystemText(raw.System)})
 	}
 	for i, rw := range raw.Messages {
-		msgs, err := parseAnthropicMessage(rw, mediaPlaceholder)
+		msgs, err := parseAnthropicMessage(rw)
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d]: %w", i, err)
 		}
@@ -154,7 +106,7 @@ func anthropicSystemText(rw json.RawMessage) string {
 
 // parseAnthropicMessage 单条 anthropic 消息 → 可能多条 openAIMessage
 // （tool_result 拆为独立 role=tool，其余 text 合并为前置 user）。
-func parseAnthropicMessage(rw json.RawMessage, mediaPlaceholder func(string) string) ([]openAIMessage, error) {
+func parseAnthropicMessage(rw json.RawMessage) ([]openAIMessage, error) {
 	var msg struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
@@ -185,10 +137,15 @@ func parseAnthropicMessage(rw json.RawMessage, mediaPlaceholder func(string) str
 	}
 	var out []openAIMessage
 	var user strings.Builder
+	// user 消息的待挂媒体（SPEC §30.3：parse 期结构化，渲染期分叉）
+	var pendImgs []imagePart
+	var pendDfr []deferredMedia
 	flushUser := func() {
-		if user.Len() > 0 {
-			out = append(out, openAIMessage{Role: "user", Text: user.String()})
+		if user.Len() > 0 || len(pendImgs) > 0 || len(pendDfr) > 0 {
+			out = append(out, openAIMessage{Role: "user", Text: user.String(), Images: pendImgs, Deferred: pendDfr})
 			user.Reset()
+			pendImgs = nil
+			pendDfr = nil
 		}
 	}
 	// assistant 的 text 与 tool_use 块合并为单条消息（客户端回发同构，§13.2）
@@ -221,12 +178,22 @@ func parseAnthropicMessage(rw json.RawMessage, mediaPlaceholder func(string) str
 				continue
 			}
 			flushUser()
-			// content 可为 string 或 blocks；提取文本部分
-			text := anthropicToolResultText(b.Content)
-			out = append(out, openAIMessage{Role: "tool", ToolCallID: b.ToolUseID, Text: text})
+			// content 可为 string 或 blocks：文本入 Text，图片结构化（§30.2 拍板：
+			// tool 图片与 user 同机制透传——Claude Code 截图回传场景）
+			tm := openAIMessage{Role: "tool", ToolCallID: b.ToolUseID}
+			tm.parseAnthropicToolResult(b.Content)
+			out = append(out, tm)
 		case "image":
+			// anthropic 协议图片仅合法于 user 消息（assistant 图片非协议形态，
+			// 维持既有丢弃语义）；source base64/url 双形态归一化（§30.3）
 			if role == "user" {
-				user.WriteString(mediaPlaceholder("image"))
+				if ip, dfr := imagePartFromAnthropicSource(b.Source); dfr != nil {
+					pendDfr = append(pendDfr, *dfr)
+				} else if len(pendImgs) < maxImagesPerMsg {
+					pendImgs = append(pendImgs, ip)
+				} else {
+					pendDfr = append(pendDfr, deferredMedia{Type: "image"})
+				}
 			}
 		case "thinking":
 			// 客户端不回发思考块：参与指纹会破坏可复算性，丢弃（SPEC §13.2 注）
@@ -242,23 +209,49 @@ func parseAnthropicMessage(rw json.RawMessage, mediaPlaceholder func(string) str
 	return out, nil
 }
 
-// anthropicToolResultText tool_result.content（string 或 blocks）→ 文本。
-func anthropicToolResultText(rw json.RawMessage) string {
+// imagePartFromAnthropicSource source 块（base64 / url）→ canonical imagePart。
+func imagePartFromAnthropicSource(rw json.RawMessage) (imagePart, *deferredMedia) {
+	var src struct {
+		Type      string `json:"type"` // base64 | url
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+		URL       string `json:"url"`
+	}
+	if err := json.Unmarshal(rw, &src); err != nil {
+		return imagePart{}, &deferredMedia{Type: "image"}
+	}
+	if src.Type == "base64" {
+		return newImagePart("data:"+src.MediaType+";base64,"+src.Data, "")
+	}
+	return newImagePart(src.URL, "")
+}
+
+// parseAnthropicToolResult tool_result.content（string 或 blocks）→ 文本 + 图片
+// （§30.2 拍板：tool 图片同机制结构化）。
+func (m *openAIMessage) parseAnthropicToolResult(rw json.RawMessage) {
 	var s string
 	if err := json.Unmarshal(rw, &s); err == nil {
-		return s
+		m.Text = s
+		return
 	}
 	var blocks []anthropicBlock
 	if err := json.Unmarshal(rw, &blocks); err != nil {
-		return ""
+		return
 	}
 	var sb strings.Builder
 	for _, b := range blocks {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			sb.WriteString(b.Text)
+		case "image":
+			if ip, dfr := imagePartFromAnthropicSource(b.Source); dfr != nil {
+				m.Deferred = append(m.Deferred, *dfr)
+			} else {
+				m.appendImage(ip.URL, ip.Detail)
+			}
 		}
 	}
-	return sb.String()
+	m.Text = sb.String()
 }
 
 // anthropicToolsToOpenAI {name,description,input_schema} → OpenAI function 格式。
@@ -333,10 +326,7 @@ type responsesItem struct {
 }
 
 // parseResponsesRequest 解析 /v1/responses → 统一请求模型（SPEC §13.2 矩阵）。
-func parseResponsesRequest(body []byte, mediaPlaceholder func(string) string) (*chatRequest, error) {
-	if mediaPlaceholder == nil {
-		mediaPlaceholder = defaultMediaPlaceholder
-	}
+func parseResponsesRequest(body []byte) (*chatRequest, error) {
 	var raw struct {
 		Model        string            `json:"model"`
 		Instructions string            `json:"instructions"`
@@ -372,7 +362,7 @@ func parseResponsesRequest(body []byte, mediaPlaceholder func(string) string) (*
 			return nil, fmt.Errorf("parse input: %w", err)
 		}
 		for i, it := range items {
-			msgs, err := parseResponsesItem(it, mediaPlaceholder)
+			msgs, err := parseResponsesItem(it)
 			if err != nil {
 				return nil, fmt.Errorf("input[%d]: %w", i, err)
 			}
@@ -394,7 +384,7 @@ func parseResponsesRequest(body []byte, mediaPlaceholder func(string) string) (*
 }
 
 // parseResponsesItem 单条 input item → 消息（相邻 function_call 与前一 assistant 合并）。
-func parseResponsesItem(it responsesItem, mediaPlaceholder func(string) string) ([]openAIMessage, error) {
+func parseResponsesItem(it responsesItem) ([]openAIMessage, error) {
 	switch it.Type {
 	case "message":
 		role := strings.ToLower(strings.TrimSpace(it.Role))
@@ -404,7 +394,9 @@ func parseResponsesItem(it responsesItem, mediaPlaceholder func(string) string) 
 		if role == "developer" {
 			role = "system" // §13.2：developer → system
 		}
-		return []openAIMessage{{Role: role, Text: responsesContentText(it.Content, mediaPlaceholder)}}, nil
+		m := openAIMessage{Role: role}
+		m.parseResponsesContent(it.Content)
+		return []openAIMessage{m}, nil
 	case "function_call":
 		return []openAIMessage{{Role: "assistant", ToolCalls: []openAIToolCall{{
 			ID: it.CallID, Name: it.Name, Arguments: it.Arguments,
@@ -422,31 +414,40 @@ func parseResponsesItem(it responsesItem, mediaPlaceholder func(string) string) 
 	}
 }
 
-// responsesContentText content（字符串或 [{type,text}]）→ 文本；非文本块占位。
-func responsesContentText(rw json.RawMessage, mediaPlaceholder func(string) string) string {
+// parseResponsesContent content（字符串或分片）→ Text/Images/Deferred（§30.3）。
+// input_image 形态：{type:"input_image", image_url:"...", detail:"..."}。
+func (m *openAIMessage) parseResponsesContent(rw json.RawMessage) {
+	if len(rw) == 0 || string(rw) == "null" {
+		return
+	}
 	var s string
 	if err := json.Unmarshal(rw, &s); err == nil {
-		return s
+		m.Text = s
+		return
 	}
 	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL string `json:"image_url"`
+		Detail   string `json:"detail"`
 	}
 	if err := json.Unmarshal(rw, &parts); err != nil {
-		return ""
+		return
 	}
 	var sb strings.Builder
 	for _, p := range parts {
 		switch p.Type {
 		case "input_text", "output_text", "text":
 			sb.WriteString(p.Text)
+		case "input_image":
+			m.appendImage(p.ImageURL, p.Detail)
 		default:
 			if p.Type != "" {
-				sb.WriteString(mediaPlaceholder(p.Type))
+				m.Deferred = append(m.Deferred, deferredMedia{Type: p.Type})
 			}
 		}
 	}
-	return sb.String()
+	m.Text = sb.String()
 }
 
 // responsesToolsToOpenAI {type:function,name,description,parameters,strict} → OpenAI 嵌套。

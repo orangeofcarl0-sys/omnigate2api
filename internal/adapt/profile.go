@@ -46,8 +46,19 @@ func (p *InboundProfile) Allows(proto string) bool {
 
 // MessageProfile 消息形态：roles（结构化）或 text-only（需折叠）。
 type MessageProfile struct {
-	Model   string         `yaml:"model"`
+	Model string `yaml:"model"`
+	// 非文本块语义（SPEC §30.2）：placeholder=占位折叠（缺省，§13.3）/
+	// passthrough=图片分片透传（仅限 roles，Validate fail-fast）；env 覆盖 OMNIGATE_MEDIA
+	Media   string         `yaml:"media,omitempty"`
 	Folding *FoldingConfig `yaml:"folding,omitempty"`
+}
+
+// MediaMode 有效 media 模式：缺省 placeholder（原生等价默认：未声明行为零变化）。
+func (m *MessageProfile) MediaMode() string {
+	if m != nil && m.Media == "passthrough" {
+		return "passthrough"
+	}
+	return "placeholder"
 }
 
 // FoldingConfig 折叠渲染配置：角色标记与收尾护栏。
@@ -165,6 +176,7 @@ var Codearts = UpstreamProfile{
 	},
 	Message: MessageProfile{
 		Model: "text-only",
+		Media: "placeholder", // SPEC §30.2：text-only 无像素通道，声明即语义
 		Folding: &FoldingConfig{
 			Markers: map[string]string{
 				"system":    "[系统指令]",
@@ -212,6 +224,7 @@ var Workbuddy = UpstreamProfile{
 	Display: "Tencent WorkBuddy/CodeBuddy (copilot.tencent.com)",
 	Message: MessageProfile{
 		Model: "roles",
+		Media: "placeholder", // SPEC §30.9：声明切换由 probe 实测触发（阶段 3）
 	},
 	Stream: StreamProfile{
 		DeltaEvents:      []string{"", "message", "delta", "content"},
@@ -245,6 +258,13 @@ func (p *UpstreamProfile) Validate() error {
 	}
 	if p.Message.Model == "text-only" && p.Message.Folding == nil {
 		return fmt.Errorf("profile %q: text-only requires folding config", p.ID)
+	}
+	// media 语义校验（SPEC §30.2）：passthrough 仅限 roles（text-only 无像素通道）
+	if p.Message.Media != "" && p.Message.Media != "placeholder" && p.Message.Media != "passthrough" {
+		return fmt.Errorf("profile %q: invalid message.media %q", p.ID, p.Message.Media)
+	}
+	if p.Message.Media == "passthrough" && p.Message.Model != "roles" {
+		return fmt.Errorf("profile %q: media passthrough requires message.model=roles", p.ID)
 	}
 	if p.Session.Kind == "implicit" && p.Session.Trust == "" {
 		return fmt.Errorf("profile %q: implicit session requires trust", p.ID)

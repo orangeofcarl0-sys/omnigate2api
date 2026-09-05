@@ -40,7 +40,8 @@ func writeDump(dir, name string, body []byte) {
 }
 
 // logFold 记录折叠提示词尺寸，可选落盘（OMNIGATE_DEBUG_PROMPTS=1 → data/prompts/）。
-func (h *Handler) logFold(model string, reqMsgs []openAIMessage, msgs []upstream.ChatMessage, toolsOn, continueMode bool) {
+// images = 渲染前入站图片数（SPEC §30.8）。
+func (h *Handler) logFold(model string, reqMsgs []openAIMessage, msgs []upstream.ChatMessage, toolsOn, continueMode bool, images int) {
 	var promptChars int
 	for _, m := range msgs {
 		promptChars += len([]rune(m.Content))
@@ -49,7 +50,8 @@ func (h *Handler) logFold(model string, reqMsgs []openAIMessage, msgs []upstream
 	if mode == "" {
 		mode = "native"
 	}
-	log.Printf("chat fold model=%s msgs=%d prompt_chars=%d tools=%v continue=%v mode=%s", model, len(reqMsgs), promptChars, toolsOn, continueMode, mode)
+	log.Printf("chat fold model=%s msgs=%d prompt_chars=%d tools=%v continue=%v mode=%s images=%d",
+		model, len(reqMsgs), promptChars, toolsOn, continueMode, mode, images)
 	writeDump(h.cfg.DebugPromptDir,
 		fmt.Sprintf("%s-%s-%d.txt", time.Now().Format("150405.000"), model, promptChars),
 		[]byte(msgs[0].Content))

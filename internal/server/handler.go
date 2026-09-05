@@ -163,6 +163,9 @@ type Config struct {
 	// ToolchainOverride 工具层覆盖（OMNIGATE_TOOLCHAIN）：none|project|sanitize|
 	// project,sanitize；空 = 按 Profile.toolchain 声明。
 	ToolchainOverride string
+	// MediaOverride 媒体语义覆盖（OMNIGATE_MEDIA，SPEC §30.2）：placeholder|
+	// passthrough；空 = 按 Profile.message.media 声明（缺省 placeholder）。
+	MediaOverride string
 	// Profiles 上游注册表（SPEC §4.4）；nil 时使用内置 codearts。
 	Profiles *adapt.Registry
 	// Routes 裸模型名路由表（SPEC §29，nil → 内置默认表）；RoutesFile 供 WebUI 保存。
@@ -170,7 +173,8 @@ type Config struct {
 	RoutesFile string
 }
 
-const maxBodyBytes = 8 << 20
+// maxBodyBytes 请求体上限（SPEC §30.7：64MB，容纳 base64 图片负载）。
+const maxBodyBytes = 64 << 20
 
 // Handler 主路由。
 type Handler struct {
@@ -330,9 +334,9 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 	case protoChat:
 		req, err = parseChatRequest(body)
 	case protoAnthropic:
-		req, err = parseAnthropicRequest(body, nil)
+		req, err = parseAnthropicRequest(body)
 	case protoResponses:
-		req, err = parseResponsesRequest(body, nil)
+		req, err = parseResponsesRequest(body)
 	}
 	if err != nil {
 		writeProtoError(proto, w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -359,10 +363,7 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 			"model "+model+" is disabled")
 		return
 	}
-	// Profile 非文本块占位模板（§13.3）：parse 期用内置默认，此处统一替换
-	if ph := h.mediaPlaceholder(profile); ph != nil {
-		req.Messages = reapplyMediaPlaceholder(req.Messages, ph)
-	}
+	// Profile 非文本块渲染已后移到 toolchain 之后（§30.3：占位/透传按 profile 分叉）
 	if !profile.Inbound.Allows(string(proto)) {
 		writeProtoError(proto, w, http.StatusNotFound, "not_found",
 			"protocol "+string(proto)+" not enabled (profile "+profile.ID+")")
@@ -387,13 +388,21 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 		req.Messages = msgs
 	}
 
+	// 媒体渲染（SPEC §30.3 管线位置：toolchain 后、指纹路由前）：
+	// placeholder → 占位折叠；passthrough → URL 转换后保留结构化（roles 分片透传）。
+	imgCount := countImages(req.Messages)
+	mode := mediaMode(profile, h.cfg.MediaOverride)
+	if st := renderMedia(req.Messages, mode, mediaTemplate(profile), guardedImageFetch); st.Images > 0 || st.Deferred > 0 {
+		logMediaRender(profile.ID, mode, st)
+	}
+
 	// 会话路由：显式 conversation_id 或指纹续接（路线 D）。
 	// 指纹续接：前缀命中 → tail 增量折叠 + 上游会话粘性。
 	rr := h.routeSession(profile, req, projectOn)
 	chatID, stickyAcct := rr.ChatID, rr.StickyAcct
 
 	msgs := buildUpstreamMessages(req, profile, toolsOn, rr.Continue, rr.TailMsgs)
-	h.logFold(model, req.Messages, msgs, toolsOn, rr.Continue)
+	h.logFold(model, req.Messages, msgs, toolsOn, rr.Continue, imgCount)
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -684,10 +693,18 @@ func tencentToolChoice(tc toolChoiceOpenAI) (string, bool) {
 }
 
 // renderRolesMessages roles 渲染：归一化数组 → 原生 OpenAI messages（§22.2）。
+// 带图消息（§30.5 passthrough，转换层已把 URL 归一为 data URI）→ content 分片数组；
+// 无图消息维持 string content（现有请求字节级零变化）。
 func renderRolesMessages(msgs []openAIMessage) []upstream.ChatMessage {
 	out := make([]upstream.ChatMessage, 0, len(msgs))
 	for _, m := range msgs {
 		cm := upstream.ChatMessage{Role: m.Role, Content: m.Text, ToolCallID: m.ToolCallID}
+		for _, im := range m.Images {
+			cm.ContentParts = append(cm.ContentParts, upstream.ChatContentPart{
+				Type:     "image_url",
+				ImageURL: &upstream.ChatImageURL{URL: im.URL, Detail: im.Detail},
+			})
+		}
 		for _, c := range m.ToolCalls {
 			cm.ToolCalls = append(cm.ToolCalls, upstream.ChatToolCall{ID: c.ID, Name: c.Name, Arguments: c.Arguments})
 		}

@@ -19,7 +19,7 @@ func TestParseAnthropicBasic(t *testing.T) {
 			{"role":"user","content":"again"}
 		]
 	}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestParseAnthropicBasic(t *testing.T) {
 func TestParseAnthropicSystemBlocks(t *testing.T) {
 	body := `{"max_tokens":100,"messages":[{"role":"user","content":"q"}],
 		"system":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestParseAnthropicToolUseAndResult(t *testing.T) {
 		{"role":"assistant","content":[{"type":"text","text":"先读"},{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"F:/x/a.mjs"}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"alpha = 1"},{"type":"text","text":"继续"}]}
 	]}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,21 +82,32 @@ func TestParseAnthropicToolUseAndResult(t *testing.T) {
 func TestParseAnthropicImagePlaceholder(t *testing.T) {
 	body := `{"max_tokens":100,"messages":[{"role":"user","content":[
 		{"type":"text","text":"看这张图"},
-		{"type":"image","source":{"type":"base64"}}
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
 	]}]}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// SPEC §30.3：parse 期图片结构化入 Images；占位在渲染期（renderMedia）
+	if len(req.Messages[0].Images) != 1 {
+		t.Fatalf("images=%+v", req.Messages[0].Images)
+	}
+	if req.Messages[0].Images[0].URL != "data:image/png;base64,aGk=" {
+		t.Fatalf("canonical url=%q", req.Messages[0].Images[0].URL)
+	}
+	renderMedia(req.Messages, "placeholder", mediaTemplate(nil), nil)
 	if !strings.Contains(req.Messages[0].Text, "看这张图") || !strings.Contains(req.Messages[0].Text, "[用户发送了一个附件：image]") {
 		t.Fatalf("media placeholder missing: %q", req.Messages[0].Text)
+	}
+	if len(req.Messages[0].Images) != 0 {
+		t.Fatal("placeholder mode must clear images")
 	}
 }
 
 func TestParseAnthropicThinkingDropped(t *testing.T) {
 	body := `{"max_tokens":100,"messages":[{"role":"user","content":"q"},
 		{"role":"assistant","content":[{"type":"thinking","thinking":"secret chain"},{"type":"text","text":"答"}]}]}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +123,7 @@ func TestParseAnthropicTools(t *testing.T) {
 	body := `{"max_tokens":100,"messages":[{"role":"user","content":"q"}],
 		"tools":[{"name":"f1","description":"d","input_schema":{"type":"object","properties":{}}}],
 		"tool_choice":{"type":"tool","name":"f1"}}`
-	req, err := parseAnthropicRequest([]byte(body), nil)
+	req, err := parseAnthropicRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +153,13 @@ func TestParseAnthropicToolChoiceModes(t *testing.T) {
 }
 
 func TestParseAnthropicErrors(t *testing.T) {
-	if _, err := parseAnthropicRequest([]byte(`{"max_tokens":100}`), nil); err == nil {
+	if _, err := parseAnthropicRequest([]byte(`{"max_tokens":100}`)); err == nil {
 		t.Fatal("empty messages must error")
 	}
-	if _, err := parseAnthropicRequest([]byte(`{"messages":[{"role":"user","content":"q"}]}`), nil); err == nil {
+	if _, err := parseAnthropicRequest([]byte(`{"messages":[{"role":"user","content":"q"}]}`)); err == nil {
 		t.Fatal("missing max_tokens must error")
 	}
-	if _, err := parseAnthropicRequest([]byte(`{"max_tokens":100,"messages":[{"role":"assistant","content":"x"}]}`), nil); err == nil {
+	if _, err := parseAnthropicRequest([]byte(`{"max_tokens":100,"messages":[{"role":"assistant","content":"x"}]}`)); err == nil {
 		t.Fatal("no sendable message must error")
 	}
 }
@@ -159,7 +170,7 @@ func TestParseAnthropicErrors(t *testing.T) {
 
 func TestParseResponsesBasic(t *testing.T) {
 	body := `{"model":"glm-5.2","stream":true,"instructions":"be nice","input":"hi"}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +189,7 @@ func TestParseResponsesFunctionCallMerge(t *testing.T) {
 		{"type":"function_call_output","call_id":"fc_1","output":"alpha = 1"},
 		{"type":"message","role":"user","content":"继续"}
 	]}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +218,7 @@ func TestParseResponsesRoles(t *testing.T) {
 		{"type":"message","role":"developer","content":"dev rules"},
 		{"type":"message","role":"user","content":"q"}
 	]}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +231,7 @@ func TestParseResponsesTools(t *testing.T) {
 	body := `{"input":"q","tools":[
 		{"type":"function","name":"f1","description":"d","parameters":{"type":"object"},"strict":true}
 	],"tool_choice":{"type":"function","name":"f1"}}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +252,7 @@ func TestParseResponsesReasoningDropped(t *testing.T) {
 		{"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]},
 		{"type":"message","role":"user","content":"q"}
 	]}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,14 +263,22 @@ func TestParseResponsesReasoningDropped(t *testing.T) {
 
 func TestParseResponsesContentParts(t *testing.T) {
 	body := `{"input":[
-		{"type":"message","role":"user","content":[{"type":"input_text","text":"a"},{"type":"input_image","image_url":"x"}]}
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"a"},{"type":"input_image","image_url":"x","detail":"low"}]}
 	]}`
-	req, err := parseResponsesRequest([]byte(body), nil)
+	req, err := parseResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := req.Messages[0].Text
-	if !strings.Contains(text, "a") || !strings.Contains(text, "[用户发送了一个附件：input_image]") {
-		t.Fatalf("parts=%q", text)
+	// SPEC §30.3：图片结构化（URL 非法形态 → Deferred 占位）；文本保留
+	m := req.Messages[0]
+	if !strings.Contains(m.Text, "a") {
+		t.Fatalf("text=%q", m.Text)
+	}
+	if len(m.Images) != 0 || len(m.Deferred) != 1 || m.Deferred[0].Type != "image" {
+		t.Fatalf("images=%+v deferred=%+v", m.Images, m.Deferred)
+	}
+	renderMedia(req.Messages, "placeholder", mediaTemplate(nil), nil)
+	if !strings.Contains(req.Messages[0].Text, "[用户发送了一个附件：image]") {
+		t.Fatalf("placeholder missing: %q", req.Messages[0].Text)
 	}
 }
