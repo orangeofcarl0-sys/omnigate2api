@@ -16,3 +16,4 @@ HANDOFF.md
 .gh_tmp.json
 .t.json
 .ref_*.py
+.img_req.json

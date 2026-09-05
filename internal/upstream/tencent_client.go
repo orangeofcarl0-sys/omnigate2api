@@ -127,7 +127,7 @@ func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages 
 	body := map[string]any{
 		"model":    model,
 		"stream":   true,
-		"messages": marshalChatMessages(messages),
+		"messages": messages, // ChatMessage.MarshalJSON 双形态（§30.5：分片数组透传）
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools

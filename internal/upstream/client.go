@@ -271,15 +271,31 @@ type ChatImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// MarshalJSON 双形态线格式：无分片 → string content（零回归）；有分片 → 数组。
+// MarshalJSON 双形态线格式（唯一序列化点，SPEC §30.5）：无分片 → string content
+// （零回归）；有分片 → 数组（文本合首片）。tool_calls 保持 OpenAI 嵌套线格式
+// （type/function 包裹，与原手工序列化层等价）；role 空值兜底 user。
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	role := m.Role
+	if role == "" {
+		role = "user"
+	}
+	var calls []map[string]any
+	if len(m.ToolCalls) > 0 {
+		calls = make([]map[string]any, 0, len(m.ToolCalls))
+		for _, c := range m.ToolCalls {
+			calls = append(calls, map[string]any{
+				"id": c.ID, "type": "function",
+				"function": map[string]any{"name": c.Name, "arguments": c.Arguments},
+			})
+		}
+	}
 	if len(m.ContentParts) == 0 {
 		return json.Marshal(struct {
 			Role       string         `json:"role"`
 			Content    string         `json:"content"`
-			ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
+			ToolCalls  []map[string]any `json:"tool_calls,omitempty"`
 			ToolCallID string         `json:"tool_call_id,omitempty"`
-		}{m.Role, m.Content, m.ToolCalls, m.ToolCallID})
+		}{role, m.Content, calls, m.ToolCallID})
 	}
 	parts := make([]ChatContentPart, 0, len(m.ContentParts)+1)
 	if m.Content != "" {
@@ -289,9 +305,9 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Role       string            `json:"role"`
 		Content    []ChatContentPart `json:"content"`
-		ToolCalls  []ChatToolCall    `json:"tool_calls,omitempty"`
+		ToolCalls  []map[string]any  `json:"tool_calls,omitempty"`
 		ToolCallID string            `json:"tool_call_id,omitempty"`
-	}{m.Role, parts, m.ToolCalls, m.ToolCallID})
+	}{role, parts, calls, m.ToolCallID})
 }
 
 // ChatToolCall 完整工具调用（OpenAI 线格式，arguments 为 JSON 字符串）。
@@ -510,43 +526,16 @@ func ChatHeadersV2(token, traceID, language string) map[string]string {
 // （华为 text-only 模拟层不使用，roles 上游直接拼入 body）；toolChoice
 // 为腾讯 string 语义归一化结果，华为路径忽略。
 func (c *Client) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+	// messages 直接序列化（ChatMessage.MarshalJSON 双形态：string/分片数组，§30.5）
 	body := map[string]any{
 		"model":    CanonicalModel(model),
 		"stream":   true,
-		"messages": marshalChatMessages(messages),
+		"messages": messages,
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
 	return c.SendChatV2(ctx, body, traceID, cred, cred.SecurityToken)
-}
-
-// marshalChatMessages 序列化为 OpenAI messages 数组：roles 语义保真
-// （system/assistant.tool_calls/tool.tool_call_id），text-only 折叠消息
-// Role 为空时兜底 user（与旧版全 user 行为一致）。
-func marshalChatMessages(msgs []ChatMessage) []map[string]any {
-	out := make([]map[string]any, 0, len(msgs))
-	for _, m := range msgs {
-		if m.Role == "" {
-			m.Role = "user"
-		}
-		msg := map[string]any{"role": m.Role, "content": m.Content}
-		if len(m.ToolCalls) > 0 {
-			calls := make([]map[string]any, 0, len(m.ToolCalls))
-			for _, c := range m.ToolCalls {
-				calls = append(calls, map[string]any{
-					"id": c.ID, "type": "function",
-					"function": map[string]any{"name": c.Name, "arguments": c.Arguments},
-				})
-			}
-			msg["tool_calls"] = calls
-		}
-		if m.ToolCallID != "" {
-			msg["tool_call_id"] = m.ToolCallID
-		}
-		out = append(out, msg)
-	}
-	return out
 }
 
 // SendChatV2 发送自定义 OpenAI 兼容 body 到 /api/v2/chat/completions。
