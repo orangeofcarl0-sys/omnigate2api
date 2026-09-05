@@ -1190,6 +1190,12 @@ sequenceDiagram
     图片进 chat 的真实通道**（§30.10，拍板：独立上传端点/COS 凭证/引用格式）；
   - codearts MaaS：不主动探测（同风控拍板）；仅在有华为侧官方客户端图片实证时
     评估升级（text-only 折叠被绕过 = 会话语义大变更，另行拍板）。
+- **华为侧实证（2026-09-06，用户授权单帧活测 `cmd/probe media`）**：向 MaaS 端点
+  发 OpenAI 标准 `image_url` 分片（64x64 纯红 PNG data URI 内联）→ 上游模型
+  `qwen3-vl-235b-a22b-instruct` 正确回答「红色」——**华为 MaaS 为标准 OpenAI 兼容
+  多模态端点，接受图片分片；text-only 折叠是网关侧设计选择而非上游限制**。
+  升级透传的语义代价与形态（混合折叠/整通道 roles）另行拍板，未落地前 codearts
+  维持 `placeholder`。
 - **当前结论（2026-09-06 实证闭环：用户官方客户端实测 + 本地工件捕获 + 客户端源码）**：
   - **chat 接受图片**：用户在官方 CodeBuddy 发图（模型 hy4-preview，其元数据
     `"supportsImages":true`、`maxAllowedSize:1000000`≈1MB、`disabledMultimodal:false`），
