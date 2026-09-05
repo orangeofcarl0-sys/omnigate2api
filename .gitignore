@@ -11,3 +11,5 @@ config.json
 *.bak
 *.backup2
 *.log
+# 本地交接文档（含运维上下文，禁止入库/推送公开仓库）
+HANDOFF.md
