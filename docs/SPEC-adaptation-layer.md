@@ -1,6 +1,6 @@
 # SPEC — 反代协议适配层（Adaptation Layer）
 
-> 状态：Draft v0.3 · 日期：2026-08-31 · 范围：omnigate2api 全部适配逻辑
+> 状态：Draft v0.5 · 日期：2026-09-05 · 范围：omnigate2api 全部适配逻辑
 > 目标：把"非标准上游 → OpenAI 原生语义"的转换做成**规范化、声明式、可复用**的
 > 三层管线；默认面承诺原生语义等价（模型所见 = 客户端所发），增量仅作为显式
 > opt-in 的性能插件，且任何语义偏差可观测、可熔断、可回退。
@@ -15,6 +15,11 @@
 > envelope、tool_choice string、模型清单端点均实证定稿），拍板四项决策
 > （官方 CLI 头全量对齐 / 完整错误语义迁移 / family 动态模型拉取 / 工具
 > 单帧完整参数），六缺口修复方案见 §28。
+> v0.4 变更：裸模型名路由与 WebUI 管理入口（§29）——渠道与模型名彻底解耦，
+> 删除 = 禁用语义，路由表落盘 data/routes.json。
+> v0.5 变更：多模态图片透传立项（§30）——三协议图片归一化与占位对齐、
+> URL→base64 转换层（SSRF 防护）、Profile `message.media` 兑现 §13.3 预留
+> 接口位、真链路 probe 条件拍板树；§20.2「不实现多模态像素透传」随之撤销。
 
 ---
 
@@ -131,6 +136,9 @@ type InboundProfile struct {
 
 type MessageProfile struct {
     Model string `yaml:"model"` // "roles" | "text-only"
+    // 非文本块语义（§30）：placeholder=占位折叠（缺省）/ passthrough=原生分片透传
+    // （仅限 roles；枚举无 none——静默丢图被 §30.2 否决）；env 覆盖 OMNIGATE_MEDIA
+    Media string `yaml:"media,omitempty"`
     // text-only 时必填：
     Folding *FoldingConfig `yaml:"folding,omitempty"`
 }
@@ -419,9 +427,10 @@ responses  → /v1/responses 端点：responsesAdapter.Response 纯函数
 - text-only 上游无像素通道：非文本块（image / file 等）统一折叠为占位文本，
   默认 `[用户发送了一个附件：{type}]`，可用 `folding.media_placeholder` 模板覆盖；
   占位保留位置与提示语义（模型知道有附件并继续追问），不传像素。
-- **预留多模态通道**：未来 Profile 增加 `message.media: "none"|"placeholder"|"passthrough"`
-  能力字段；`passthrough` 时文本-only 折叠不生效（针对原生支持多模态的上游，
-  本轮不实现，仅保留接口位）。占位文本纳入指纹计算（与正文同权）。
+- **多模态通道（v0.5 落地，§30）**：Profile 增加 `message.media: "placeholder"|"passthrough"`
+  能力字段（v0.5 修正：枚举删除 `none`——静默丢图违反「信息可验证」原则）；
+  `passthrough` 仅限 roles profile（text-only 无像素通道，registry 校验 fail-fast）。
+  占位文本纳入指纹计算（与正文同权）。图片透传完整设计、转换层与条件拍板树见 §30。
 
 ### 13.4 端点半开
 
@@ -600,7 +609,8 @@ writer 从同一数据源重建事件序列。守卫检测（transcriptEcho / no
 
 1. **账号层面不新增**：不引入 Go 参考实现的 credits 加权轮换、定时签到/积分、
    次日恢复等（无对应上游积分体系；本地福利领取调度维持现状）；
-2. 不实现多模态像素透传（§13.3 仅留 `media: passthrough` 接口位）；
+2. （v0.5 撤销）多模态像素透传原列于此——v0.2 拍板「仅留 `media: passthrough`
+   接口位」已被 v0.5 推翻，图片透传正式立项，设计与条件拍板见 §30；
 3. 不做自动能力探测（保持 §1 非目标：能力由 Profile 声明）；
 4. 投影/sanitize 不做全局默认开启（§14.1：显式 opt-in，不回退为两家参考实现
    的默认开/半默认开形态）。
@@ -1052,5 +1062,142 @@ sequenceDiagram
 路由表解析失败（文件损坏）→ 拒绝启动（fail-fast）；运行期 PUT 校验失败 → 409 且保持当前表不变；X-Provider 覆盖遇到未注册家族 → 回退 codearts（既有行为）。
 
 ---
+
+## 30. 多模态图片透传（v0.5 设计）
+
+### 30.1 背景与实证基础
+
+- **现状（v0.4 止）三协议行为不一致**：chat 线 `flattenContent` 只提取 text 分片，
+  image_url **静默丢弃**（模型连「有附件」都不可知）；anthropic/responses 线按
+  §13.3 折叠为占位文本。上游层 `ChatMessage.Content` 为 `string`——像素数据在
+  任何通道都到不了上游；路由表中的 qwen3-vl-235b（VL 模型）视觉能力经本网关不可用。
+- **实证基础（拍板依据）**：参考实现 Sliverkiss/CodeBuddy2api 把 content 全量拍平
+  为字符串（非文本块 `json.dumps` 塞入文本）——**上游接受 content-parts 图片是
+  零先例假设**；WorkBuddy 官方 UI 支持发图，存在独立上传协议（而非 parts 内联）
+  的可能性。故本版以「真链路 probe 条件拍板树」组织（§30.9），不做无实证的乐观假设。
+- 本版四阶段：占位对齐（独立交付）→ 能力就位（转换层/内部模型，声明仍全
+  placeholder，线上零变化）→ probe 实测 + 条件落地 passthrough → probe 拒绝即
+  立项逆向（拍板）。
+
+### 30.2 设计决策（拍板结论）
+
+| 决策点 | 结论 |
+|---|---|
+| 图片内部表示 | 统一 `imagePart{URL, Detail}`：URL 为 canonical 形态（`data:image/<mt>;base64,…` 或 `https://…`），Detail 仅 auto/low/high；`openAIMessage` 增 `Images []imagePart`，Text 仍只含文本 |
+| parse 期机制重构 | 废弃「parse 期插占位文本 + reapplyMediaPlaceholder 替换」旧机制（铁律 3：删旧轨）；parse 期图片一律结构化入 `Images`，占位/透传推迟到 profile 裁决后的**渲染期**分叉 |
+| `media` 能力字段 | §13.3 预留接口落地：`message.media: "placeholder"|"passthrough"`；**枚举删除 `none`**（静默丢图违反可验证原则）；缺省 `placeholder`（原生等价默认：未声明行为零变化）；`passthrough` 仅限 roles profile，registry 校验 fail-fast |
+| 内置声明 | codearts=`placeholder`（text-only 无像素通道，现状不变）；workbuddy 声明切换**由 probe 实测触发**（通过前维持 placeholder） |
+| env 覆盖 | `OMNIGATE_MEDIA=placeholder|passthrough` 全局覆盖（回退开关；对齐 OMNIGATE_SESSION_MODE / OMNIGATE_TOOLCHAIN 先例） |
+| URL→base64 转换层 | **首版就做**（拍板，不打折）：passthrough profile 渲染前网关抓取 http(s) 图片转 data URI；全套 SSRF 防护（§30.4）；失败/超限降级占位不拒请求 |
+| tool 消息图片 | 与 user/assistant **同机制透传**（铁律 3 一条路径；Claude Code/ZCode 截图回传走 tool_result，真实高频场景）；probe 帧矩阵覆盖 tool 帧；若实测仅 user 帧被接受 → tool 图片降占位（数据驱动条件拍板） |
+| 指纹参与 | 图片以 canonical URL 字符串参与前缀哈希链（确定性、前缀可复算）：同图重发 → 前缀命中可续接；改图 → 安全回退全量 |
+| 超限策略 | **占位降级 + 日志**，不拒整个请求（与 §13.3 占位哲学一致，偏差可观测） |
+| 上游拒绝图片 | 透传上游错误，走现有错误分类链；**不加网关预检**（一个机制一条路径） |
+| probe 拒绝的收官 | **立项逆向腾讯图片上传协议**（拍板，不打折；阶段 4，§30.9）——官方 UI 能发图证明通道存在，parts 被拒即转逆向，不终止于占位 |
+| 像素纪律 | 图片不进日志、不落 `OMNIGATE_DEBUG_PROMPTS`（占位代替；与「日志不含凭证」同级纪律） |
+
+### 30.3 内部模型与三协议归一化
+
+- 入站图片块 → `imagePart`（parse 期，纯函数）：
+  - chat：`{type:"image_url", image_url:{url, detail}}`，url 为 data URI 或 http(s)；
+  - anthropic：`source.type=base64` → `data:{media_type};base64,{data}`；`source.type=url` → URL 原样；
+  - responses：`{type:"input_image", image_url, detail}` 同 chat。
+- 非图片未知块维持丢弃（§13 既有语义：客户端不回发 → 参与指纹破坏前缀可复算性）。
+- 管线位置：parse（图片入 Images）→ toolchain（project/sanitize）→ **media 渲染**
+  （placeholder=占位拼入 Text / passthrough=转换层处理 Images）→ 指纹路由（§15.1
+  「指纹输入 = 最终消息数组」不变，media 渲染产物是其一部分）→ roles/折叠渲染。
+
+### 30.4 转换层（URL→data URI）与 SSRF 防护
+
+- 触发：仅 `media: passthrough` profile；请求生命周期内单次，同 URL 去重共享结果。
+- 抓取规则（全部硬校验，任一失败 → 该图降级占位）：
+  1. scheme 仅 `http`/`https`；
+  2. host 做 DNS 全解析，**逐 IP** 校验拒绝：RFC1918、127/8、0.0.0.0/8、169.254/16、
+     组播/保留段、`::1`、`fc00::/7`、`fe80::/10`（防 DNS rebinding 指向内网）；
+  3. **不跟随重定向**（3xx 即失败，规避每跳重校验的复杂度）；
+  4. 响应 `Content-Type` 必须 `image/*`；
+  5. 超时 15s、响应体 ≤10MB（§30.7 常量）。
+- 降级占位文本：`[图片抓取失败：{类别}]`（类别 = 私网拒绝/超时/超限/非图片/网络错误）
+  + 日志 `media fetch fail host=… reason=…`（记 host 不记完整 URL——查询串可能带
+  签名，对齐 F1 日志纪律）。
+
+### 30.5 双上游渲染语义
+
+- **roles passthrough**（workbuddy）：无图消息 `content` 保持 string——**现有请求
+  字节级零变化**；有图消息 `content` 为分片数组：
+  `[{"type":"text","text":…},{"type":"image_url","image_url":{"url":"data:…","detail":…}}]`；
+  tool role 同构（§30.2 拍板）；Detail 白名单外值丢弃。
+- **text-only placeholder**（codearts）：`Images` 折叠为占位文本拼入 Text（默认模板
+  `[用户发送了一个附件：image]` 不变，多图多占位位置保留）；占位参与指纹
+  （§13.3 既有拍板不变）。
+- 工具层交互：sanitize 替换 harness 命中消息时该消息 `Images` 随消息消亡（该层
+  语义本就是整消息替换）；project 有损投影中被摘要/丢弃消息的图片随之丢弃，
+  anchor user 的图片保留。
+
+### 30.6 指纹与 count_tokens
+
+- 指纹：哈希链输入扩展 `‖ images(digest...)`（canonical URL 顺序拼接）——文本
+  不变 + 同图 → 前缀命中续接（O(增量) 性质不破坏；data URI 参与 sha256 为 O(n)，可接受）。
+- count_tokens：每图固定近似 **+1000 tok**（估算语义与既有 len/4+1 同级，注明近似）。
+
+### 30.7 限制常量与安全纪律
+
+| 常量 | 值 | 超限行为 |
+|---|---|---|
+| 单图 base64 | ≤10MB（≈7.5MB 二进制） | 降级占位 `[图片超限被省略]` + 日志 |
+| 每消息图片数 | ≤8 | 超出部分降级占位 |
+| 抓取超时/体限 | 15s / 10MB | 降级占位（§30.4） |
+| 请求体总限 | 64MB（`http.MaxBytesReader`，server 层统一） | 413 |
+
+- 像素纪律：日志/DEBUG_PROMPTS/错误信封均不携带图片数据（占位代替）。
+
+### 30.8 可观测性
+
+- `chat fold` 日志行扩展 `images=N`（折叠输入图片数，两通道通用）；
+- 转换层成功日志 `media fetch host=… bytes=… ms=…`；降级日志 `media placeholder reason=…`；
+- 面板对话测试卡支持粘贴/选择图片（base64 入站，便于验收；不新增管理卡）。
+
+### 30.9 probe 设计与条件拍板树（阶段 3）
+
+- probe：`cmd/probe` 增 `media` 模式——1×1 PNG 帧矩阵 **{user, tool} × {dataURI, URL}**
+  真链路上送 workbuddy 上游，记录上游接受/报错原文；华为 MaaS 福利网关同法
+  （glm-5.3-flash，`maas_type: benefit`）。
+- 拍板树（结论必须回填本节，§28 对账先例）：
+  - workbuddy user+tool 均接受 → 内置声明切 `passthrough`，全量落地；
+  - 仅 user 接受 → user 帧透传、tool 图片占位（条件拍板，声明仍 passthrough）；
+  - 均拒绝 → **阶段 4 立项逆向**（§30.10，拍板）；
+  - codearts MaaS 接受 → 仅记录实证；升级 passthrough 需另行拍板（text-only 折叠
+    被绕过 = 会话语义大变更，超出本版范围）。
+
+### 30.10 分期实现计划（逐阶段完整实现，每阶段审计测试）
+
+| 阶段 | 交付 | 测试 |
+|---|---|---|
+| 1 占位对齐 | chat 线 image/file 块 → 占位（复用 §13.3 模板），消除三协议不一致；纯文本路径零风险 | request_test / adapter_test 三线占位一致性 |
+| 2 能力就位 | `imagePart` 归一化、parse 期占位机制重构（删 reapplyMediaPlaceholder 旧轨）、转换层 + SSRF、超限降级、MaxBytesReader、指纹参与、观测日志、env 覆盖；**内置声明仍全 placeholder，线上行为零变化** | SSRF 校验表 / 限制 / 归一化 / 假上游 httptest / 指纹单测 |
+| 3 条件落地 | probe `media` 模式实测 + 结论回填 §30.9、roles 分片渲染（含 tool）、声明按拍板树切换、count_tokens 计值、面板传图、README 同步 | 渲染单测 / 集成测试 / probe 结论落 SPEC |
+| 4（条件触发） | 腾讯图片上传协议逆向：端点 / 凭证 / 会话引用格式（方法论 docs/reverse-engineering.md）→ 独立 SPEC 补节 → 实现 | 独立定义 |
+
+### 30.11 交付件与验收
+
+- 交付：`request.go`/`adapter.go` 归一化、`media.go`（转换层 + SSRF + 限制）、
+  `adapt/profile.go` media 字段与校验、handler env 覆盖与管线接入、roles 分片渲染、
+  probe media 模式、panel.html 传图、README「已知边界」同步。
+- 验收（全部满足才算阶段闭环）：
+  1. 三协议发图（dataURI / URL）→ httptest 断言上游收到的分片结构（passthrough）
+     或占位文本（placeholder）逐一正确；
+  2. SSRF：私网 / 环回 / 重定向 / 超大 / 超时 / 非图片 → 逐一降级占位 + 日志；
+  3. codearts 收图 → 占位折叠 + `chat fold … images=N`；
+  4. 指纹：带图两轮同图 → 前缀命中续接；改图 → 回退全量；
+  5. `OMNIGATE_MEDIA=placeholder` 全局回退生效；
+  6. **无图请求字节级零回归**（含指纹、折叠、roles、工具调用全链路）；
+  7. `go test ./...` 全绿。
+
+### 30.12 明确不做（v0.5）
+
+- 音频 / 视频 / PDF 附件透传（占位模板 `{type}` 天然支持未来扩展）；
+- 跨请求图片缓存（存储面不做）；
+- codearts text-only 的像素通道升级（probe 仅收集数据）；
+- 出站方向（模型返回图片）——上游模型均为文本出。
 
 *文档状态：Draft v0.4。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
