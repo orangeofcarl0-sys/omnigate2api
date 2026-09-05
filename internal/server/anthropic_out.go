@@ -227,16 +227,21 @@ func buildAnthropicMessage(model string, content string, calls []openAIToolCall,
 
 // anthropicCountTokensEstim 估算输入 tokens（SPEC §16.2 真估算，替代恒 0 stub；
 // 与 chat usageEstimate 同规则：文本/arguments 按 len/4+1 累计）。
+// 图片按固定近似 +1000 tok/张（SPEC §30.6，注明近似值不随分辨率缩放）。
 func anthropicCountTokensEstim(msgs []openAIMessage) int {
 	total := 0
 	for _, m := range msgs {
 		total += tokensApprox(m.Text)
+		total += len(m.Images) * approxTokensPerImage
 		for _, c := range m.ToolCalls {
 			total += tokensApprox(c.Arguments)
 		}
 	}
 	return total
 }
+
+// approxTokensPerImage 图片 token 近似值（SPEC §30.6）。
+const approxTokensPerImage = 1000
 
 // anthropicCountTokens /v1/messages/count_tokens：基于归一化消息的估算
 // （SPEC §16.2 真估算，与 usageEstimate 同规则）。

@@ -1155,19 +1155,44 @@ sequenceDiagram
 
 - `chat fold` 日志行扩展 `images=N`（折叠输入图片数，两通道通用）；
 - 转换层成功日志 `media fetch host=… bytes=… ms=…`；降级日志 `media placeholder reason=…`；
-- 面板对话测试卡支持粘贴/选择图片（base64 入站，便于验收；不新增管理卡）。
+- 图片验证路径 = `OMNIGATE_MEDIA=passthrough` + 任意 OpenAI 客户端（curl/dsh/ZCode），
+  不新增面板测试卡（当前面板无对话测试卡，README 对话测试描述已过时，随 README
+  同步修正；避免为验证功能引入整张 UI 卡）。
 
 ### 30.9 probe 设计与条件拍板树（阶段 3）
 
-- probe：`cmd/probe` 增 `media` 模式——1×1 PNG 帧矩阵 **{user, tool} × {dataURI, URL}**
-  真链路上送 workbuddy 上游，记录上游接受/报错原文；华为 MaaS 福利网关同法
-  （glm-5.3-flash，`maas_type: benefit`）。
+> **方法论修订（2026-09-05 风控拍板，用户）**：**禁止向腾讯服务端发送构造的探测帧**
+> ——构造帧不符合官方客户端流量形态，有触发上游风控/账号标记的风险。probe 改为
+> **零风控被动路径**，按序：
+> 1. **静态客户端逆向**（CodeArts 逆向先例，docs/reverse-engineering.md：读官方
+>    客户端未打包资源而非抓包）——官方 CodeBuddy IDE 本体缺失时待重装后提取；
+> 2. **用户官方客户端实测 + 本地工件捕获**——用户在官方 CodeBuddy 发一张图，
+>    捕获点为客户端自留的本地会话消息 JSON（`%LOCALAPPDATA%\CodeBuddyExtension\
+>    Data\<uid>\CodeBuddyIDE\...\history\*\messages\*.json`，逐条消息落盘已实证）
+>    与运行日志（`Logs\CodeBuddyIDE\`，含 body 尺寸/gzip 标记）；零 MITM、零证书、零服务端触达；
+> 3. 仅当 1/2 均不可行，且用户明确同意时才考虑最小主动帧。
+>
+> **已完成的零风险实证（2026-09-05）**：
+> - 参考实现 Tom6814/WorkBuddy2API 实证腾讯 copilot 存在**独立 `POST /v2/images/edits`
+>   图生图端点**，`image` 参数为 **data URL 列表**（注释注明「对齐 WorkBuddy
+>   processImageInput」——官方客户端存在图片归一化为 data URL 的函数）；聊天端点
+>   在该实现中仍为纯文本（`messages` 原样透传，无图片先例）；
+> - 本机官方客户端残留会话消息（16 条，纯文本）实证其消息层为 **AI-SDK v5 分片
+>   形态**（`reasoning`/`tool-call`/`tool-result`/`text` 分片）——与「图片经 file
+>   分片 + data URL 内联进入 chat」的假设相容，未实证；
+> - 据此工作假设（**未实证，不作为切换依据**）：chat 图片 = OpenAI `image_url`
+>   分片 + data URI 内联（无独立上传）。
 - 拍板树（结论必须回填本节，§28 对账先例）：
-  - workbuddy user+tool 均接受 → 内置声明切 `passthrough`，全量落地；
-  - 仅 user 接受 → user 帧透传、tool 图片占位（条件拍板，声明仍 passthrough）；
-  - 均拒绝 → **阶段 4 立项逆向**（§30.10，拍板）；
-  - codearts MaaS 接受 → 仅记录实证；升级 passthrough 需另行拍板（text-only 折叠
-    被绕过 = 会话语义大变更，超出本版范围）。
+  - 静态逆向/捕获实证 chat 接受 image_url 分片（data URI）→ 内置声明切
+    `passthrough`，全量落地（user/tool 同机制，§30.2 拍板）；
+  - 实证仅 user 帧接受 → user 帧透传、tool 图片占位（条件拍板）；
+  - 实证 chat 不接受图片（或仅独立 images 端点可图）→ **阶段 4 立项逆向
+    图片进 chat 的真实通道**（§30.10，拍板：独立上传端点/COS 凭证/引用格式）；
+  - codearts MaaS：不主动探测（同风控拍板）；仅在有华为侧官方客户端图片实证时
+    评估升级（text-only 折叠被绕过 = 会话语义大变更，另行拍板）。
+- **当前结论（2026-09-05）**：证据不足，workbuddy 内置声明维持 `placeholder`；
+  用户可用 `OMNIGATE_MEDIA=passthrough` 显式开启透传通道做单次自测（自担风控），
+  声明切换待捕获实证。
 
 ### 30.10 分期实现计划（逐阶段完整实现，每阶段审计测试）
 
@@ -1175,14 +1200,14 @@ sequenceDiagram
 |---|---|---|
 | 1 占位对齐 | chat 线 image/file 块 → 占位（复用 §13.3 模板），消除三协议不一致；纯文本路径零风险 | request_test / adapter_test 三线占位一致性 |
 | 2 能力就位 | `imagePart` 归一化、parse 期占位机制重构（删 reapplyMediaPlaceholder 旧轨）、转换层 + SSRF、超限降级、MaxBytesReader、指纹参与、观测日志、env 覆盖；**内置声明仍全 placeholder，线上行为零变化** | SSRF 校验表 / 限制 / 归一化 / 假上游 httptest / 指纹单测 |
-| 3 条件落地 | probe `media` 模式实测 + 结论回填 §30.9、roles 分片渲染（含 tool）、声明按拍板树切换、count_tokens 计值、面板传图、README 同步 | 渲染单测 / 集成测试 / probe 结论落 SPEC |
+| 3 条件落地 | 实证捕获（§30.9 零风控路径）+ 结论回填、roles 分片渲染（§30.2 拍板含 tool，阶段 2 已交付）、声明按拍板树切换、count_tokens 计值、README 同步 | 渲染单测 / 集成测试 / 实证结论落 SPEC |
 | 4（条件触发） | 腾讯图片上传协议逆向：端点 / 凭证 / 会话引用格式（方法论 docs/reverse-engineering.md）→ 独立 SPEC 补节 → 实现 | 独立定义 |
 
 ### 30.11 交付件与验收
 
 - 交付：`request.go`/`adapter.go` 归一化、`media.go`（转换层 + SSRF + 限制）、
   `adapt/profile.go` media 字段与校验、handler env 覆盖与管线接入、roles 分片渲染、
-  probe media 模式、panel.html 传图、README「已知边界」同步。
+  count_tokens 图片计值、README「已知边界」同步；实证捕获按 §30.9 零风控路径执行。
 - 验收（全部满足才算阶段闭环）：
   1. 三协议发图（dataURI / URL）→ httptest 断言上游收到的分片结构（passthrough）
      或占位文本（placeholder）逐一正确；

@@ -217,6 +217,40 @@ func TestMediaPassthroughValidation(t *testing.T) {
 	}
 }
 
+// TestCountTokensImages SPEC §30.6：图片按固定近似 +1000 tok/张。
+func TestCountTokensImages(t *testing.T) {
+	msgs := []openAIMessage{
+		{Role: "user", Text: "hello"},
+		{Role: "user", Text: "look", Images: []imagePart{{URL: "data:image/png;base64,aGk="}, {URL: "https://x/y.png"}}},
+	}
+	want := tokensApprox("hello") + tokensApprox("look") + 2*approxTokensPerImage
+	if got := anthropicCountTokensEstim(msgs); got != want {
+		t.Fatalf("count=%d want %d", got, want)
+	}
+}
+
+// TestRolesRenderMediaPassthrough 端到端：passthrough 渲染后 roles 渲染产出分片数组。
+func TestRolesRenderMediaPassthrough(t *testing.T) {
+	msgs := []openAIMessage{
+		{Role: "user", Text: "look", Images: []imagePart{{URL: "data:image/png;base64,aGk=", Detail: "auto"}}},
+	}
+	renderMedia(msgs, "passthrough", mediaTemplate(nil), nil)
+	up := renderRolesMessages(msgs)
+	if len(up) != 1 || len(up[0].ContentParts) != 1 {
+		t.Fatalf("parts=%+v", up)
+	}
+	raw, _ := json.Marshal(up[0])
+	if !strings.Contains(string(raw), `"content":[{"type":"text","text":"look"},{"type":"image_url"`) {
+		t.Fatalf("wire=%s", raw)
+	}
+	// 无图消息零回归：string content
+	plain := renderRolesMessages([]openAIMessage{{Role: "user", Text: "hi"}})
+	praw, _ := json.Marshal(plain[0])
+	if !strings.Contains(string(praw), `"content":"hi"`) {
+		t.Fatalf("plain wire=%s", praw)
+	}
+}
+
 // TestAnthropicToolResultImages SPEC §30.2 拍板：tool_result 图片同机制结构化。
 func TestAnthropicToolResultImages(t *testing.T) {
 	body := `{"max_tokens":100,"messages":[{"role":"user","content":[

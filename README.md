@@ -180,7 +180,7 @@ curl -X POST http://127.0.0.1:7866/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-浏览器打开 **http://127.0.0.1:7866/** 即 WebUI：账号/token 状态、对话测试（流式/非流式）。
+浏览器打开 **http://127.0.0.1:7866/** 即 WebUI：账号/token 状态、额度余额、模型与路由管理、调度状态。
 
 ### Docker
 
@@ -225,6 +225,7 @@ docker compose restart omnigate2api          # 新账号加载进池
 | `OMNIGATE_UPSTREAM_BASE` | 覆盖华为引擎地址（测试/实验，一般不设） | 内置 |
 | `OMNIGATE_TENCENT_BASE` | 覆盖腾讯 copilot 地址（测试/实验） | copilot.tencent.com |
 | `OMNIGATE_ROUTES_FILE` | 裸模型名路由表（WebUI 保存；缺省 `data/routes.json`） | 自动 |
+| `OMNIGATE_MEDIA` | 非文本块语义全局覆盖（SPEC §30）：`placeholder`（默认，占位折叠）/ `passthrough`（图片分片透传，仅 roles 渠道生效） | 空 → Profile 声明 |
 
 ## 目录结构（增补要点）
 
@@ -249,6 +250,12 @@ go test -race ./...  # 竞争检测（需 CGO）
   日常长会话建议主力模型用 `glm-5.2`（常规引擎，无 MaaS 限额）。
 - "叙述/编造"类输出是模型遵循度问题：代理侧做了结构抑制与检测，不保证 100% 根除；
   长会话下 flash 系模型漂移概率更高。
+- **多模态图片（v1.4）**：三协议入站图片统一归一化；华为（text-only）通道折叠为
+  占位文本（模型知道有附件但看不到像素，视觉模型经华为通道无视觉能力）；
+  腾讯通道支持图片透传（`message.media: passthrough` / `OMNIGATE_MEDIA`，URL 图片
+  由网关转 base64，带 SSRF 防护）——**内置声明当前仍为占位**：上游 chat 端点对
+  图片分片的接受度尚无实证（风控约束下不做主动探测，SPEC §30.9），透传通道已就绪
+  可显式开启自测。
 - 以上均为本地增强实现，回馈上游不在本仓库范围内。
 
 ## 安全
