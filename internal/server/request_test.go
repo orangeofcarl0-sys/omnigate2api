@@ -159,10 +159,59 @@ func TestFlattenContent(t *testing.T) {
 	if flattenContent(json.RawMessage(`"plain"`)) != "plain" {
 		t.Fatal("string content")
 	}
-	if flattenContent(json.RawMessage(`[{"type":"text","text":"a"},{"type":"image_url","imageUrl":{"url":"x"}}]`)) != "a" {
-		t.Fatal("parts content")
+	// SPEC §30 阶段 1：非文本块占位（此前静默丢图，与 anthropic/responses 不一致）
+	if got := flattenContent(json.RawMessage(`[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}}]`)); got != "a[用户发送了一个附件：image_url]" {
+		t.Fatalf("parts content=%q", got)
 	}
 	if flattenContent(json.RawMessage(`null`)) != "" {
 		t.Fatal("null content")
+	}
+	// 畸形块（无 text 无 type）跳过，不产生空占位
+	if got := flattenContent(json.RawMessage(`[{"foo":1},{"type":"file"}]`)); got != "[用户发送了一个附件：file]" {
+		t.Fatalf("malformed parts=%q", got)
+	}
+}
+
+// TestMediaPlaceholderTriProtocol SPEC §30 阶段 1 验收：三协议对同一图片消息
+// 折叠出同机制的占位文本（type 取各线块类型，机制与模板一致）。
+func TestMediaPlaceholderTriProtocol(t *testing.T) {
+	// chat 线
+	chatReq, err := parseChatRequest([]byte(`{"model":"glm-5.2","messages":[
+		{"role":"user","content":[
+			{"type":"text","text":"看这张图"},
+			{"type":"image_url","image_url":{"url":"https://example.com/x.png"}}
+		]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(chatReq.Messages[0].Text, "看这张图") ||
+		!strings.Contains(chatReq.Messages[0].Text, "[用户发送了一个附件：image_url]") {
+		t.Fatalf("chat placeholder missing: %q", chatReq.Messages[0].Text)
+	}
+
+	// anthropic 线（既有行为回归）
+	anReq, err := parseAnthropicRequest([]byte(`{"max_tokens":100,"messages":[{"role":"user","content":[
+		{"type":"text","text":"看这张图"},
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
+	]}]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(anReq.Messages[0].Text, "[用户发送了一个附件：image]") {
+		t.Fatalf("anthropic placeholder missing: %q", anReq.Messages[0].Text)
+	}
+
+	// responses 线（既有行为回归）
+	rsReq, err := parseResponsesRequest([]byte(`{"model":"glm-5.2","input":[
+		{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"看这张图"},
+			{"type":"input_image","image_url":"https://example.com/x.png"}
+		]}]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rsReq.Messages[0].Text, "看这张图") ||
+		!strings.Contains(rsReq.Messages[0].Text, "[用户发送了一个附件：input_image]") {
+		t.Fatalf("responses placeholder missing: %q", rsReq.Messages[0].Text)
 	}
 }

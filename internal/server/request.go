@@ -130,7 +130,8 @@ func parseMessage(rm json.RawMessage) (openAIMessage, error) {
 	return m, nil
 }
 
-// flattenContent 拍平 string / 分片 content 为纯文本。
+// flattenContent 拍平 string / 分片 content 为纯文本；非文本块按 §13.3 占位
+// （SPEC §30 阶段 1：chat 线与 anthropic/responses 线占位对齐，此前本函数静默丢图）。
 func flattenContent(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
@@ -145,6 +146,11 @@ func flattenContent(raw json.RawMessage) string {
 		for _, p := range parts {
 			if t, ok := p["text"].(string); ok {
 				sb.WriteString(t)
+				continue
+			}
+			// 非文本块（image_url / input_image / file 等）→ 占位；无 type 的畸形块跳过
+			if typ, _ := p["type"].(string); typ != "" {
+				sb.WriteString(defaultMediaPlaceholder(typ))
 			}
 		}
 		return sb.String()
