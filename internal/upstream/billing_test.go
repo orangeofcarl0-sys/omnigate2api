@@ -2,6 +2,8 @@
 package upstream
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,8 +28,9 @@ func TestTencentDailyCheckinIdempotent(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
-	if err := c.DailyCheckin(billingAuth()); err != nil {
-		t.Fatalf("already-checked-in must be idempotent success: %v", err)
+	res, err := c.DailyCheckin(billingAuth())
+	if err != nil || res == nil || !res.Already {
+		t.Fatalf("already-checked-in must be idempotent success: res=%+v err=%v", res, err)
 	}
 	if gotAuthz != "Bearer tok" || gotTenant != "e9" {
 		t.Fatalf("headers authz=%q tenant=%q", gotAuthz, gotTenant)
@@ -44,8 +47,9 @@ func TestTencentDailyCheckin400Idempotent(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
-	if err := c.DailyCheckin(billingAuth()); err != nil {
-		t.Fatalf("400+10001 must be idempotent success: %v", err)
+	res, err := c.DailyCheckin(billingAuth())
+	if err != nil || res == nil || !res.Already {
+		t.Fatalf("400+10001 must be idempotent success: res=%+v err=%v", res, err)
 	}
 }
 
@@ -57,7 +61,7 @@ func TestTencentDailyCheckinBusinessError(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
-	if err := c.DailyCheckin(billingAuth()); err == nil || !strings.Contains(err.Error(), "login expired") {
+	if _, err := c.DailyCheckin(billingAuth()); err == nil || !strings.Contains(err.Error(), "login expired") {
 		t.Fatalf("business error must surface: %v", err)
 	}
 }
@@ -100,5 +104,72 @@ func TestTencentUserResourceClampZero(t *testing.T) {
 	}
 	if remain != 0 {
 		t.Fatalf("negative must clamp to 0: %d", remain)
+	}
+}
+
+// SPEC §32 活动面：签到状态解析（checkin-activity-status）。
+func TestTencentCheckinStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/checkin-activity-status") {
+			t.Errorf("path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"theme_name":"加油站","today_checked_in":true,"streak_days":7,"today_credit":100,"total_credits":700}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	st, err := c.CheckinStatus(billingAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ThemeName != "加油站" || !st.TodayCheckedIn || st.StreakDays != 7 || st.TotalCredits != 700 {
+		t.Fatalf("status=%+v", st)
+	}
+}
+
+// SPEC §32 活动面：宠物四端点（status/config/depart/claim）+ no unclaimed 幂等。
+func TestTencentPetFlow(t *testing.T) {
+	var departBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/travel/status"):
+			if r.Header.Get("Authorization") != "Bearer tok" || r.Header.Get("X-User-Id") != "u9" {
+				t.Errorf("pet headers authz=%q uid=%q", r.Header.Get("Authorization"), r.Header.Get("X-User-Id"))
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"state":"idle","daily_limit_reached":false,"arrive_at":0,"server_now":1788630000}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/config"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"locations":[{"id":"loc1","name":"森林","duration_hours_min":2,"duration_hours_max":4}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/depart"):
+			b, _ := io.ReadAll(r.Body)
+			departBody = string(b)
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/claim"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":400,"msg":"no unclaimed reward"}`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_ACTIVITY_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	a := billingAuth()
+
+	st, err := c.PetTravelStatus(a)
+	if err != nil || st.State != "idle" || st.DailyLimitReached {
+		t.Fatalf("status=%+v err=%v", st, err)
+	}
+	locs, err := c.PetTravelConfig(a)
+	if err != nil || len(locs) != 1 || locs[0].ID != "loc1" || locs[0].DurationHoursMax != 4 {
+		t.Fatalf("locs=%+v err=%v", locs, err)
+	}
+	if err := c.PetDepart(a, locs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(departBody, `"location_id":"loc1"`) {
+		t.Fatalf("depart body=%s", departBody)
+	}
+	if _, err := c.PetClaim(a); !errors.Is(err, ErrPetNoUnclaimed) {
+		t.Fatalf("no-unclaimed must be idempotent sentinel: %v", err)
 	}
 }

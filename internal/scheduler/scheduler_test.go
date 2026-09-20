@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -13,10 +14,17 @@ import (
 	"omnigate2api/internal/upstream"
 )
 
-// fakeClient 实现 ChatAPI + BillingAPI：计数签到/余额调用。
+// fakeClient 实现 ChatAPI + BillingAPI：计数签到/余额/宠物调用（SPEC §32）。
 type fakeClient struct {
-	checkins int
-	balances int
+	checkins  int
+	balances  int
+	statuses  int
+	petStates int
+	departs   int
+	claims    int
+	petState  string // 状态机测试注入：idle|traveling|arrived
+	petLimit  bool
+	petErr    error // 活动面故障注入（隔离性测试）
 }
 
 func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
@@ -25,10 +33,30 @@ func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []u
 func (f *fakeClient) RefreshToken(ctx context.Context, cfg upstream.LoginConfig, refreshToken, codeVerifier, domain string) (*upstream.TokenResponse, error) {
 	return nil, nil
 }
-func (f *fakeClient) DailyCheckin(a *auth.Auth) error { f.checkins++; return nil }
+func (f *fakeClient) DailyCheckin(a *auth.Auth) (*upstream.CheckinResult, error) {
+	f.checkins++
+	return &upstream.CheckinResult{Credit: 100, StreakDays: 7}, nil
+}
+func (f *fakeClient) CheckinStatus(a *auth.Auth) (*upstream.CheckinStatus, error) {
+	f.statuses++
+	return &upstream.CheckinStatus{ThemeName: "t", TodayCheckedIn: true, StreakDays: 7, TotalCredits: 700}, nil
+}
 func (f *fakeClient) UserResource(a *auth.Auth) (int64, error) {
 	f.balances++
 	return 42, nil
+}
+func (f *fakeClient) PetTravelStatus(a *auth.Auth) (*upstream.PetTravel, error) {
+	f.petStates++
+	if f.petErr != nil {
+		return nil, f.petErr
+	}
+	st := &upstream.PetTravel{State: f.petState, DailyLimitReached: f.petLimit, ArriveAt: 200, ServerNow: 100}
+	return st, nil
+}
+func (f *fakeClient) PetDepart(a *auth.Auth, locationID string) error { f.departs++; return nil }
+func (f *fakeClient) PetClaim(a *auth.Auth) (int64, error)            { f.claims++; return 88, nil }
+func (f *fakeClient) PetTravelConfig(a *auth.Auth) ([]upstream.PetLocation, error) {
+	return []upstream.PetLocation{{ID: "loc1", Name: "森林", DurationHoursMin: 2, DurationHoursMax: 4}}, nil
 }
 
 func TestSchedulerTencentCheckinOncePerDay(t *testing.T) {
@@ -61,5 +89,63 @@ func TestSchedulerTencentCheckinOncePerDay(t *testing.T) {
 	}
 	if huaweiStub.checkins != 0 || huaweiStub.balances != 0 {
 		t.Fatalf("huawei account must not trigger tencent billing: %d/%d", huaweiStub.checkins, huaweiStub.balances)
+	}
+}
+
+// TestSchedulerPetTravelStateMachine SPEC §32.2：idle→depart / arrived→claim /
+// traveling→等待 / daily_limit_reached→跳过；幂等分支不误派发。
+func TestSchedulerPetTravelStateMachine(t *testing.T) {
+	cases := []struct {
+		state      string
+		limit      bool
+		wantDepart int
+		wantClaim  int
+	}{
+		{"idle", false, 1, 0},
+		{"idle", true, 0, 0},       // 今日次数上限：跳过
+		{"traveling", false, 0, 0}, // 在路上：等待
+		{"arrived", false, 0, 1},   // 归来：领取
+	}
+	for _, tc := range cases {
+		u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+			RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+		p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+			ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+			MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+		}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stub := &fakeClient{petState: tc.state, petLimit: tc.limit}
+		p.Accounts()[0].Client = stub
+		s := New(Config{Pool: p, Enabled: true})
+		s.Tick(context.Background())
+		if stub.departs != tc.wantDepart || stub.claims != tc.wantClaim {
+			t.Fatalf("state=%s limit=%v depart=%d want %d claim=%d want %d",
+				tc.state, tc.limit, stub.departs, tc.wantDepart, stub.claims, tc.wantClaim)
+		}
+	}
+}
+
+// TestSchedulerActivityFailureIsolated SPEC §32.2 关键拍板：活动面失败只记日志，
+// 绝不冷却/禁用账号（不污染聊天账号健康）。
+func TestSchedulerActivityFailureIsolated(t *testing.T) {
+	u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+		RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+	p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &fakeClient{petErr: errors.New("activity endpoint changed"), petState: "idle"}
+	p.Accounts()[0].Client = stub
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+	total, healthy, disabled, cooling, _ := p.Stats()
+	if total != 1 || healthy != 1 || disabled != 0 || cooling != 0 {
+		t.Fatalf("activity failure must not touch account health: total=%d healthy=%d disabled=%d cooling=%d",
+			total, healthy, disabled, cooling)
 	}
 }

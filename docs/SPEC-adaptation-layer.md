@@ -1283,3 +1283,53 @@ sequenceDiagram
 
 - 混合语义（折叠基底 + 带图轮分片）——用户拍板根治否决；
 - 华为原生 tools——实证不可用（截断/吞掉），围栏模拟即终态。
+
+---
+
+## 32. 腾讯积分全自动（v0.7 设计）
+
+### 32.1 考据基础（2026-09-06，四个开源项目对账）
+
+| 来源 | 实证内容 |
+|---|---|
+| Tom6814/WorkBuddy2API `workbuddy_checkin.py` | `daily-checkin` + `checkin-activity-status` 端点、幂等码 10001、token 续期持久化 |
+| sanjingcheng-crypto `claim_api.py` | 「Buddy 加油站」积分 = **`daily-checkin` 本体**（无独立端点）；响应 `data.credit`/`data.streak_days`；base 按 domain 优先 + 路径前缀兜底；「今日已领」判定不看 HTTP 状态码看业务码 |
+| xmgzxmgz `workbuddy_buddy_travel.py` | 宠物探险四端点：`GET /activity/growth/buddy/travel/status`、`GET .../config`、`POST .../depart {location_id}`、`POST .../claim {}`；状态机 idle→depart（daily_limit_reached 跳过）/ traveling→按 arrive_at 等待 / arrived→claim；claim 已领 → `code=400 "no unclaimed"` 优雅跳过；鉴权 Bearer + X-User-Id |
+| 17612587 `daily-credits-checkin` | 签到实际收益 100 积分/天（本次获得/累计/连续天数）——我们此前「积分 0」观测疑为未解析响应字段 |
+
+**结论**：所谓「加油站积分领取」与「宠物领积分」分别是 **daily-checkin（我们已有）** 与
+**成长中心宠物探险（新功能）**；缺的是签到响应字段解析、`checkin-activity-status`
+查询与宠物探险状态机。
+
+### 32.2 设计决策（拍板结论）
+
+| 决策点 | 结论 |
+|---|---|
+| 签到增强 | `DailyCheckin` 升级返回 `CheckinResult{Already, Credit, StreakDays}`（响应 `data.credit/streak_days` 解析入日志与观测）；新增 `CheckinStatus` 查询（活动主题/连续/今日可得/活动累计/周期） |
+| 宠物探险 | **随调度器每 Tick 执行状态机**（探险周期为小时级，非每日一次）：status → idle 且未达上限则 depart（config 取首个地点）→ traveling 等待 → arrived 立即 claim（额外汇总 credit） |
+| 幂等 | 沿用业务码优先语义：checkin 10001 / claim `400 no unclaimed` / `daily_limit_reached` 均按成功（跳过）记日志，不报错 |
+| **活动故障隔离（关键拍板）** | 活动面（checkin/pet）失败**只记日志，绝不冷却/禁用账号**——非公开活动接口的变更/抖动不得污染聊天账号健康（既有 claimDaily 语义，宠物 Tick 同守） |
+| 鉴权/base | Bearer + X-User-Id（沿用 billingHeaders 全量头，多余头无害）；活动 base = `copilot.tencent.com`（脚本实证），`OMNIGATE_ACTIVITY_BASE` 覆盖（测试/实验） |
+| 多账号 | 复用账号池（按家族遍历 workbuddy 账号），非 env 单账号 |
+| 观测 | `tencent checkin account=… credit=+N streak=N total=N`；`tencent pet account=… state=… action=depart/claim/idle/skip`；失败 `failed err=…` |
+| 安全纪律 | **只走 API 直连**：不采纳第三方项目的 UI 自动化兜底与设备指纹绕过（风控纪律，2026-09-05 拍板延续） |
+
+### 32.3 分期实现
+
+| 阶段 | 交付 | 测试 |
+|---|---|---|
+| 1 签到增强 | `CheckinResult`/`CheckinStatus` + 调度器日志语义化 | billing_test 假上游（幂等/字段解析）+ scheduler_test |
+| 2 宠物探险 | 四端点方法 + 调度器每 Tick 状态机 + 日志 | 状态机三分支/幂等码/失败隔离测试 + 真链路活测（授权） |
+
+### 32.4 验收
+
+1. 假上游全分支：checkin 10001 / claim no-unclaimed / idle-depart / traveling-wait / arrived-claim / daily_limit_reached；
+2. 活动失败不触碰账号池状态（cooldown/disable 计数为零）；
+3. 真链路活测（授权）：checkin-status 查询 + 宠物 status 查询 + depart/claim 流程各一次；
+4. `go test ./...` 全绿。
+
+### 32.5 明确不做（v0.7）
+
+- 成长中心其他未实证活动（如后续发现再做考据立项）；
+- UI 自动化/指纹绕过类兜底（风控纪律）；
+- 活动积分与聊天额度的联动（两套体系互不影响，仅观测展示）。

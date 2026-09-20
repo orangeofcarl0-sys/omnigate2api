@@ -11,6 +11,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -97,6 +98,7 @@ func (s *Scheduler) Tick(ctx context.Context) {
 	}
 	s.claimBenefit(ctx)
 	s.claimTencentCheckin(ctx)
+	s.petTravel(ctx) // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
 }
 
 // benefitTZ 福利额度按北京时间 24 点重置。
@@ -143,21 +145,98 @@ func (s *Scheduler) claimBenefit(ctx context.Context) {
 }
 
 // claimTencentCheckin 每自然日（北京时间）为腾讯账号签到一次（幂等）并查询
-// 余额日志；与华为福利领取（claimBenefit）并行、互不阻塞（SPEC §24.2 落地）。
+// 余额日志（SPEC §24.2 落地）。签到响应含本次所得积分/连续天数（§32.2，即
+// 「Buddy 加油站」积分），失败只记日志、不影响账号健康。
 func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 	s.claimDaily(ctx, "tencent checkin", "workbuddy", func(acct *pool.Account) (string, error) {
 		api, ok := acct.Client.(upstream.BillingAPI)
 		if !ok {
 			return "", nil // 无计费能力（非腾讯客户端）：跳过
 		}
-		if err := api.DailyCheckin(acct.Auth); err != nil {
+		res, err := api.DailyCheckin(acct.Auth)
+		if err != nil {
 			return "", err
 		}
-		remain, err := api.UserResource(acct.Auth)
-		if err != nil {
-			return "ok (balance query failed: " + err.Error() + ")", nil
+		gain := ""
+		if res != nil {
+			if res.Already {
+				gain = " already"
+			} else {
+				gain = fmt.Sprintf(" credit=+%d", res.Credit)
+			}
+			if res.StreakDays > 0 {
+				gain += fmt.Sprintf(" streak=%d", res.StreakDays)
+			}
+		}
+		if st, serr := api.CheckinStatus(acct.Auth); serr == nil && st != nil {
+			gain += fmt.Sprintf(" total=%d theme=%s", st.TotalCredits, st.ThemeName)
+		}
+		remain, rerr := api.UserResource(acct.Auth)
+		if rerr != nil {
+			return "ok" + gain + " (balance query failed: " + rerr.Error() + ")", nil
 		}
 		acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
-		return fmt.Sprintf("ok remaining=%d", remain), nil
+		return fmt.Sprintf("ok%s balance=%d", gain, remain), nil
 	})
+}
+
+// petTravel 成长中心宠物探险（SPEC §32.2）：每 Tick 状态机——
+// arrived → claim；idle 且未达上限 → depart（config 首个地点）；traveling → 等待。
+// 幂等（no unclaimed / daily_limit_reached 均按跳过）；失败只记日志，
+// 绝不冷却/禁用账号（活动面故障不得污染聊天账号健康，§32.2 关键拍板）。
+func (s *Scheduler) petTravel(ctx context.Context) {
+	for _, acct := range s.cfg.Pool.Accounts() {
+		if acct.ProfileID != "workbuddy" {
+			continue
+		}
+		api, ok := acct.Client.(upstream.BillingAPI)
+		if !ok {
+			continue
+		}
+		st, err := api.PetTravelStatus(acct.Auth)
+		if err != nil {
+			log.Printf("tencent pet account=%s failed err=%v", acct.Name, err)
+			continue
+		}
+		if st == nil {
+			continue
+		}
+		switch st.State {
+		case "arrived":
+			credit, cerr := api.PetClaim(acct.Auth)
+			switch {
+			case cerr == nil:
+				log.Printf("tencent pet account=%s state=arrived action=claim credit=+%d", acct.Name, credit)
+			case errors.Is(cerr, upstream.ErrPetNoUnclaimed):
+				log.Printf("tencent pet account=%s state=arrived action=skip reason=no_unclaimed", acct.Name)
+			default:
+				log.Printf("tencent pet account=%s state=arrived action=claim failed err=%v", acct.Name, cerr)
+			}
+		case "idle":
+			if st.DailyLimitReached {
+				log.Printf("tencent pet account=%s state=idle action=skip reason=daily_limit", acct.Name)
+				continue
+			}
+			locs, cerr := api.PetTravelConfig(acct.Auth)
+			if cerr != nil || len(locs) == 0 {
+				log.Printf("tencent pet account=%s state=idle action=depart failed err=%v", acct.Name, cerr)
+				continue
+			}
+			loc := locs[0]
+			if derr := api.PetDepart(acct.Auth, loc.ID); derr != nil {
+				log.Printf("tencent pet account=%s state=idle action=depart failed err=%v", acct.Name, derr)
+				continue
+			}
+			log.Printf("tencent pet account=%s state=idle action=depart location=%s duration=%dh~%dh",
+				acct.Name, loc.Name, loc.DurationHoursMin, loc.DurationHoursMax)
+		case "traveling":
+			remain := st.ArriveAt - st.ServerNow
+			if remain < 0 {
+				remain = 0
+			}
+			log.Printf("tencent pet account=%s state=traveling action=wait arrive_in=%dm", acct.Name, remain/60)
+		default:
+			log.Printf("tencent pet account=%s state=%s action=none", acct.Name, st.State)
+		}
+	}
 }
