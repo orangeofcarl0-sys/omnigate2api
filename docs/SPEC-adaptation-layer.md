@@ -1328,7 +1328,7 @@ sequenceDiagram
 
 1. 假上游全分支：checkin 10001 / claim no-unclaimed / idle-depart / traveling-wait / arrived-claim / daily_limit_reached；
 2. 活动失败不触碰账号池状态（cooldown/disable 计数为零）；
-3. 真链路活测（授权）：checkin-status 查询 + 宠物 status 查询 + depart/claim 流程各一次；
+3. 真链路活测（授权，2026-09-20 结果）：签到 `credit=+100 streak=1 total=100 theme=Buddy加油站`（**推翻旧「签到无实际收益」结论——是未解析字段**）；宠物 status/quota 通（`cost=10` 能量/盒，当前 `affordable=0` 待能量）；**任务接单 accepted=5**（真实契约 `code/status`，响应 `data.tasks`）；领奖/探险/激活待任务完成与能量积累后自动推进（每 Tick 自驱动）；
 4. `go test ./...` 全绿。
 
 ### 32.5 明确不做（v0.7）

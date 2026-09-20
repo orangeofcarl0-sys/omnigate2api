@@ -103,10 +103,12 @@ flowchart TB
   `auths/workbuddy-{uid}.json`（独立命名空间，与华为并存）。
 - 腾讯侧 sanitize 默认开启（上游内容审核对 client 合规模板误伤是实证刚需）；
   会话默认全量（指纹增量待真链路实测后评估）。
-- **腾讯每日签到/积分（v1.3）**：调度器每自然日（北京时间）自动签到
-  （`daily-checkin`，已签到幂等）并查询积分余额
-  （`get-user-resource`，多套餐 Cycle 优先聚合）；面板「查余额」按账号家族
-  分发（腾讯查真实余额 / 华为刷新状态）。
+- **腾讯积分全自动（v1.4，SPEC §32）**：调度器全链路自动化——每日签到
+  （`daily-checkin`，即「Buddy 加油站」积分，实测 +100/天，解析 credit/streak/
+  活动状态）、成长中心任务接单与领奖（`tasks/accept` + `tasks/{code}/claim`，
+  积分+能量主来源）、宠物探险状态机（status/config/depart/claim，归来自动领分）
+  与宠物激活（能量开盲盒 `buddy/quota`+`buddy/open`）；活动面故障只记日志、
+  不影响聊天账号健康。面板「查余额」按账号家族分发（腾讯查真实积分）。
 - **裸模型名路由（v1.3）**：客户端只发模型名，渠道完全由网关侧路由表决定
   （默认表 = 两渠道清单合并，撞名组裁决给 codearts，撞名 fail-fast 拒绝重复注册）；
   `X-Provider` 保留为显式覆盖。`/v1/models` 无渠道时返回唯一视图（每模型名一条，
