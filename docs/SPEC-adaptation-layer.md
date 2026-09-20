@@ -1308,6 +1308,7 @@ sequenceDiagram
 | 签到增强 | `DailyCheckin` 升级返回 `CheckinResult{Already, Credit, StreakDays}`（响应 `data.credit/streak_days` 解析入日志与观测）；新增 `CheckinStatus` 查询（活动主题/连续/今日可得/活动累计/周期） |
 | 宠物探险 | **随调度器每 Tick 执行状态机**（探险周期为小时级，非每日一次）：status → idle 且未达上限则 depart（config 取首个地点）→ traveling 等待 → arrived 立即 claim（带 `status.record_id`，2026-09 契约；无则退化空 body） |
 | 宠物激活（活测实证补） | 新账号「no active buddy」——宠物唯一获取途径 = **Buddy 盲盒**（`/buddy/quota` 查能量 → `/buddy/open {count, client_token}` 开盒，能量为唯一出口）；depart 遇 `no active buddy` 自动走激活子流程，能量不足只记日志（后续 Tick 自然重试） |
+| 成长中心任务（阶段 3，能量/积分主来源） | `GET /tasks` → 接单 `POST /tasks/accept {task_codes:[…]}`（≤20/批，not_accepted&!locked）→ 领奖 `POST /tasks/{code}/claim`（仅 completed，返回 credit/energy，already_claimed 幂等）；每 Tick 执行（当天完成的任务后续 Tick 自动领取） |
 | 幂等 | 沿用业务码优先语义：checkin 10001 / claim `400 no unclaimed` / `daily_limit_reached` 均按成功（跳过）记日志，不报错 |
 | **活动故障隔离（关键拍板）** | 活动面（checkin/pet）失败**只记日志，绝不冷却/禁用账号**——非公开活动接口的变更/抖动不得污染聊天账号健康（既有 claimDaily 语义，宠物 Tick 同守） |
 | 鉴权/base | Bearer + X-User-Id（沿用 billingHeaders 全量头，多余头无害）；活动 base = `copilot.tencent.com`（脚本实证），`OMNIGATE_ACTIVITY_BASE` 覆盖（测试/实验） |
@@ -1320,7 +1321,8 @@ sequenceDiagram
 | 阶段 | 交付 | 测试 |
 |---|---|---|
 | 1 签到增强 | `CheckinResult`/`CheckinStatus` + 调度器日志语义化 | billing_test 假上游（幂等/字段解析）+ scheduler_test |
-| 2 宠物探险 | 四端点方法 + 调度器每 Tick 状态机 + 日志 | 状态机三分支/幂等码/失败隔离测试 + 真链路活测（授权） |
+| 2 宠物探险 | 四端点方法 + 激活子流程（quota/open）+ 调度器每 Tick 状态机 + 日志 | 状态机三分支/幂等码/失败隔离测试 + 真链路活测（授权） |
+| 3 成长中心任务 | tasks/accept/claim 三端点 + 每 Tick 接单领奖（积分+能量主来源） | 假上游接单/领奖/跳过分支 + 调度器测试 |
 
 ### 32.4 验收
 

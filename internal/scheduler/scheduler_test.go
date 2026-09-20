@@ -17,17 +17,21 @@ import (
 
 // fakeClient 实现 ChatAPI + BillingAPI：计数签到/余额/宠物调用（SPEC §32）。
 type fakeClient struct {
-	checkins  int
-	balances  int
-	statuses  int
-	petStates int
-	departs   int
-	claims    int
-	petState  string // 状态机测试注入：idle|traveling|arrived
-	petLimit  bool
-	petErr    error // 活动面故障注入（隔离性测试）
-	opens     int
-	departErr error // depart 失败注入（no active buddy 激活路径）
+	checkins      int
+	balances      int
+	statuses      int
+	petStates     int
+	departs       int
+	claims        int
+	petState      string // 状态机测试注入：idle|traveling|arrived
+	petLimit      bool
+	petErr        error // 活动面故障注入（隔离性测试）
+	opens         int
+	departErr     error // depart 失败注入（no active buddy 激活路径）
+	tasks         []upstream.GrowthTask
+	taskQueries   int
+	acceptBatches [][]string
+	claimCodes    []string
 }
 
 func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
@@ -68,6 +72,18 @@ func (f *fakeClient) PetQuota(a *auth.Auth) (*upstream.PetQuota, error) {
 	return &upstream.PetQuota{Affordable: 3, MaxOpenCount: 1, CostPerOpen: 50}, nil
 }
 func (f *fakeClient) PetOpenBox(a *auth.Auth, count int) error { f.opens++; return nil }
+func (f *fakeClient) GrowthTasks(a *auth.Auth) ([]upstream.GrowthTask, error) {
+	f.taskQueries++
+	return f.tasks, nil
+}
+func (f *fakeClient) GrowthAcceptTasks(a *auth.Auth, codes []string) (map[string]string, error) {
+	f.acceptBatches = append(f.acceptBatches, codes)
+	return map[string]string{}, nil
+}
+func (f *fakeClient) GrowthClaimTask(a *auth.Auth, code string) (int64, int64, bool, error) {
+	f.claimCodes = append(f.claimCodes, code)
+	return 10, 5, false, nil
+}
 func (f *fakeClient) PetTravelConfig(a *auth.Auth) ([]upstream.PetLocation, error) {
 	return []upstream.PetLocation{{ID: "1", Name: "森林", DurationHoursMin: 2, DurationHoursMax: 4}}, nil
 }
@@ -181,5 +197,38 @@ func TestSchedulerBuddyActivation(t *testing.T) {
 	s.Tick(context.Background())
 	if stub.opens != 1 {
 		t.Fatalf("no active buddy must trigger box activation: opens=%d depart=%d", stub.opens, stub.departs)
+	}
+}
+
+// TestSchedulerGrowthTasks SPEC §32 阶段 3：not_accepted→批量接单；
+// completed→逐个领奖并汇总 credit/energy；claimed/locked 跳过。
+func TestSchedulerGrowthTasks(t *testing.T) {
+	u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+		RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+	p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &fakeClient{
+		petState: "traveling",
+		tasks: []upstream.GrowthTask{
+			{TaskCode: "t1", Title: "每日对话", AcceptStatus: "not_accepted"},
+			{TaskCode: "t2", Title: "已接单", AcceptStatus: "accepted"},
+			{TaskCode: "t3", Title: "已完成待领", AcceptStatus: "completed", RewardCredit: 50, RewardEnergy: 10},
+			{TaskCode: "t4", Title: "已领过", AcceptStatus: "claimed"},
+			{TaskCode: "t5", Title: "锁定", Locked: true, AcceptStatus: "not_accepted"},
+		},
+	}
+	p.Accounts()[0].Client = stub
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+	if len(stub.acceptBatches) != 1 || len(stub.acceptBatches[0]) != 1 || stub.acceptBatches[0][0] != "t1" {
+		t.Fatalf("accept batches=%v", stub.acceptBatches)
+	}
+	if len(stub.claimCodes) != 1 || stub.claimCodes[0] != "t3" {
+		t.Fatalf("claim codes=%v", stub.claimCodes)
 	}
 }

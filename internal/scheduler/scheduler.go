@@ -99,7 +99,85 @@ func (s *Scheduler) Tick(ctx context.Context) {
 	}
 	s.claimBenefit(ctx)
 	s.claimTencentCheckin(ctx)
-	s.petTravel(ctx) // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
+	s.growthTasks(ctx) // SPEC §32 阶段 3：任务接单/领奖（积分+能量主来源）
+	s.petTravel(ctx)   // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
+}
+
+// growthTasks 成长中心任务自动化（SPEC §32 阶段 3）：接单（not_accepted）
+// + 领取已完成奖励（completed）——积分与能量主来源，宠物盲盒能量的唯一入口。
+// 幂等：accepted/claimed 状态自然跳过；失败只记日志（§32.2 隔离拍板）。
+func (s *Scheduler) growthTasks(ctx context.Context) {
+	for _, acct := range s.cfg.Pool.Accounts() {
+		if acct.ProfileID != "workbuddy" {
+			continue
+		}
+		api, ok := acct.Client.(upstream.BillingAPI)
+		if !ok {
+			continue
+		}
+		tasks, err := api.GrowthTasks(acct.Auth)
+		if err != nil {
+			log.Printf("tencent tasks account=%s failed err=%v", acct.Name, err)
+			continue
+		}
+		var pending []string
+		titles := map[string]string{}
+		for _, t := range tasks {
+			titles[t.TaskCode] = t.Title
+			if !t.Locked && t.AcceptStatus == "not_accepted" && t.TaskCode != "" {
+				pending = append(pending, t.TaskCode)
+			}
+		}
+		accepted := 0
+		for i := 0; i < len(pending); i += 20 {
+			batch := pending[i:]
+			if len(batch) > 20 {
+				batch = batch[:20]
+			}
+			res, aerr := api.GrowthAcceptTasks(acct.Auth, batch)
+			if aerr != nil {
+				log.Printf("tencent tasks account=%s action=accept failed err=%v", acct.Name, aerr)
+				break
+			}
+			for code, msg := range res {
+				if strings.Contains(msg, "ok") || strings.HasPrefix(msg, "accepted") {
+					accepted++
+				} else {
+					log.Printf("tencent tasks account=%s action=accept code=%s result=%s", acct.Name, code, msg)
+				}
+			}
+			if len(res) == 0 {
+				accepted += len(batch)
+			}
+		}
+		var credit, energy int64
+		claimed := 0
+		for _, t := range tasks {
+			if t.Locked || t.AcceptStatus != "completed" || t.TaskCode == "" {
+				continue
+			}
+			cc, ce, already, cerr := api.GrowthClaimTask(acct.Auth, t.TaskCode)
+			if cerr != nil {
+				log.Printf("tencent tasks account=%s action=claim code=%s failed err=%v", acct.Name, t.TaskCode, cerr)
+				continue
+			}
+			if already {
+				continue
+			}
+			if cc == 0 && ce == 0 {
+				cc = t.RewardCredit
+				ce = t.RewardEnergy
+			}
+			credit += cc
+			energy += ce
+			claimed++
+			log.Printf("tencent tasks account=%s action=claim task=%q credit=+%d energy=+%d", acct.Name, t.Title, cc, ce)
+		}
+		if accepted > 0 || claimed > 0 {
+			log.Printf("tencent tasks account=%s summary accepted=%d claimed=%d credit=+%d energy=+%d",
+				acct.Name, accepted, claimed, credit, energy)
+		}
+	}
 }
 
 // benefitTZ 福利额度按北京时间 24 点重置。

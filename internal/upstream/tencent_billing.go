@@ -42,6 +42,12 @@ type BillingAPI interface {
 	PetQuota(acct *auth.Auth) (*PetQuota, error)
 	// PetOpenBox 开宠物盲盒（能量足够时激活/扩充宠物）。
 	PetOpenBox(acct *auth.Auth, count int) error
+	// GrowthTasks 成长中心任务列表（accept_status/reward_credit/reward_energy）。
+	GrowthTasks(acct *auth.Auth) ([]GrowthTask, error)
+	// GrowthAcceptTasks 批量接单（≤20/批，返回 task_code → 结果状态）。
+	GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[string]string, error)
+	// GrowthClaimTask 领取已完成任务奖励；已领 already=true。
+	GrowthClaimTask(acct *auth.Auth, code string) (credit, energy int64, already bool, err error)
 }
 
 // CheckinResult 签到结果（幂等重复签到 Already=true，Credit 为本轮所得）。
@@ -470,4 +476,110 @@ func (c *TencentClient) PetOpenBox(acct *auth.Auth, count int) error {
 		return fmt.Errorf("pet open failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 成长中心任务（SPEC §32 阶段 3：积分/能量主来源，宠物盲盒能量的唯一入口）
+// ---------------------------------------------------------------------------
+
+// GrowthTask 成长中心任务（2026-09 桌面端 H5 契约）。
+type GrowthTask struct {
+	TaskCode     string `json:"task_code"`
+	Title        string `json:"title"`
+	Locked       bool   `json:"locked"`
+	AcceptStatus string `json:"accept_status"` // not_accepted|accepted|in_progress|completed|claimed
+	RewardCredit int64  `json:"reward_credit"`
+	RewardEnergy int64  `json:"reward_energy"`
+}
+
+// GrowthTasks 查询任务列表。
+func (c *TencentClient) GrowthTasks(acct *auth.Auth) ([]GrowthTask, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required for growth tasks")
+	}
+	raw, status, err := c.petRequest(acct, http.MethodGet, "/activity/growth/tasks", nil)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Code  int64        `json:"code"`
+		Msg   string       `json:"msg"`
+		Tasks []GrowthTask `json:"tasks"`
+		Data  struct {
+			Tasks []GrowthTask `json:"tasks"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return nil, fmt.Errorf("growth tasks parse: %w", uerr)
+	}
+	if status >= 400 || env.Code != 0 {
+		return nil, fmt.Errorf("growth tasks failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	if len(env.Tasks) > 0 {
+		return env.Tasks, nil
+	}
+	return env.Data.Tasks, nil
+}
+
+// GrowthAcceptTasks 批量接单（≤20/批）；返回 task_code → status/message。
+func (c *TencentClient) GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[string]string, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required for task accept")
+	}
+	if len(codes) == 0 {
+		return map[string]string{}, nil
+	}
+	if len(codes) > 20 {
+		codes = codes[:20]
+	}
+	body, _ := json.Marshal(map[string]any{"task_codes": codes})
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/tasks/accept", body)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Code    int64  `json:"code"`
+		Msg     string `json:"msg"`
+		Results []struct {
+			TaskCode string `json:"task_code"`
+			Status   string `json:"status"`
+			Message  string `json:"message"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	if status >= 400 || env.Code != 0 {
+		return nil, fmt.Errorf("task accept failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	out := make(map[string]string, len(codes))
+	for _, r := range env.Results {
+		msg := r.Status
+		if r.Message != "" {
+			msg += ": " + r.Message
+		}
+		out[r.TaskCode] = msg
+	}
+	return out, nil
+}
+
+// GrowthClaimTask 领取任务奖励（路径带 task_code，空 body）。
+func (c *TencentClient) GrowthClaimTask(acct *auth.Auth, code string) (int64, int64, bool, error) {
+	if acct == nil {
+		return 0, 0, false, fmt.Errorf("account required for task claim")
+	}
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/tasks/"+code+"/claim", []byte("{}"))
+	if err != nil {
+		return 0, 0, false, err
+	}
+	var env struct {
+		Code           int64  `json:"code"`
+		Msg            string `json:"msg"`
+		Credit         int64  `json:"credit"`
+		Energy         int64  `json:"energy"`
+		AlreadyClaimed bool   `json:"already_claimed"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	if status >= 400 || env.Code != 0 {
+		return 0, 0, false, fmt.Errorf("task claim failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	return env.Credit, env.Energy, env.AlreadyClaimed, nil
 }
