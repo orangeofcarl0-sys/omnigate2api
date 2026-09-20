@@ -26,6 +26,8 @@ type fakeClient struct {
 	petState  string // 状态机测试注入：idle|traveling|arrived
 	petLimit  bool
 	petErr    error // 活动面故障注入（隔离性测试）
+	opens     int
+	departErr error // depart 失败注入（no active buddy 激活路径）
 }
 
 func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
@@ -54,8 +56,18 @@ func (f *fakeClient) PetTravelStatus(a *auth.Auth) (*upstream.PetTravel, error) 
 	st := &upstream.PetTravel{State: f.petState, DailyLimitReached: f.petLimit, ArriveAt: 200, ServerNow: 100}
 	return st, nil
 }
-func (f *fakeClient) PetDepart(a *auth.Auth, locationID json.Number) error { f.departs++; return nil }
-func (f *fakeClient) PetClaim(a *auth.Auth) (int64, error)            { f.claims++; return 88, nil }
+func (f *fakeClient) PetDepart(a *auth.Auth, locationID json.Number) error {
+	f.departs++
+	return f.departErr
+}
+func (f *fakeClient) PetClaim(a *auth.Auth, recordID string) (int64, error) {
+	f.claims++
+	return 88, nil
+}
+func (f *fakeClient) PetQuota(a *auth.Auth) (*upstream.PetQuota, error) {
+	return &upstream.PetQuota{Affordable: 3, MaxOpenCount: 1, CostPerOpen: 50}, nil
+}
+func (f *fakeClient) PetOpenBox(a *auth.Auth, count int) error { f.opens++; return nil }
 func (f *fakeClient) PetTravelConfig(a *auth.Auth) ([]upstream.PetLocation, error) {
 	return []upstream.PetLocation{{ID: "1", Name: "森林", DurationHoursMin: 2, DurationHoursMax: 4}}, nil
 }
@@ -148,5 +160,26 @@ func TestSchedulerActivityFailureIsolated(t *testing.T) {
 	if total != 1 || healthy != 1 || disabled != 0 || cooling != 0 {
 		t.Fatalf("activity failure must not touch account health: total=%d healthy=%d disabled=%d cooling=%d",
 			total, healthy, disabled, cooling)
+	}
+}
+
+// TestSchedulerBuddyActivation SPEC §32.2 补：depart 报 no active buddy 时
+// 走能量开盲盒激活（quota→open），不误报失败。
+func TestSchedulerBuddyActivation(t *testing.T) {
+	u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+		RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+	p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &fakeClient{petState: "idle", departErr: errors.New("pet depart failed http=400 code=400 msg=no active buddy")}
+	p.Accounts()[0].Client = stub
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+	if stub.opens != 1 {
+		t.Fatalf("no active buddy must trigger box activation: opens=%d depart=%d", stub.opens, stub.departs)
 	}
 }

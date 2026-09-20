@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"omnigate2api/internal/pool"
@@ -180,6 +181,45 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 	})
 }
 
+// activateBuddy 宠物激活子流程（SPEC §32.2 补）：quota → 能量足够则开盲盒。
+// 能量不足只记日志（能量来自任务/旅行奖励，后续 Tick 自然重试）。
+func (s *Scheduler) activateBuddy(acct *pool.Account, api upstream.BillingAPI) {
+	q, err := api.PetQuota(acct.Auth)
+	if err != nil {
+		log.Printf("tencent pet account=%s action=activate failed err=%v", acct.Name, err)
+		return
+	}
+	if q == nil || q.Affordable < 1 {
+		log.Printf("tencent pet account=%s action=activate skipped reason=no_buddy_energy_insufficient affordable=%d cost=%d",
+			acct.Name, affordable(q), costPer(q))
+		return
+	}
+	count := q.Affordable
+	if q.MaxOpenCount > 0 && count > q.MaxOpenCount {
+		count = q.MaxOpenCount
+	}
+	if err := api.PetOpenBox(acct.Auth, count); err != nil {
+		log.Printf("tencent pet account=%s action=activate failed err=%v", acct.Name, err)
+		return
+	}
+	log.Printf("tencent pet account=%s action=activate opened=%d (buddy box, energy spent=%d)",
+		acct.Name, count, costPer(q)*count)
+}
+
+func affordable(q *upstream.PetQuota) int {
+	if q == nil {
+		return 0
+	}
+	return q.Affordable
+}
+
+func costPer(q *upstream.PetQuota) int {
+	if q == nil {
+		return 0
+	}
+	return q.CostPerOpen
+}
+
 // petTravel 成长中心宠物探险（SPEC §32.2）：每 Tick 状态机——
 // arrived → claim；idle 且未达上限 → depart（config 首个地点）；traveling → 等待。
 // 幂等（no unclaimed / daily_limit_reached 均按跳过）；失败只记日志，
@@ -203,7 +243,7 @@ func (s *Scheduler) petTravel(ctx context.Context) {
 		}
 		switch st.State {
 		case "arrived":
-			credit, cerr := api.PetClaim(acct.Auth)
+			credit, cerr := api.PetClaim(acct.Auth, st.RecordID.String())
 			switch {
 			case cerr == nil:
 				log.Printf("tencent pet account=%s state=arrived action=claim credit=+%d", acct.Name, credit)
@@ -224,6 +264,12 @@ func (s *Scheduler) petTravel(ctx context.Context) {
 			}
 			loc := locs[0]
 			if derr := api.PetDepart(acct.Auth, loc.ID); derr != nil {
+				// 无活跃宠物（活测实证 msg="no active buddy"）：能量足够则开盲盒激活
+				// （宠物唯一获取途径；能量唯一出口），下轮 Tick 自然进入旅行状态机
+				if strings.Contains(derr.Error(), "no active buddy") {
+					s.activateBuddy(acct, api)
+					continue
+				}
 				log.Printf("tencent pet account=%s state=idle action=depart failed err=%v", acct.Name, derr)
 				continue
 			}

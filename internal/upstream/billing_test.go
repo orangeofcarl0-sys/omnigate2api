@@ -170,7 +170,48 @@ func TestTencentPetFlow(t *testing.T) {
 	if !strings.Contains(departBody, `"location_id":1`) {
 		t.Fatalf("depart body=%s", departBody)
 	}
-	if _, err := c.PetClaim(a); !errors.Is(err, ErrPetNoUnclaimed) {
+	if _, err := c.PetClaim(a, "0"); !errors.Is(err, ErrPetNoUnclaimed) {
 		t.Fatalf("no-unclaimed must be idempotent sentinel: %v", err)
+	}
+}
+
+// SPEC §32.2 补：宠物激活（quota→open）与 claim record_id 契约。
+func TestTencentPetActivation(t *testing.T) {
+	var claimBody, openBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/buddy/quota"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"affordable":3,"max_open_count":1,"cost_per_open":50}}`))
+		case strings.HasSuffix(r.URL.Path, "/buddy/open"):
+			b, _ := io.ReadAll(r.Body)
+			openBody = string(b)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"buddy":{"name":"小星"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/claim"):
+			b, _ := io.ReadAll(r.Body)
+			claimBody = string(b)
+			_, _ = w.Write([]byte(`{"code":0,"data":{"credit":88}}`))
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_ACTIVITY_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	a := billingAuth()
+
+	q, err := c.PetQuota(a)
+	if err != nil || q.Affordable != 3 || q.MaxOpenCount != 1 || q.CostPerOpen != 50 {
+		t.Fatalf("quota=%+v err=%v", q, err)
+	}
+	if err := c.PetOpenBox(a, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(openBody, `"count":1`) || !strings.Contains(openBody, `"client_token"`) {
+		t.Fatalf("open body=%s", openBody)
+	}
+	if credit, err := c.PetClaim(a, "12345"); err != nil || credit != 88 {
+		t.Fatalf("claim credit=%d err=%v", credit, err)
+	}
+	if !strings.Contains(claimBody, `"record_id":12345`) {
+		t.Fatalf("claim body must carry record_id: %s", claimBody)
 	}
 }

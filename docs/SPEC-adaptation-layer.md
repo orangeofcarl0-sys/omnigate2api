@@ -1306,7 +1306,8 @@ sequenceDiagram
 | 决策点 | 结论 |
 |---|---|
 | 签到增强 | `DailyCheckin` 升级返回 `CheckinResult{Already, Credit, StreakDays}`（响应 `data.credit/streak_days` 解析入日志与观测）；新增 `CheckinStatus` 查询（活动主题/连续/今日可得/活动累计/周期） |
-| 宠物探险 | **随调度器每 Tick 执行状态机**（探险周期为小时级，非每日一次）：status → idle 且未达上限则 depart（config 取首个地点）→ traveling 等待 → arrived 立即 claim（额外汇总 credit） |
+| 宠物探险 | **随调度器每 Tick 执行状态机**（探险周期为小时级，非每日一次）：status → idle 且未达上限则 depart（config 取首个地点）→ traveling 等待 → arrived 立即 claim（带 `status.record_id`，2026-09 契约；无则退化空 body） |
+| 宠物激活（活测实证补） | 新账号「no active buddy」——宠物唯一获取途径 = **Buddy 盲盒**（`/buddy/quota` 查能量 → `/buddy/open {count, client_token}` 开盒，能量为唯一出口）；depart 遇 `no active buddy` 自动走激活子流程，能量不足只记日志（后续 Tick 自然重试） |
 | 幂等 | 沿用业务码优先语义：checkin 10001 / claim `400 no unclaimed` / `daily_limit_reached` 均按成功（跳过）记日志，不报错 |
 | **活动故障隔离（关键拍板）** | 活动面（checkin/pet）失败**只记日志，绝不冷却/禁用账号**——非公开活动接口的变更/抖动不得污染聊天账号健康（既有 claimDaily 语义，宠物 Tick 同守） |
 | 鉴权/base | Bearer + X-User-Id（沿用 billingHeaders 全量头，多余头无害）；活动 base = `copilot.tencent.com`（脚本实证），`OMNIGATE_ACTIVITY_BASE` 覆盖（测试/实验） |

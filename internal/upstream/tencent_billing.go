@@ -33,10 +33,15 @@ type BillingAPI interface {
 	PetTravelStatus(acct *auth.Auth) (*PetTravel, error)
 	// PetDepart 派出宠物探险（config 地点 id，原生 json.Number 保类型透传）。
 	PetDepart(acct *auth.Auth, locationID json.Number) error
-	// PetClaim 领取归来积分；无未领奖励（code=400 no unclaimed）返回 ErrPetNoUnclaimed。
-	PetClaim(acct *auth.Auth) (int64, error)
+	// PetClaim 领取归来积分（recordID 为 status.record_id，2026-09 契约必需；
+	// 空则退化为空 body）；无未领奖励返回 ErrPetNoUnclaimed。
+	PetClaim(acct *auth.Auth, recordID string) (int64, error)
 	// PetTravelConfig 探险可选地点（首个即默认目的地）。
 	PetTravelConfig(acct *auth.Auth) ([]PetLocation, error)
+	// PetQuota 宠物盲盒能量额度（affordable/max_open_count，能量为开盒唯一出口）。
+	PetQuota(acct *auth.Auth) (*PetQuota, error)
+	// PetOpenBox 开宠物盲盒（能量足够时激活/扩充宠物）。
+	PetOpenBox(acct *auth.Auth, count int) error
 }
 
 // CheckinResult 签到结果（幂等重复签到 Already=true，Credit 为本轮所得）。
@@ -59,11 +64,12 @@ type CheckinStatus struct {
 
 // PetTravel 宠物探险状态（travel/status 响应 data）。
 type PetTravel struct {
-	State             string `json:"state"` // idle | traveling | arrived
-	DailyLimitReached bool   `json:"daily_limit_reached"`
-	ArriveAt          int64  `json:"arrive_at"`
-	ServerNow         int64  `json:"server_now"`
-	RewardCredit      int64  `json:"reward_credit"`
+	State             string      `json:"state"` // idle | traveling | arrived
+	DailyLimitReached bool        `json:"daily_limit_reached"`
+	ArriveAt          int64       `json:"arrive_at"`
+	ServerNow         int64       `json:"server_now"`
+	RewardCredit      int64       `json:"reward_credit"`
+	RecordID          json.Number `json:"record_id"` // 归来领取凭据（claim body）
 	Location          struct {
 		Name string `json:"name"`
 	} `json:"location"`
@@ -364,12 +370,17 @@ func (c *TencentClient) PetDepart(acct *auth.Auth, locationID json.Number) error
 	return nil
 }
 
-// PetClaim 领取归来奖励；已领/无未领（400 no unclaimed）→ ErrPetNoUnclaimed（幂等）。
-func (c *TencentClient) PetClaim(acct *auth.Auth) (int64, error) {
+// PetClaim 领取归来奖励（recordID 非空时按 2026-09 契约带 record_id）；
+// 已领/无未领（400 no unclaimed）→ ErrPetNoUnclaimed（幂等）。
+func (c *TencentClient) PetClaim(acct *auth.Auth, recordID string) (int64, error) {
 	if acct == nil {
 		return 0, fmt.Errorf("account required for pet claim")
 	}
-	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/buddy/travel/claim", []byte("{}"))
+	body := []byte("{}")
+	if recordID != "" && recordID != "0" {
+		body, _ = json.Marshal(map[string]any{"record_id": json.RawMessage(recordID)})
+	}
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/buddy/travel/claim", body)
 	if err != nil {
 		return 0, err
 	}
@@ -393,4 +404,70 @@ func (c *TencentClient) PetClaim(acct *auth.Auth) (int64, error) {
 		credit = env.Data.Reward
 	}
 	return credit, nil
+}
+
+// PetQuota 宠物盲盒能量额度（能量为开盒唯一出口）。
+type PetQuota struct {
+	Affordable   int `json:"affordable"`
+	MaxOpenCount int `json:"max_open_count"`
+	CostPerOpen  int `json:"cost_per_open"`
+}
+
+// PetQuota 查询宠物盲盒能量额度。
+func (c *TencentClient) PetQuota(acct *auth.Auth) (*PetQuota, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required for pet quota")
+	}
+	raw, status, err := c.petRequest(acct, http.MethodGet, "/activity/growth/buddy/quota", nil)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Code  int64    `json:"code"`
+		Msg   string   `json:"msg"`
+		Quota PetQuota `json:"-"`
+		Data  PetQuota `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return nil, fmt.Errorf("pet quota parse: %w", uerr)
+	}
+	if status >= 400 || env.Code != 0 {
+		return nil, fmt.Errorf("pet quota failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	// 字段可能在顶层或 data 内（两版契约兼容，quota 优先 data）
+	q := env.Data
+	if q.Affordable == 0 && q.MaxOpenCount == 0 {
+		var top struct {
+			Affordable   int `json:"affordable"`
+			MaxOpenCount int `json:"max_open_count"`
+		}
+		_ = json.Unmarshal(raw, &top)
+		q.Affordable, q.MaxOpenCount = top.Affordable, top.MaxOpenCount
+	}
+	return &q, nil
+}
+
+// PetOpenBox 开宠物盲盒（能量足够时激活宠物；count 由调用方按 quota 决定）。
+func (c *TencentClient) PetOpenBox(acct *auth.Auth, count int) error {
+	if acct == nil {
+		return fmt.Errorf("account required for pet open")
+	}
+	if count < 1 {
+		count = 1
+	}
+	tok, _ := RandomHex(16)
+	body, _ := json.Marshal(map[string]any{"count": count, "client_token": tok})
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/buddy/open", body)
+	if err != nil {
+		return err
+	}
+	var env struct {
+		Code int64  `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	if status >= 400 || env.Code != 0 {
+		return fmt.Errorf("pet open failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	return nil
 }
