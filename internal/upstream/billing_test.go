@@ -140,7 +140,7 @@ func TestTencentPetFlow(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"code":0,"data":{"state":"idle","daily_limit_reached":false,"arrive_at":0,"server_now":1788630000}}`))
 		case strings.HasSuffix(r.URL.Path, "/travel/config"):
-			_, _ = w.Write([]byte(`{"code":0,"data":{"locations":[{"id":"loc1","name":"森林","duration_hours_min":2,"duration_hours_max":4}]}}`))
+			_, _ = w.Write([]byte(`{"code":0,"data":{"locations":[{"id":1,"name":"森林","duration_hours_min":2,"duration_hours_max":4}]}}`))
 		case strings.HasSuffix(r.URL.Path, "/travel/depart"):
 			b, _ := io.ReadAll(r.Body)
 			departBody = string(b)
@@ -160,13 +160,14 @@ func TestTencentPetFlow(t *testing.T) {
 		t.Fatalf("status=%+v err=%v", st, err)
 	}
 	locs, err := c.PetTravelConfig(a)
-	if err != nil || len(locs) != 1 || locs[0].ID != "loc1" || locs[0].DurationHoursMax != 4 {
+	if err != nil || len(locs) != 1 || locs[0].ID.String() != "1" || locs[0].DurationHoursMax != 4 {
 		t.Fatalf("locs=%+v err=%v", locs, err)
 	}
 	if err := c.PetDepart(a, locs[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(departBody, `"location_id":"loc1"`) {
+	// 数字 id 必须保类型透传（活测实证：真实 API id 为数字）
+	if !strings.Contains(departBody, `"location_id":1`) {
 		t.Fatalf("depart body=%s", departBody)
 	}
 	if _, err := c.PetClaim(a); !errors.Is(err, ErrPetNoUnclaimed) {

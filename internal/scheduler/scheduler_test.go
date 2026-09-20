@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -53,10 +54,10 @@ func (f *fakeClient) PetTravelStatus(a *auth.Auth) (*upstream.PetTravel, error) 
 	st := &upstream.PetTravel{State: f.petState, DailyLimitReached: f.petLimit, ArriveAt: 200, ServerNow: 100}
 	return st, nil
 }
-func (f *fakeClient) PetDepart(a *auth.Auth, locationID string) error { f.departs++; return nil }
+func (f *fakeClient) PetDepart(a *auth.Auth, locationID json.Number) error { f.departs++; return nil }
 func (f *fakeClient) PetClaim(a *auth.Auth) (int64, error)            { f.claims++; return 88, nil }
 func (f *fakeClient) PetTravelConfig(a *auth.Auth) ([]upstream.PetLocation, error) {
-	return []upstream.PetLocation{{ID: "loc1", Name: "森林", DurationHoursMin: 2, DurationHoursMax: 4}}, nil
+	return []upstream.PetLocation{{ID: "1", Name: "森林", DurationHoursMin: 2, DurationHoursMax: 4}}, nil
 }
 
 func TestSchedulerTencentCheckinOncePerDay(t *testing.T) {

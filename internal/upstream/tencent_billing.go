@@ -31,8 +31,8 @@ type BillingAPI interface {
 	UserResource(acct *auth.Auth) (remain int64, err error)
 	// PetTravelStatus 成长中心宠物探险状态（idle|traveling|arrived）。
 	PetTravelStatus(acct *auth.Auth) (*PetTravel, error)
-	// PetDepart 派出宠物探险（config 地点 id）。
-	PetDepart(acct *auth.Auth, locationID string) error
+	// PetDepart 派出宠物探险（config 地点 id，原生 json.Number 保类型透传）。
+	PetDepart(acct *auth.Auth, locationID json.Number) error
 	// PetClaim 领取归来积分；无未领奖励（code=400 no unclaimed）返回 ErrPetNoUnclaimed。
 	PetClaim(acct *auth.Auth) (int64, error)
 	// PetTravelConfig 探险可选地点（首个即默认目的地）。
@@ -69,12 +69,13 @@ type PetTravel struct {
 	} `json:"location"`
 }
 
-// PetLocation 探险地点（travel/config locations 元素）。
+// PetLocation 探险地点（travel/config locations 元素）。id 真实形态为数字
+// （活测实证 2026-09-06），json.Number 保类型透传进 depart body。
 type PetLocation struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	DurationHoursMin int    `json:"duration_hours_min"`
-	DurationHoursMax int    `json:"duration_hours_max"`
+	ID               json.Number `json:"id"`
+	Name             string      `json:"name"`
+	DurationHoursMin int         `json:"duration_hours_min"`
+	DurationHoursMax int         `json:"duration_hours_max"`
 }
 
 // ErrPetNoUnclaimed 宠物无未领取奖励（幂等：已领过）。
@@ -342,8 +343,8 @@ func (c *TencentClient) PetTravelConfig(acct *auth.Auth) ([]PetLocation, error) 
 	return env.Data.Locations, nil
 }
 
-// PetDepart 派出宠物前往地点。
-func (c *TencentClient) PetDepart(acct *auth.Auth, locationID string) error {
+// PetDepart 派出宠物前往地点（locationID 为 config 原生 id，数字/字符串保类型）。
+func (c *TencentClient) PetDepart(acct *auth.Auth, locationID json.Number) error {
 	if acct == nil {
 		return fmt.Errorf("account required for pet depart")
 	}
