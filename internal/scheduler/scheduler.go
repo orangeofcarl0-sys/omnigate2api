@@ -123,9 +123,11 @@ func (s *Scheduler) growthTasks(ctx context.Context) {
 		var pending []string
 		titles := map[string]string{}
 		for _, t := range tasks {
-			titles[t.TaskCode] = t.Title
-			if !t.Locked && t.AcceptStatus == "not_accepted" && t.TaskCode != "" {
-				pending = append(pending, t.TaskCode)
+			titles[t.TaskCode()] = t.Title
+			// 真实契约首态 available（旧一代为 not_accepted，两者都接）
+			st := t.TaskStatus()
+			if !t.Locked && t.TaskCode() != "" && (st == "available" || st == "not_accepted") {
+				pending = append(pending, t.TaskCode())
 			}
 		}
 		accepted := 0
@@ -153,12 +155,12 @@ func (s *Scheduler) growthTasks(ctx context.Context) {
 		var credit, energy int64
 		claimed := 0
 		for _, t := range tasks {
-			if t.Locked || t.AcceptStatus != "completed" || t.TaskCode == "" {
+			if t.Locked || t.TaskStatus() != "completed" || t.TaskCode() == "" {
 				continue
 			}
-			cc, ce, already, cerr := api.GrowthClaimTask(acct.Auth, t.TaskCode)
+			cc, ce, already, cerr := api.GrowthClaimTask(acct.Auth, t.TaskCode())
 			if cerr != nil {
-				log.Printf("tencent tasks account=%s action=claim code=%s failed err=%v", acct.Name, t.TaskCode, cerr)
+				log.Printf("tencent tasks account=%s action=claim code=%s failed err=%v", acct.Name, t.TaskCode(), cerr)
 				continue
 			}
 			if already {

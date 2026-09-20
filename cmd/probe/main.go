@@ -72,6 +72,32 @@ func main() {
 	if len(os.Args) > 3 {
 		model = os.Args[3]
 	}
+	// growth 模式（SPEC §32）：直查腾讯成长中心端点，打印原始响应（形状实证）。
+	if mode == "growth" {
+		var wb *auth.Auth
+		for _, x := range auths {
+			if x.Profile == "workbuddy" {
+				wb = x
+			}
+		}
+		if wb == nil {
+			panic("no workbuddy auth found")
+		}
+		path := "/activity/growth/tasks"
+		if msg != "" {
+			path = msg
+		}
+		tc := upstream.NewTencent(30 * time.Second)
+		raw, st, err := tc.DebugGet(wb, path)
+		fmt.Println("GET", path, "http=", st, "err=", err)
+		if len(raw) > 2000 {
+			fmt.Println(string(raw[:2000]), "...")
+		} else {
+			fmt.Println(string(raw))
+		}
+		return
+	}
+
 	chatID := fmt.Sprintf("%032x", time.Now().UnixNano())[:32]
 	fmt.Println("chat_id=", chatID, "user=", a.UserName, "uid=", a.UserID, "msg=", msg, "mode=", mode)
 

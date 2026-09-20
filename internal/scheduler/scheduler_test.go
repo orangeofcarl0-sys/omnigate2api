@@ -215,11 +215,11 @@ func TestSchedulerGrowthTasks(t *testing.T) {
 	stub := &fakeClient{
 		petState: "traveling",
 		tasks: []upstream.GrowthTask{
-			{TaskCode: "t1", Title: "每日对话", AcceptStatus: "not_accepted"},
-			{TaskCode: "t2", Title: "已接单", AcceptStatus: "accepted"},
-			{TaskCode: "t3", Title: "已完成待领", AcceptStatus: "completed", RewardCredit: 50, RewardEnergy: 10},
-			{TaskCode: "t4", Title: "已领过", AcceptStatus: "claimed"},
-			{TaskCode: "t5", Title: "锁定", Locked: true, AcceptStatus: "not_accepted"},
+			{Code: "t1", Title: "新任务", Status: "available"},
+			{Code: "t2", Title: "已接单", Status: "accepted"},
+			{Code: "t3", Title: "已完成待领", Status: "completed", RewardCredit: 50, RewardEnergy: 10},
+			{Code: "t4", Title: "已领过", Status: "claimed"},
+			{Code: "t5", Title: "锁定", Locked: true, Status: "available"},
 		},
 	}
 	p.Accounts()[0].Client = stub

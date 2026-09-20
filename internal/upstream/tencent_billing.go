@@ -482,14 +482,30 @@ func (c *TencentClient) PetOpenBox(acct *auth.Auth, count int) error {
 // 成长中心任务（SPEC §32 阶段 3：积分/能量主来源，宠物盲盒能量的唯一入口）
 // ---------------------------------------------------------------------------
 
-// GrowthTask 成长中心任务（2026-09 桌面端 H5 契约）。
+// GrowthTask 成长中心任务（真实契约，活测 2026-09-20 实证：字段为 code/status，
+// 首态 available；88lin 快照的 task_code/accept_status 是旧一代命名）。
 type GrowthTask struct {
-	TaskCode     string `json:"task_code"`
+	Code         string `json:"code"`
 	Title        string `json:"title"`
+	Description  string `json:"description"`
+	LevelName    string `json:"level_name"`
 	Locked       bool   `json:"locked"`
-	AcceptStatus string `json:"accept_status"` // not_accepted|accepted|in_progress|completed|claimed
+	Status       string `json:"status"` // available|accepted|in_progress|completed|claimed
 	RewardCredit int64  `json:"reward_credit"`
 	RewardEnergy int64  `json:"reward_energy"`
+}
+
+// TaskCode 兼容两代命名的任务编码（code 优先）。
+func (t GrowthTask) TaskCode() string {
+	if t.Code != "" {
+		return t.Code
+	}
+	return ""
+}
+
+// TaskStatus 兼容两代命名的状态（status 优先）。
+func (t GrowthTask) TaskStatus() string {
+	return t.Status
 }
 
 // GrowthTasks 查询任务列表。
@@ -582,4 +598,9 @@ func (c *TencentClient) GrowthClaimTask(acct *auth.Auth, code string) (int64, in
 		return 0, 0, false, fmt.Errorf("task claim failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
 	}
 	return env.Credit, env.Energy, env.AlreadyClaimed, nil
+}
+
+// DebugGet 活动域 GET 原样返回（cmd/probe 实证用；生产路径不经此）。
+func (c *TencentClient) DebugGet(acct *auth.Auth, path string) ([]byte, int, error) {
+	return c.petRequest(acct, http.MethodGet, path, nil)
 }
