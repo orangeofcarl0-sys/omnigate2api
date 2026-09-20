@@ -3,10 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
-	"compress/zlib"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -74,15 +74,23 @@ func main() {
 	}
 	// growth 模式（SPEC §32）：直查腾讯成长中心端点，打印原始响应（形状实证）。
 	if mode == "growth" {
+		// 账号选择：OMNIGATE_PROBE_UID 指定 uid（CN/全球双账号并存时用），
+		// 缺省取最后一个 workbuddy 账号。
+		wantUID := os.Getenv("OMNIGATE_PROBE_UID")
 		var wb *auth.Auth
 		for _, x := range auths {
-			if x.Profile == "workbuddy" {
-				wb = x
+			if x.Profile != "workbuddy" {
+				continue
 			}
+			if wantUID != "" && x.UserID != wantUID {
+				continue
+			}
+			wb = x
 		}
 		if wb == nil {
-			panic("no workbuddy auth found")
+			panic("no workbuddy auth found (OMNIGATE_PROBE_UID=" + wantUID + ")")
 		}
+		fmt.Println("account uid=", wb.UserID, "domain=", wb.Domain)
 		path := "/activity/growth/tasks"
 		if msg != "" {
 			path = msg
