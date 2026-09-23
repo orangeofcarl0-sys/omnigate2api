@@ -229,6 +229,10 @@ func (c *Client) PollTicket(ctx context.Context, cfg LoginConfig, ticketID, secr
 	if err := c.doJSON(ctx, http.MethodGet, cfg.SnapManager, path, headers, nil, &out); err != nil {
 		return nil, err
 	}
+	// 登录排查（OMNIGATE_LOGIN_DEBUG）：ticket 通道是否携带 refresh_token
+	if os.Getenv("OMNIGATE_LOGIN_DEBUG") != "" {
+		log.Printf("login ticket response: has_refresh=%v refresh_len=%d user=%s", out.RefreshToken != "", len(out.RefreshToken), out.UserID)
+	}
 	// 旧通道凭证归一化
 	if out.Credentials.SecurityToken == "" && out.Credential.SecurityToken != "" {
 		out.Credentials = Credentials{
