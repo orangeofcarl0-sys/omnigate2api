@@ -54,6 +54,9 @@ type BillingAPI interface {
 	// ReportDesktopChat 上报桌面端成功对话六连事件链（宠物领养前置解锁，
 	// SPEC §32.8；含桌面指纹，chat 域 /v2/report）。
 	ReportDesktopChat(acct *auth.Auth) error
+	// ReportTaskEvents 上报任务事件包（六连 + chat×5 + GLM + canvas + automation
+	// + 夜猫窗口 black_cat，SPEC §32.8；任务完成引擎）。
+	ReportTaskEvents(acct *auth.Auth) error
 	// PetAdopt 领养首只宠物：agreement({"agree":true}) → buddy/first；
 	// 成功直接发放 credit+energy（社区实证 +300c+8e），幂等（已领养返回既有态）。
 	PetAdopt(acct *auth.Auth) (credit, energy int64, err error)
@@ -682,6 +685,9 @@ func (c *TencentClient) DebugPostBody(acct *auth.Auth, path, body string) ([]byt
 // 活跃上报与宠物领养（SPEC §32.7；社区实证：report 前置 → agreement → buddy/first）
 // ---------------------------------------------------------------------------
 
+// cstZone 北京时间（任务窗口判定用）。
+var cstZone = time.FixedZone("CST", 8*3600)
+
 // deriveDeviceID 由 uid+盐稳定派生设备标识（md5 hex 32 位，SPEC §32.8 逆向：
 // 对齐 community deriveID，同一账号恒定——模拟固定设备，勿每次随机；
 // 仅用于埋点指纹注入，不参与业务逻辑）。
@@ -790,15 +796,98 @@ func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 			"rootRequestId": rid, "parentConversationId": cid,
 		}),
 	}
+	return c.postReport(acct, events)
+}
+
+// ReportTaskEvents 上报任务事件包（SPEC §32.8 逆向逐个任务的已验证形状）：
+// RichMeow 六连 + chat_5(×5) + Model_chat_GLM5.2 + create_canvas + automation_1
+// （+ 夜猫窗口内 black_cat×3）。发往 chat 域 /v2/report（桌面 UA + 指纹）。
+// 说明：事件只做「完成任务」的埋点，奖励由任务领取链路自动入账。
+func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
+	if acct == nil {
+		return fmt.Errorf("account required for task events")
+	}
+	if err := c.ReportDesktopChat(acct); err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	uid := acct.UserID
+	var evs []any
+
+	chatEv := func(idx int, modelID, modelName, mode string) map[string]any {
+		cid := fmt.Sprintf("wb-chat-%d-%d", now, idx)
+		return map[string]any{
+			"eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
+			"mode": mode, "conversationId": cid, "requestId": cid,
+			"inputLength": 12, "requestModelId": modelID, "requestModelName": modelName,
+			"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+			"codebaseEnable": false, "maxToken": 0, "maxSteps": 0, "temperature": 0,
+			"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
+			"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
+			"command": "", "expertId": "", "recommendId": "", "skillId": "",
+			"skillCount": 0, "totalCount": 0, "fileUri": "", "presentAt": now,
+			"traceId": "", "rootRequestId": cid, "parentConversationId": cid,
+			"agentName": "default", "agentType": "conversation", "userId": uid,
+		}
+	}
+	// chat_5：5 条独立会话
+	for i := 0; i < 5; i++ {
+		evs = append(evs, chatEv(i, "deepseek-v4-flash", "DeepSeek V4 Flash", "craft"))
+	}
+	// Model_chat_GLM5.2
+	evs = append(evs, chatEv(90, "glm-5.2", "GLM-5.2", "craft"))
+	// black_cat（夜猫 23:00-08:00 CST 窗口内 3 次）
+	if h := time.Now().In(cstZone).Hour(); h >= 23 || h < 8 {
+		for i := 0; i < 3; i++ {
+			evs = append(evs, chatEv(100+i, "glm-5.2", "GLM-5.2", "night"))
+		}
+	}
+	// create_canvas（自造画布 id）
+	runev := fmt.Sprintf("wb-run-%d", now)
+	evs = append(evs, map[string]any{
+		"eventCode": "wbx_design_canvas_task_create", "timestamp": now,
+		"reportDelay": 0, "conversationId": runev, "requestId": runev,
+		"source": "summon_keyword", "isCustomModel": false, "name": "",
+		"inputLength": 12, "id": fmt.Sprintf("wbx-canvas-%d", now),
+		"cost": 0, "isSuccessful": true, "userId": uid,
+	})
+	// automation_1
+	evs = append(evs, map[string]any{
+		"eventCode": "automated_task_create_suc", "timestamp": now, "reportDelay": 0,
+		"name": "每周五自动生成周报", "source": "manually",
+		"modelId": "deepseek-v4-flash", "modelIsThinking": false,
+		"expertId": "", "expertMarketplace": "", "connectorIds": "",
+		"connectorCount": 0, "skills": "", "skillCount": 0,
+		"scheduleType": "recurring", "pushToWeChat": false, "pushToWecomBot": false,
+		"conversationId": runev, "requestId": runev,
+		"schedule": map[string]any{"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"},
+		"prompt":   "每周五自动整理本周工作，生成一份周报。", "userId": uid,
+	})
+	// 注入桌面指纹（不覆盖事件自有键）
+	fp := desktopFingerprint(acct, now)
+	for i := range evs {
+		if e, ok := evs[i].(map[string]any); ok {
+			for k, v := range fp {
+				if _, exists := e[k]; !exists {
+					e[k] = v
+				}
+			}
+		}
+	}
+	return c.postReport(acct, evs)
+}
+
+// postReport 向 chat 域 /v2/report 批量上报事件（桌面 UA + 指纹头）。
+func (c *TencentClient) postReport(acct *auth.Auth, events []any) error {
 	body, _ := json.Marshal(events)
 	base, _ := c.resolve(acct.Domain)
 	req, err := http.NewRequest(http.MethodPost, base+"/v2/report", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
+	now := time.Now().UnixMilli()
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	// 桌面 UA 对齐官方客户端（SPEC §32.8：服务端按 UA/extName 关联桌面任务，通用 UA 事件被丢弃）
 	req.Header.Set("User-Agent", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1")
 	req.Header.Set("X-Request-ID", deriveDeviceID(acct.UserID, "req")+strconv.FormatInt(now%1000000, 10))
 	if acct.CloudDragonTok != "" {
@@ -816,7 +905,7 @@ func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("report desktop chat failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
+		return fmt.Errorf("report failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
 	}
 	return nil
 }

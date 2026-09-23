@@ -76,6 +76,7 @@ func (f *fakeClient) PetQuota(a *auth.Auth) (*upstream.PetQuota, error) {
 }
 func (f *fakeClient) PetOpenBox(a *auth.Auth, count int) error { f.opens++; return nil }
 func (f *fakeClient) ReportDesktopChat(a *auth.Auth) error     { f.reports++; return nil }
+func (f *fakeClient) ReportTaskEvents(a *auth.Auth) error      { f.reports++; return nil }
 func (f *fakeClient) PetAdopt(a *auth.Auth) (int64, int64, error) {
 	f.adopts++
 	if f.adoptErr != nil {

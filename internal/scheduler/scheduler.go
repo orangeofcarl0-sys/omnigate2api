@@ -104,7 +104,7 @@ func (s *Scheduler) Tick(ctx context.Context) {
 	s.petTravel(ctx)    // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
 }
 
-// growthReport 每自然日（北京时间）上报一次桌面六连事件链（SPEC §32.8 逆向落地）：
+// growthReport 每自然日（北京时间）上报一次任务事件包（SPEC §32.8 逆向落地）：
 // 这是服务端判定「桌面端成功对话」类任务（RichMeow_Chat/Model_chat_GLM5.2/chat_5 计数）
 // 完成的唯一途径；失败只记日志（§32.2 隔离拍板）。
 func (s *Scheduler) growthReport(ctx context.Context) {
@@ -113,7 +113,7 @@ func (s *Scheduler) growthReport(ctx context.Context) {
 		if !ok {
 			return "", nil
 		}
-		if err := api.ReportDesktopChat(acct.Auth); err != nil {
+		if err := api.ReportTaskEvents(acct.Auth); err != nil {
 			return "", err
 		}
 		return "ok", nil
