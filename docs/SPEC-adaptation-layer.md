@@ -1384,8 +1384,19 @@ sequenceDiagram
 - **闭环数字证明**：`RichMeow_Chat → claimed`（1/1，+100c+5e）+ `first_buddy → claimed`
   （+300c+8e）；energy `8 → 13`（total_earned=13）；`chat_5 → in_progress 2/5`
   （我们的对话事件在计数）。
-- **剩余**：16 个任务各有专属事件链（社区 MAPPING 已文档化：create_canvas/Library_read/
-  Buddy_App/Hp_Appearance/black_cat/…），按需逐项接入。
+- **自动化落地（本版）**：`ReportTaskEvents` 每日事件包（六连 + chat×5 + GLM + canvas +
+  automation + 夜猫 black_cat + market 专家/技能 + Buddy_App 五连），任务领取自动随 Tick 执行。
+  **当日实证入账**：`claimed=8`，credit **+1200**（first_buddy 300 + RichMeow 100 +
+  canvas 300 + Model_chat 100 + chat_5 100 + automation 100 + Buddy_App 100 + skill_1 100），
+  energy **8 → 43**；另有签到 100/日（累计 400，streak 4）与探险循环并行。
+- **剩余任务（9 项，各需独立事件细节）**：`expert_5`（需 5 个**不同**专家 id，实测 1/5）、
+  `Expert_team_use_3`（team 类型筛选未命中，需实测 team 专家字段）、`Expert_lighthouse`
+  （轻量云专家 id 需专项定位）、`template_5`（scenes 场景 id 源未接）、`Library_read`
+  （web 域事件：www.workbuddy.cn + web 指纹）、`Hp_Appearance`（和平精英主题 resourceKey）、
+  `Buddy_App_QQ`（QQ Buddy 应用 id）、`playbook_prompt`（灵感案例 id）、
+  `wb_wechat_oa_subscribe_task`（真实关注动作）、`Expert_Philanthropy`（真实捐款，不可伪造）、
+  `black_cat`（夜猫窗口，实测 1/3 计数规则待明）。接入模式已固化：**照抄社区 MAPPING
+  的对象 id 来源 + 事件形状即可**。
 
 **活体结果（2026-09-23 22:0x）**：
 
