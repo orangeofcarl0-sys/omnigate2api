@@ -563,7 +563,7 @@ func (c *TencentClient) GrowthTasks(acct *auth.Auth) ([]GrowthTask, error) {
 	if acct == nil {
 		return nil, fmt.Errorf("account required for growth tasks")
 	}
-	raw, status, err := c.petRequest(acct, http.MethodGet, "/activity/growth/tasks", nil)
+	raw, status, err := c.petRequest(acct, http.MethodGet, "/v2/activity/growth/tasks", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -599,7 +599,7 @@ func (c *TencentClient) GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[
 		codes = codes[:20]
 	}
 	body, _ := json.Marshal(map[string]any{"task_codes": codes})
-	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/tasks/accept", body)
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/v2/activity/growth/tasks/accept", body)
 	if err != nil {
 		return nil, err
 	}

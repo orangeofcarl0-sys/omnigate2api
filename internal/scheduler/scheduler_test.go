@@ -274,7 +274,7 @@ func TestSchedulerBuddyAdoption(t *testing.T) {
 	s := New(Config{Pool: p, Enabled: true})
 	s.Tick(context.Background())
 	if stub.reports != 1 || stub.adopts != 1 {
-		t.Fatalf("adoption chain must run: reports=%d adopts=%d", stub.reports, stub.adopts)
+		t.Fatalf("daily report + adoption must run: reports=%d adopts=%d", stub.reports, stub.adopts)
 	}
 	if stub.opens != 0 {
 		t.Fatalf("successful adoption must not fall back to energy box: opens=%d", stub.opens)

@@ -99,8 +99,25 @@ func (s *Scheduler) Tick(ctx context.Context) {
 	}
 	s.claimBenefit(ctx)
 	s.claimTencentCheckin(ctx)
-	s.growthTasks(ctx) // SPEC §32 阶段 3：任务接单/领奖（积分+能量主来源）
-	s.petTravel(ctx)   // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
+	s.growthReport(ctx) // SPEC §32.8：每日桌面六连事件链（任务完成引擎，先于任务领取）
+	s.growthTasks(ctx)  // SPEC §32 阶段 3：任务接单/领奖（积分+能量主来源）
+	s.petTravel(ctx)    // SPEC §32.2：宠物探险状态机随 Tick 执行（小时级周期需多次检查）
+}
+
+// growthReport 每自然日（北京时间）上报一次桌面六连事件链（SPEC §32.8 逆向落地）：
+// 这是服务端判定「桌面端成功对话」类任务（RichMeow_Chat/Model_chat_GLM5.2/chat_5 计数）
+// 完成的唯一途径；失败只记日志（§32.2 隔离拍板）。
+func (s *Scheduler) growthReport(ctx context.Context) {
+	s.claimDaily(ctx, "tencent desktop report", "workbuddy", func(acct *pool.Account) (string, error) {
+		api, ok := acct.Client.(upstream.BillingAPI)
+		if !ok {
+			return "", nil
+		}
+		if err := api.ReportDesktopChat(acct.Auth); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	})
 }
 
 // growthTasks 成长中心任务自动化（SPEC §32 阶段 3）：接单（not_accepted）
@@ -275,10 +292,7 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 // 领养不可用（如已领养/前置未满足）则退回能量开盲盒（quota → open）。
 // 失败只记日志（§32.2 隔离拍板）。
 func (s *Scheduler) activateBuddy(acct *pool.Account, api upstream.BillingAPI) {
-	// 领养链路：桌面六连事件链为前置（缺则领养 400 first_buddy not completed）
-	if rerr := api.ReportDesktopChat(acct.Auth); rerr != nil {
-		log.Printf("tencent pet account=%s action=report failed err=%v", acct.Name, rerr)
-	}
+	// 领养链路（前置事件链已由 growthReport 每日上报；此处不再重复）
 	credit, energy, aerr := api.PetAdopt(acct.Auth)
 	switch {
 	case aerr == nil:
