@@ -93,11 +93,15 @@ type PetLocation struct {
 // ErrPetNoUnclaimed 宠物无未领取奖励（幂等：已领过）。
 var ErrPetNoUnclaimed = errors.New("pet: no unclaimed reward")
 
-// activityBaseFor 活动域（SPEC §32.2）：copilot.tencent.com（脚本实证），
-// OMNIGATE_ACTIVITY_BASE 覆盖（测试/实验）。
-func (c *TencentClient) activityBaseFor() string {
+// activityBaseFor 活动域（SPEC §32.2/§32.6 域感知）：global（.workbuddy.ai）→
+// 全球 base（活测实证 2026-09-21：成长中心/任务 200、契约与 CN 同源），
+// CN → copilot.tencent.com；OMNIGATE_ACTIVITY_BASE 覆盖（测试/实验）。
+func (c *TencentClient) activityBaseFor(domain string) string {
 	if v := os.Getenv("OMNIGATE_ACTIVITY_BASE"); v != "" {
 		return strings.TrimRight(v, "/")
+	}
+	if tencentRegion(domain) {
+		return tencentBaseGlobal
 	}
 	return "https://copilot.tencent.com"
 }
@@ -290,7 +294,7 @@ func (c *TencentClient) petRequest(acct *auth.Auth, method, path string, body []
 	if len(body) > 0 {
 		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, c.activityBaseFor()+path, rd)
+	req, err := http.NewRequest(method, c.activityBaseFor(acct.Domain)+path, rd)
 	if err != nil {
 		return nil, 0, err
 	}

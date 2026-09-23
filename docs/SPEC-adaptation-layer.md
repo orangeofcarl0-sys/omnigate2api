@@ -1336,3 +1336,15 @@ sequenceDiagram
 - 成长中心其他未实证活动（如后续发现再做考据立项）；
 - UI 自动化/指纹绕过类兜底（风控纪律）；
 - 活动积分与聊天额度的联动（两套体系互不影响，仅观测展示）。
+
+### 32.6 全球版（workbuddy.ai）支持（2026-09-21 实证）
+
+- **设备流可用**：`OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 走既有
+  `login-tencent url/poll` 全流程成功（`/v2/plugin/auth/state` 等全球部署）；
+- **成长中心同源**：`GET {global}/activity/growth/tasks`（含 `/v2` 前缀形态）
+  返回 200 且任务清单与 CN 完全一致——全球版与 CN 是同一后端产品代码库；
+- **域感知落地（拍板）**：`activityBaseFor(domain)` 改为域感知（`.workbuddy.ai` →
+  全球 base，CN 默认行为不变）；签到族/余额/聊天本就域感知（`billingBaseFor`/
+  `resolve`）——全球账号经本网关为**全功能一等公民**；
+- 未实证项：全球域签到/宠物写入路径的返回细节（随调度器自然跑出日志实证，
+  失败按 §32.2 隔离语义）。
