@@ -476,7 +476,9 @@ async function loadGrowth(){
       <td><strong>${escapeHtml(a.nick || "未命名")}</strong>
         <span class="badge" data-fam="workbuddy">${realm}</span>
         <div class="mono muted" style="font-size:11px" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div></td>
-      <td><strong>${Number(a.credits||0).toLocaleString()}</strong>${a.credits_error?`<div class="muted" style="font-size:11px">${escapeHtml(a.credits_error)}</div>`:""}</td>
+      <td><strong>${Number(a.credits||0).toLocaleString()}</strong>
+        ${ck.total_credits?`<div class="muted" style="font-size:11px">活动累计 ${Number(ck.total_credits).toLocaleString()}</div>`:""}
+        ${a.credits_error?`<div class="muted" style="font-size:11px">${escapeHtml(a.credits_error)}</div>`:""}</td>
       <td>${a.energy!==undefined?`<strong>${a.energy}</strong>`:"—"}</td>
       <td>${active} ${today}<div class="muted" style="font-size:11px">连续 ${ck.streak_days||0} 天 · 累计 ${Number(ck.total_credits||0).toLocaleString()}</div></td>
       <td>${tk.total?`<strong>${tk.claimed||0}</strong> 已领 / ${tk.completed||0} 待领 / ${tk.total} 个`: (a.tasks?"—":"—")}</td>
