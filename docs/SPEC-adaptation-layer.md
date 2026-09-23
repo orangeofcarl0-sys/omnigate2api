@@ -1346,5 +1346,12 @@ sequenceDiagram
 - **域感知落地（拍板）**：`activityBaseFor(domain)` 改为域感知（`.workbuddy.ai` →
   全球 base，CN 默认行为不变）；签到族/余额/聊天本就域感知（`billingBaseFor`/
   `resolve`）——全球账号经本网关为**全功能一等公民**；
-- 未实证项：全球域签到/宠物写入路径的返回细节（随调度器自然跑出日志实证，
-  失败按 §32.2 隔离语义）。
+- **10001 双语义（2026-09-23 实证，重要）**：CN「今天已签到」（幂等成功）与全球
+  「签到活动未开启或已过期」（活动态）**共用业务码 10001**——按消息文本分流
+  （`已签到`/`already` → Already；否则 → Inactive，如实记 `skip reason=activity_inactive`，
+  绝不误报成功）；
+- **全球版签到活动当前未开启**（status 实证：`active:false`、`start_time:""`）——
+  腾讯侧运营状态，非集成缺陷；新增**活动态预检**（status 显式 `active=false` 时跳过
+  领取，字段缺失的 CN 形态不预检，零行为变化）；活动开启后自动领取无需再改代码；
+- 全球版宠物：无宠物账号 `travel/status` 返回空 `data`（CN 为 `state=idle`）→ 空 state
+  归入激活分支；`buddy/quota` 含 `balance`（能量余额，已入日志）。

@@ -215,3 +215,22 @@ func TestTencentPetActivation(t *testing.T) {
 		t.Fatalf("claim body must carry record_id: %s", claimBody)
 	}
 }
+
+// SPEC §32.6：10001 双语义——全球版「活动未开启」不得当作"已签到成功"。
+func TestTencentDailyCheckinInactive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":10001,"msg":"签到活动未开启或已过期"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	res, err := c.DailyCheckin(billingAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || res.Already || !res.Inactive || res.Reason == "" {
+		t.Fatalf("global inactive must be reported as inactive (not already): %+v", res)
+	}
+}

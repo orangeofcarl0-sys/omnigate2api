@@ -96,6 +96,16 @@ func main() {
 			path = msg
 		}
 		tc := upstream.NewTencent(30 * time.Second)
+		if mode2 := os.Getenv("OMNIGATE_PROBE_METHOD"); mode2 == "POST" {
+			raw, st, err := tc.DebugPost(wb, path)
+			fmt.Println("POST", path, "http=", st, "err=", err)
+			if len(raw) > 2000 {
+				fmt.Println(string(raw[:2000]), "...")
+			} else {
+				fmt.Println(string(raw))
+			}
+			return
+		}
 		raw, st, err := tc.DebugGet(wb, path)
 		fmt.Println("GET", path, "http=", st, "err=", err)
 		if len(raw) > 2000 {

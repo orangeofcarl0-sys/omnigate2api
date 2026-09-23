@@ -51,14 +51,20 @@ type BillingAPI interface {
 }
 
 // CheckinResult 签到结果（幂等重复签到 Already=true，Credit 为本轮所得）。
+// Inactive：签到活动未开启/已过期（2026-09-23 全球版实证：与 CN「已签到」
+// 共用业务码 10001，语义按消息文本分流）。
 type CheckinResult struct {
 	Already    bool
+	Inactive   bool
+	Reason     string
 	Credit     int64
 	StreakDays int64
 }
 
 // CheckinStatus 签到活动状态（checkin-activity-status 响应 data）。
+// Active 为指针：字段缺失（CN 形态）= nil → 不做预检跳过；显式 false → 活动未开启。
 type CheckinStatus struct {
+	Active         *bool  `json:"active"`
 	ThemeName      string `json:"theme_name"`
 	TodayCheckedIn bool   `json:"today_checked_in"`
 	StreakDays     int64  `json:"streak_days"`
@@ -168,9 +174,14 @@ func (c *TencentClient) DailyCheckin(acct *auth.Auth) (*CheckinResult, error) {
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(raw, &env)
-	// 真实形态：已签到为 HTTP 400 + code=10001（8f 实测）——业务码优先于状态码判定
+	// 真实形态：已签到为 HTTP 400 + code=10001（8f 实测）——业务码优先于状态码判定。
+	// 10001 双语义（2026-09-23 全球版实证）：CN「今天已签到」= 幂等成功；
+	// 全球「签到活动未开启或已过期」= 活动态，非成功非错误，如实上报。
 	if env.Code == 10001 {
-		return &CheckinResult{Already: true, Credit: env.Data.Credit, StreakDays: env.Data.StreakDays}, nil
+		if strings.Contains(env.Msg, "已签到") || strings.Contains(strings.ToLower(env.Msg), "already") {
+			return &CheckinResult{Already: true, Credit: env.Data.Credit, StreakDays: env.Data.StreakDays}, nil
+		}
+		return &CheckinResult{Inactive: true, Reason: truncateStr(env.Msg, 120)}, nil
 	}
 	if status >= 400 || env.Code != 0 {
 		return nil, fmt.Errorf("daily-checkin failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
@@ -609,4 +620,9 @@ func (c *TencentClient) GrowthClaimTask(acct *auth.Auth, code string) (int64, in
 // DebugGet 活动域 GET 原样返回（cmd/probe 实证用；生产路径不经此）。
 func (c *TencentClient) DebugGet(acct *auth.Auth, path string) ([]byte, int, error) {
 	return c.petRequest(acct, http.MethodGet, path, nil)
+}
+
+// DebugPost 计费域 POST {} 原样返回（cmd/probe 实证用；生产路径不经此）。
+func (c *TencentClient) DebugPost(acct *auth.Auth, path string) ([]byte, int, error) {
+	return c.billingPost(acct, path, []byte("{}"))
 }

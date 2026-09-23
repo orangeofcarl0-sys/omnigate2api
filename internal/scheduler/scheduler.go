@@ -234,23 +234,32 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 		if !ok {
 			return "", nil // 无计费能力（非腾讯客户端）：跳过
 		}
+		// 活动态预检（2026-09-23 实证）：status 显式给出 active=false 时直接跳过
+		// 领取（全球版活动未开启时领取必 10001）；字段缺失（CN 形态）不预检。
+		st, serr := api.CheckinStatus(acct.Auth)
+		if serr == nil && st != nil && st.Active != nil && !*st.Active {
+			return fmt.Sprintf("skip reason=activity_inactive theme=%s", st.ThemeName), nil
+		}
 		res, err := api.DailyCheckin(acct.Auth)
 		if err != nil {
 			return "", err
 		}
 		gain := ""
 		if res != nil {
-			if res.Already {
+			switch {
+			case res.Inactive:
+				return fmt.Sprintf("skip reason=activity_inactive msg=%s", res.Reason), nil
+			case res.Already:
 				gain = " already"
-			} else {
+			default:
 				gain = fmt.Sprintf(" credit=+%d", res.Credit)
 			}
 			if res.StreakDays > 0 {
 				gain += fmt.Sprintf(" streak=%d", res.StreakDays)
 			}
 		}
-		if st, serr := api.CheckinStatus(acct.Auth); serr == nil && st != nil {
-			gain += fmt.Sprintf(" total=%d theme=%s", st.TotalCredits, st.ThemeName)
+		if st2, serr2 := api.CheckinStatus(acct.Auth); serr2 == nil && st2 != nil {
+			gain += fmt.Sprintf(" total=%d theme=%s", st2.TotalCredits, st2.ThemeName)
 		}
 		remain, rerr := api.UserResource(acct.Auth)
 		if rerr != nil {
