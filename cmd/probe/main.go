@@ -108,11 +108,7 @@ func main() {
 		}
 		raw, st, err := tc.DebugGet(wb, path)
 		fmt.Println("GET", path, "http=", st, "err=", err)
-		if len(raw) > 2000 {
-			fmt.Println(string(raw[:2000]), "...")
-		} else {
-			fmt.Println(string(raw))
-		}
+		fmt.Println(string(raw))
 		return
 	}
 

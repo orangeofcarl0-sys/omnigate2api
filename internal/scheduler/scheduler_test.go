@@ -75,7 +75,7 @@ func (f *fakeClient) PetQuota(a *auth.Auth) (*upstream.PetQuota, error) {
 	return &upstream.PetQuota{Affordable: 3, MaxOpenCount: 1, CostPerOpen: 50}, nil
 }
 func (f *fakeClient) PetOpenBox(a *auth.Auth, count int) error { f.opens++; return nil }
-func (f *fakeClient) ReportActive(a *auth.Auth) error          { f.reports++; return nil }
+func (f *fakeClient) ReportDesktopChat(a *auth.Auth) error     { f.reports++; return nil }
 func (f *fakeClient) PetAdopt(a *auth.Auth) (int64, int64, error) {
 	f.adopts++
 	if f.adoptErr != nil {
@@ -231,6 +231,7 @@ func TestSchedulerGrowthTasks(t *testing.T) {
 		petState: "traveling",
 		tasks: []upstream.GrowthTask{
 			{Code: "t1", Title: "新任务", Status: "available"},
+			{TaskCodeRaw: "create_canvas", Title: "CN 新赛季任务", AcceptStatus: "not_accepted"},
 			{Code: "t2", Title: "已接单", Status: "accepted"},
 			{Code: "t3", Title: "已完成待领", Status: "completed", RewardCredit: 50, RewardEnergy: 10},
 			{Code: "t4", Title: "已领过", Status: "claimed"},
@@ -240,8 +241,16 @@ func TestSchedulerGrowthTasks(t *testing.T) {
 	p.Accounts()[0].Client = stub
 	s := New(Config{Pool: p, Enabled: true})
 	s.Tick(context.Background())
-	if len(stub.acceptBatches) != 1 || len(stub.acceptBatches[0]) != 1 || stub.acceptBatches[0][0] != "t1" {
+	// 两代形态各一可接单：旧态 t1(available) + CN 新赛季 create_canvas(not_accepted)
+	if len(stub.acceptBatches) != 1 || len(stub.acceptBatches[0]) != 2 {
 		t.Fatalf("accept batches=%v", stub.acceptBatches)
+	}
+	got := map[string]bool{}
+	for _, c := range stub.acceptBatches[0] {
+		got[c] = true
+	}
+	if !got["t1"] || !got["create_canvas"] {
+		t.Fatalf("accept batch must cover both shapes: %v", stub.acceptBatches[0])
 	}
 	if len(stub.claimCodes) != 1 || stub.claimCodes[0] != "t3" {
 		t.Fatalf("claim codes=%v", stub.claimCodes)

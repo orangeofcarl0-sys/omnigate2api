@@ -124,9 +124,7 @@ func (s *Scheduler) growthTasks(ctx context.Context) {
 		titles := map[string]string{}
 		for _, t := range tasks {
 			titles[t.TaskCode()] = t.Title
-			// 真实契约首态 available（旧一代为 not_accepted，两者都接）
-			st := t.TaskStatus()
-			if !t.Locked && t.TaskCode() != "" && (st == "available" || st == "not_accepted") {
+			if !t.Locked && t.TaskCode() != "" && t.Actionable() {
 				pending = append(pending, t.TaskCode())
 			}
 		}
@@ -157,7 +155,7 @@ func (s *Scheduler) growthTasks(ctx context.Context) {
 		var credit, energy int64
 		claimed := 0
 		for _, t := range tasks {
-			if t.Locked || t.TaskStatus() != "completed" || t.TaskCode() == "" {
+			if t.Locked || !t.Completed() || t.TaskCode() == "" {
 				continue
 			}
 			cc, ce, already, cerr := api.GrowthClaimTask(acct.Auth, t.TaskCode())
@@ -277,8 +275,8 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 // 领养不可用（如已领养/前置未满足）则退回能量开盲盒（quota → open）。
 // 失败只记日志（§32.2 隔离拍板）。
 func (s *Scheduler) activateBuddy(acct *pool.Account, api upstream.BillingAPI) {
-	// 领养链路：活跃上报为前置（缺则领养 400 first_buddy not completed）
-	if rerr := api.ReportActive(acct.Auth); rerr != nil {
+	// 领养链路：桌面六连事件链为前置（缺则领养 400 first_buddy not completed）
+	if rerr := api.ReportDesktopChat(acct.Auth); rerr != nil {
 		log.Printf("tencent pet account=%s action=report failed err=%v", acct.Name, rerr)
 	}
 	credit, energy, aerr := api.PetAdopt(acct.Auth)

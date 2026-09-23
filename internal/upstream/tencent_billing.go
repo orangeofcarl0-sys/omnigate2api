@@ -4,6 +4,8 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,8 +50,9 @@ type BillingAPI interface {
 	GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[string]string, error)
 	// GrowthClaimTask 领取已完成任务奖励；已领 already=true。
 	GrowthClaimTask(acct *auth.Auth, code string) (credit, energy int64, already bool, err error)
-	// ReportActive 活跃上报（chat_request_send 单事件；宠物领养前置解锁，SPEC §32.7）。
-	ReportActive(acct *auth.Auth) error
+	// ReportDesktopChat 上报桌面端成功对话六连事件链（宠物领养前置解锁，
+	// SPEC §32.8；含桌面指纹，chat 域 /v2/report）。
+	ReportDesktopChat(acct *auth.Auth) error
 	// PetAdopt 领养首只宠物：agreement({"agree":true}) → buddy/first；
 	// 成功直接发放 credit+energy（社区实证 +300c+8e），幂等（已领养返回既有态）。
 	PetAdopt(acct *auth.Auth) (credit, energy int64, err error)
@@ -318,6 +321,10 @@ func (c *TencentClient) petRequest(acct *auth.Auth, method, path string, body []
 	if len(body) == 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// 客户端平台标识（实证：服务端按此下发不同任务域；缺省不设保持现状）
+	if plat := os.Getenv("OMNIGATE_ACTIVITY_PLATFORM"); plat != "" {
+		req.Header.Set("X-Client-Platform", plat)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -504,30 +511,51 @@ func (c *TencentClient) PetOpenBox(acct *auth.Auth, count int) error {
 // 成长中心任务（SPEC §32 阶段 3：积分/能量主来源，宠物盲盒能量的唯一入口）
 // ---------------------------------------------------------------------------
 
-// GrowthTask 成长中心任务（真实契约，活测 2026-09-20 实证：字段为 code/status，
-// 首态 available；88lin 快照的 task_code/accept_status 是旧一代命名）。
+// GrowthTask 成长中心任务。**双形态实证**（2026-09-23 活测对照）：
+//   - CN 当前赛季（19 任务）：task_code / accept_status(not_accepted|…) / reward_* 全量；
+//   - 全球版与旧赛季（5 任务 stub）：code / status(available)（accept 返回 task not found）。
+//
+// 两代命名并存解析，对外统一走 TaskCode()/TaskStatus()。
 type GrowthTask struct {
 	Code         string `json:"code"`
+	TaskCodeRaw  string `json:"task_code"`
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	LevelName    string `json:"level_name"`
 	Locked       bool   `json:"locked"`
-	Status       string `json:"status"` // available|accepted|in_progress|completed|claimed
+	Status       string `json:"status"`        // 旧形态：available|accepted|…
+	AcceptStatus string `json:"accept_status"` // CN 当前形态：not_accepted|accepted|in_progress|completed|claimed
 	RewardCredit int64  `json:"reward_credit"`
 	RewardEnergy int64  `json:"reward_energy"`
 }
 
-// TaskCode 兼容两代命名的任务编码（code 优先）。
+// TaskCode 任务编码（两代命名兼容，task_code 优先——CN 当前赛季用后者）。
 func (t GrowthTask) TaskCode() string {
-	if t.Code != "" {
-		return t.Code
+	if t.TaskCodeRaw != "" {
+		return t.TaskCodeRaw
 	}
-	return ""
+	return t.Code
 }
 
-// TaskStatus 兼容两代命名的状态（status 优先）。
+// TaskStatus 任务状态（两代命名兼容，accept_status 优先）。
+// 归一化：available/not_accepted 等价（可接单）。
 func (t GrowthTask) TaskStatus() string {
-	return t.Status
+	st := t.AcceptStatus
+	if st == "" {
+		st = t.Status
+	}
+	return st
+}
+
+// Actionable 是否可接单（两代首态等价）。
+func (t GrowthTask) Actionable() bool {
+	st := t.TaskStatus()
+	return st == "available" || st == "not_accepted"
+}
+
+// Completed 是否已完成待领奖。
+func (t GrowthTask) Completed() bool {
+	return t.TaskStatus() == "completed"
 }
 
 // GrowthTasks 查询任务列表。
@@ -653,33 +681,131 @@ func (c *TencentClient) DebugPostBody(acct *auth.Auth, path, body string) ([]byt
 // 活跃上报与宠物领养（SPEC §32.7；社区实证：report 前置 → agreement → buddy/first）
 // ---------------------------------------------------------------------------
 
-// ReportActive 上报一条 chat_request_send 活跃事件（领养链路的前置解锁；
-// 事件形状对齐官方客户端埋点，缺 userId 服务端静默丢弃）。
-func (c *TencentClient) ReportActive(acct *auth.Auth) error {
+// deriveDeviceID 由 uid+盐稳定派生设备标识（md5 hex 32 位，SPEC §32.8 逆向：
+// 对齐 community deriveID，同一账号恒定——模拟固定设备，勿每次随机；
+// 仅用于埋点指纹注入，不参与业务逻辑）。
+func deriveDeviceID(uid, salt string) string {
+	sum := md5.Sum([]byte(salt + ":" + uid))
+	return hex.EncodeToString(sum[:])
+}
+
+// desktopFingerprint 桌面端埋点公共指纹（SPEC §32.8 逆向：逐字段对齐官方
+// 桌面客户端；userId 为账号 uid，缺失则服务端静默丢弃）。
+func desktopFingerprint(acct *auth.Auth, now int64) map[string]any {
+	nick := acct.UserName
+	return map[string]any{
+		"timezone": "Asia/Shanghai", "reportDelay": 2000,
+		"userId": acct.UserID, "username": nick, "userNickname": nick,
+		"product": "SaaS", "releaseDate": 1789036585355,
+		"commit":  "5f9692923c93033111c51ad7b003eb80204a9b75",
+		"ideName": "WorkBuddy", "ideType": "WorkBuddy", "ideVersion": "5.5.6",
+		"machineId": deriveDeviceID(acct.UserID, "machine"),
+		"sessionId": deriveDeviceID(acct.UserID, "session"),
+		"extName":   "workbuddy-desktop", "extVersion": "5.5.6",
+		"os": "win32", "arch": "x64", "osVersion": "10.0.26220",
+		"cpuCores": 20, "memorySize": 24,
+		"timestamp": now, "presentAt": now,
+	}
+}
+
+// ReportDesktopChat 上报「桌面端成功对话」六连事件链（SPEC §32.8 逆向落地）：
+// agent_task_created → chat_message_send → chat_request_send → chat_message_response
+// → chat_message_status → chat_request_response，逐条注入桌面指纹；发往 chat 域
+// /v2/report。用于解锁 first_buddy（宠物领养前置）。
+func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 	if acct == nil {
 		return fmt.Errorf("account required for report")
 	}
 	now := time.Now().UnixMilli()
-	cid := fmt.Sprintf("wgw-%d", now)
-	ev := map[string]any{
-		"eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
-		"mode": "craft", "conversationId": cid, "requestId": cid,
-		"inputLength": 12, "requestModelId": "glm-5.2", "requestModelName": "GLM-5.2",
-		"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
-		"codebaseEnable": false, "maxToken": 0, "maxSteps": 0, "temperature": 0,
-		"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
-		"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
-		"command": "", "expertId": "", "recommendId": "", "skillId": "",
-		"skillCount": 0, "totalCount": 0, "fileUri": "", "presentAt": now,
-		"traceId": "", "rootRequestId": cid, "parentConversationId": cid,
-		"agentName": "default", "agentType": "conversation", "userId": acct.UserID,
+	cid := fmt.Sprintf("wb-%d", now)
+	rid, mid := cid, cid
+	fp := func() map[string]any {
+		f := desktopFingerprint(acct, now)
+		f["conversationId"] = cid
+		f["requestId"] = rid
+		return f
 	}
-	body, _ := json.Marshal([]any{ev})
-	req, err := http.NewRequest(http.MethodPost, c.billingBaseFor(acct.Domain)+"/v2/report", bytes.NewReader(body))
+	ev := func(code string, extra map[string]any) map[string]any {
+		e := map[string]any{"eventCode": code, "timestamp": now, "mode": "craft"}
+		for k, v := range extra {
+			e[k] = v
+		}
+		for k, v := range fp() {
+			if _, exists := e[k]; !exists {
+				e[k] = v
+			}
+		}
+		return e
+	}
+	events := []any{
+		ev("agent_task_created", map[string]any{
+			"source": "LOCAL", "name": "working", "task_target": "local",
+			"requestModelId": "glm-5.2", "requestModelName": "GLM-5.2",
+			"has_repo": false, "repo_type": "none", "workspace_type": "empty",
+			"has_connector": false, "connector_types": []any{},
+			"has_mention": false, "mention_types": []any{},
+			"has_template": false, "action": "", "template_name": "",
+			"has_expert": false, "expert_id": "", "expert_name": "", "expert_industry_id": "",
+			"has_skill": false, "skill_names": []any{},
+			"conversationId": cid, "messageId": mid, "buddyId": "", "buddyName": "",
+		}),
+		ev("chat_message_send", map[string]any{
+			"messageId": mid + "-assistant", "historyCount": 0,
+			"isContextTruncated": false, "currentStepCount": 1,
+			"traceId": rid, "rootRequestId": rid, "parentConversationId": cid,
+			"agentName": "cli", "agentType": "main",
+		}),
+		ev("chat_request_send", map[string]any{
+			"inputLength": 24, "isPlan": false, "isAutoExecuteTerminal": false,
+			"isAutoModify": false, "codebaseEnable": false, "maxToken": 0,
+			"maxSteps": 500, "temperature": 0, "maxRetries": 0,
+			"mentionContexts": []any{}, "knowledgeId": []any{}, "knowledgeName": []any{},
+			"codebaseId": "", "mentionContextCount": 0, "command": "",
+			"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
+			"traceId": rid, "rootRequestId": rid, "parentConversationId": cid,
+			"agentName": "cli", "agentType": "main",
+			"codebuddy.session_id": cid, "codebuddy.conversation_request_id": rid,
+		}),
+		ev("chat_message_response", map[string]any{
+			"messageId": mid + "-assistant", "responseModelId": "glm-5.2",
+			"inputToken": 120, "outputToken": 80, "totalToken": 200,
+			"cachedTokens": 0, "cachedWriteTokens": 0, "cachedMissTokens": 0,
+			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
+			"firstTokenAt": now, "traceId": rid, "conversationId": cid,
+			"rootRequestId": rid, "parentConversationId": cid,
+			"agentName": "cli", "agentType": "main",
+			"codebuddy.session_id": cid, "codebuddy.conversation_request_id": rid,
+		}),
+		ev("chat_message_status", map[string]any{
+			"messageId": mid + "-assistant", "messageErrorCode": "0",
+			"traceId": rid, "rootRequestId": rid, "parentConversationId": cid,
+			"agentName": "cli", "agentType": "main",
+		}),
+		ev("chat_request_response", map[string]any{
+			"toolCallCount": 0,
+			"inputToken":    120, "outputToken": 80, "totalToken": 200,
+			"cachedTokens": 0, "cachedWriteTokens": 0, "cachedMissTokens": 0,
+			"isSuccessful": true, "messageErrorCode": "", "finishReason": "stop",
+			"rootRequestId": rid, "parentConversationId": cid,
+		}),
+	}
+	body, _ := json.Marshal(events)
+	base, _ := c.resolve(acct.Domain)
+	req, err := http.NewRequest(http.MethodPost, base+"/v2/report", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	billingHeaders(req, billingCred(acct))
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", TencentClientUA)
+	if acct.CloudDragonTok != "" {
+		req.Header.Set("Authorization", "Bearer "+acct.CloudDragonTok)
+	}
+	req.Header.Set("X-User-Id", acct.UserID)
+	if acct.Domain != "" {
+		req.Header.Set("X-Domain", acct.Domain)
+	}
+	req.Header.Set("X-Product", "SaaS")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -687,7 +813,7 @@ func (c *TencentClient) ReportActive(acct *auth.Auth) error {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("report failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
+		return fmt.Errorf("report desktop chat failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
 	}
 	return nil
 }
