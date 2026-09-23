@@ -116,6 +116,16 @@ Body：
 | ticket 轮询 | `GET {snap-manager}/v1/login/ticket?ticket_id&secret` | ✅ 登录成功；**响应不含 refresh_token**（落盘凭证 `refresh_token` 长度 0；代码侧已确认 `TokenResponse.RefreshToken` 会被 `saveLoginResult` 写入 → 是服务端未下发） |
 | code 回调 | 门户 → `http://127.0.0.1:{port}/oauth/callback?code=…` → `POST {sts}/v1/oauth2/tokens`（authorization_code） | ❌ **未触发**：门户只回第一阶段回调（`code_bytes=0 secret_bytes=64 redirect_len=278`），网关 307 把浏览器送回门户后，门户**不再回带 code**（浏览器显示「登录失败」）；两轮均如此 |
 
-**推断（待验证）**：authorize URL 携带 `uri_scheme=codearts`，门户的授权确认可能依赖**自定义协议回传**（官方客户端注册了 `codearts://`，纯浏览器无该处理器故停在失败页）。若成立，可行的根治路径是：在 Windows 注册 `codearts://` 协议 → 指向本地小工具 → 由它拿 code 走 `authorization_code` 换取（该响应按老记录含 `refresh_token`）→ 接入现有 `RefreshToken` 自动续期。
+**第三轮实证（2026-09-24，协议回传假设 → 已证伪）**：注册 `HKCU\Software\Classes\codearts`
+协议处理器（tools/install-codearts-uri.ps1）后重跑登录：
+
+- 门户**从未触发** `codearts://`（处理器日志无调用记录）；
+- 首次回调日志显示 `redirect_to=codearts.huaweicloud.com/portal/login`——门户把浏览器
+  **送回自己的登录页**，即它不认为该浏览器会话处于已登录态；
+- 结论：**code 通道在普通系统浏览器流程下不可达**。官方客户端能走通，推测因其本身即
+  插件的 Webview 上下文（共享插件身份/Cookie/UA），而外部浏览器缺少该上下文。
+  处理器已注销（不留无用的 scheme 劫持面）；如需再试可重跑安装脚本。
+
+**原始推断（保留备查）**：authorize URL 携带 `uri_scheme=codearts`，门户的授权确认可能依赖**自定义协议回传**（官方客户端注册了 `codearts://`，纯浏览器无该处理器故停在失败页）。若成立，可行的根治路径是：在 Windows 注册 `codearts://` 协议 → 指向本地小工具 → 由它拿 code 走 `authorization_code` 换取（该响应按老记录含 `refresh_token`）→ 接入现有 `RefreshToken` 自动续期。
 
 **已落地的可诊断性改进**：`OMNIGATE_LOGIN_DEBUG=1`（compose 透传）打印 ticket 响应是否含 refresh_token；首次回调日志记录 `redirect_to={host}{path}`（去查询串，防 secret 泄露），用于判断门户把浏览器引向何处。
