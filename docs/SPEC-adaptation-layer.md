@@ -1371,5 +1371,17 @@ sequenceDiagram
 **落地（本版）**：`ReportActive`（活跃上报）+ `PetAdopt`（agreement→first）接入激活子流程，
 **领养优先、能量开盲盒兜底**；任务计数诚实化。
 
+**活体结果（2026-09-23 22:0x）**：
+
+- **CN 账号领养成功**：`action=adopt credit=+300 energy=+8` → 下一 Tick
+  `state=idle action=depart location=咖啡馆 duration=1h~4h`——**宠物探险循环启动**
+  （派出 → 归来自动领分 → 再派的闭环首次真实跑通）；
+- **全球账号领养被前置挡住**：`400 first_buddy task not completed yet (need at least one
+  conversation)`——已尝试「埋点上报 + 真实 /v2/chat/completions 对话（含 system 首条）」
+  仍未满足；对照社区 task_runner 的「桌面指纹事件链（6 连事件组 + machineId/sessionId
+  派生指纹）」，判定该前置需要**客户端级完整事件链**才能解锁；
+- 叠加社区「global 无签到/任务中心」结论 + 我方签到 `active:false`、trial 已领 14051，
+  **全球版积分面维持"无活动可领"现状**；全球版价值定位为聊天额度（模型能力）而非积分。
+
 **明确不做（§32.7）**：埋点批量刷量、设备指纹伪造、开学季/小程序域任务（指纹面大、风控敏感，
 超出"签到/宠物/状态"范围）；如后续需要，按各活动单独立项。
