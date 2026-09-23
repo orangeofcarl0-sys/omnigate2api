@@ -290,7 +290,9 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		if u, err := url.Parse(redirect); err == nil {
 			if tid := u.Query().Get("ticket_id"); tid != "" {
 				h.oauth.updateSecret(tid, secret)
-				log.Printf("oauth callback: updated secret for ticket=%s", tid)
+				// 只记 host+path（查询串含 secret，不入日志）：用于判断门户把浏览器
+				// 引向何处（http 回调 vs uri_scheme 自定义协议），排查 code 通道为何不来。
+				log.Printf("oauth callback: updated secret for ticket=%s redirect_to=%s%s", tid, u.Host, u.Path)
 			}
 		}
 		http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)

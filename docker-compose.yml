@@ -14,6 +14,8 @@ services:
       OMNIGATE_DEBUG_PROMPTS: /app/data/prompts
       # 内存边界（运维）：Go 堆软上限 + 更积极的 GC 触发，抑制大请求体/长会话尖峰。
       # 软上限不会 OOM（超限时 GC 更频繁），仅约束增长曲线。
+      # 登录排查开关（OMNIGATE_LOGIN_DEBUG=1 时打印 token 响应字段名/是否含 refresh_token）
+      OMNIGATE_LOGIN_DEBUG: ${OMNIGATE_LOGIN_DEBUG:-}
       GOMEMLIMIT: 192MiB
       GOGC: "75"
     volumes:
