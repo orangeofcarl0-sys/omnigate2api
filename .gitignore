@@ -19,3 +19,11 @@ HANDOFF.md
 .img_req.json
 .probe_pkgs/
 ._wb_main.js
+.h5*
+.h5c_*
+.h5_*
+.tasks_*
+.t__*
+.ref_*
+.ep_*
+._wb*

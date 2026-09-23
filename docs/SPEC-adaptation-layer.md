@@ -1362,7 +1362,7 @@ sequenceDiagram
 
 | 事实 | 证据 |
 |---|---|
-| **任务中心双域均不可用** | `tasks/accept` 真实载荷在 CN 与全球**同样返回** `data.results[].status=error "task not found"`（列表接口返回的是共享代码库的静态任务定义，接单即失败）——此前日志 `accepted=5` 系我方**乐观计数假成功**（已修：真实嵌套 `data.results` + 无 results 记 unknown） |
+| ~~任务中心双域均不可用~~ **（2026-09-23 更正）** | 原判据有误：`task not found` 是**旧赛季任务过期**所致。CN 当前赛季（`/v2/activity/growth/tasks`）返回 **19 个任务**且 accept/claim 全通；**全球域仍只有 5 个遗留 stub**（accept 必 `task not found`）——全球确无活动体系，CN 完整。另修：`accepted=5` 曾为乐观计数假成功（已改真实嵌套 `data.results`） |
 | **任务真实体系 = 埋点驱动** | 社区 task_runner：任务靠 `POST /v2/report`（chat_request_send 等事件，须带 userId）+ 设备指纹推进；小程序域（`X-Client-Platform: miniprogram`）下发**另一套任务**；开学季走 `/portal/activity/school/*` |
 | **全球版无签到/无任务** | 社区 simapaocao 结论「global 唯一天然积分增益=一次性 trial 加油包（无签到/任务中心，PLAN D4）」；我方活体：签到 `active:false` + 空活动窗口、accept `task not found`、trial `14051 has applied trial`（**已领过**） |
 | **免费领养链路（高价值）** | `report 前置（chat_request_send 埋点）→ POST /activity/growth/buddy/agreement {"agree":true} → POST /activity/growth/buddy/first`；**buddy/first 直接发 +300 积分 + 8 能量**（社区实证），并解锁宠物使探险循环可跑；前置未满足时 400 `first_buddy not completed yet` |
@@ -1370,6 +1370,22 @@ sequenceDiagram
 
 **落地（本版）**：`ReportActive`（活跃上报）+ `PetAdopt`（agreement→first）接入激活子流程，
 **领养优先、能量开盲盒兜底**；任务计数诚实化。
+
+**任务体系实证闭环（2026-09-23 22:5x，关键）**：
+
+- **路径前缀分野**：`/v2/activity/growth/tasks`（含 accept）= **当前赛季 19 任务**；
+  无 `/v2` 前缀 = 遗留 5 条 stub（accept 报 `task not found`）。其余端点
+  （buddy/travel、quota、streak、energy、claim）双前缀等价——已按此修正代码路径。
+- **任务字段双形态**：CN 现赛季 `task_code`/`accept_status`/`progress`；全球-旧赛季
+  `code`/`status`——解析两代并存（此前 CN 19 任务被整批漏读）。
+- **事件链 UA 门控**：桌面六连事件链必须以**桌面 UA**（`WorkBuddy/5.5.6 WorkBuddy/5.5.6
+  CLI/2.137.1`）+ `X-Request-ID` 上报，通用 UA 下事件被服务端静默丢弃（实证：换 UA 前
+  `RichMeow_Chat` 进度恒 0，换后立即点亮）。
+- **闭环数字证明**：`RichMeow_Chat → claimed`（1/1，+100c+5e）+ `first_buddy → claimed`
+  （+300c+8e）；energy `8 → 13`（total_earned=13）；`chat_5 → in_progress 2/5`
+  （我们的对话事件在计数）。
+- **剩余**：16 个任务各有专属事件链（社区 MAPPING 已文档化：create_canvas/Library_read/
+  Buddy_App/Hp_Appearance/black_cat/…），按需逐项接入。
 
 **活体结果（2026-09-23 22:0x）**：
 
