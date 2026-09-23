@@ -1393,7 +1393,7 @@ sequenceDiagram
   **当日实证入账**：`claimed=8`，credit **+1200**（first_buddy 300 + RichMeow 100 +
   canvas 300 + Model_chat 100 + chat_5 100 + automation 100 + Buddy_App 100 + skill_1 100），
   energy **8 → 43**；另有签到 100/日（累计 400，streak 4）与探险循环并行。
-- **剩余任务（9 项，各需独立事件细节）**：`expert_5`（需 5 个**不同**专家 id，实测 1/5）、
+- **剩余任务（已收官，见下）**：`expert_5`（需 5 个**不同**专家 id，实测 1/5）、
   `Expert_team_use_3`（team 类型筛选未命中，需实测 team 专家字段）、`Expert_lighthouse`
   （轻量云专家 id 需专项定位）、`template_5`（scenes 场景 id 源未接）、`Library_read`
   （web 域事件：www.workbuddy.cn + web 指纹）、`Hp_Appearance`（和平精英主题 resourceKey）、
@@ -1432,3 +1432,29 @@ sequenceDiagram
 
 **明确不做（§32.7）**：埋点批量刷量、设备指纹伪造、远程 H5 活动契约的逆向（需抓取 H5 资源，
 风控敏感且超出"签到/宠物/状态"范围）；如后续需要，按各活动单独立项。
+
+### 32.9 任务自动化收官（2026-09-24）
+
+**最终战果**：CN 账号 19 个现赛季任务中 **16 个全自动**（`claimed=16`），能量
+`8 → 83`（total_earned=83），当日 credit 累计 **+1950**（含首次完整跑通的一批）。
+
+**收官轮修掉的两个真 bug（都是"看起来成功、其实没进账"的静默失败）**：
+
+| bug | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 专家市场分页失效 | 专家类任务长期 0 进度 | 请求体用了 `pageSize`，服务端字段是 **`page_size`（下划线）** → 每页只回默认 20 条且无 keyword 检索 | 改下划线字段 + 支持 `keyword` + 分页去重（`GrowthExpertsPaged`） |
+| 事件会话去重 | `expert_5` 卡 1/5 | 5 个专家事件**共用同一 conversationId/requestId**，服务端按会话去重只计 1 次 | 事件 id 唯一化（`expertUseEvent(uid, idx, …)`） |
+
+**新增接入**：`template_5`（`/console/as/support/scenes` + 内置场景兜底）、
+`Hp_Appearance`（`/v2/operation-platform/appearance/resources` + 和平精英过滤）、
+`Expert_lighthouse`（keyword 检索 + 内置 `ex_2cvvUZQhDyeJ` 兜底）、
+`Expert_team_use_3`（`expert_type=team`）、`Buddy_App/_QQ`（真实应用 id
+`cb_y5Dy46tPQGGWtueMxXbe` 企鹅教师助手）、`playbook_prompt`（
+`static.workbuddy.cn/workbuddy/playbook/registry.json` + 内置兜底）、
+`Library_read`（**web 域**：`www.workbuddy.cn/v2/report` + `x-client-platform: web`
++ 浏览器指纹 + 资料库页 URL）。
+
+**明确不可自动化（3 项，文档化边界）**：
+- `Expert_Philanthropy`（体验公益专家）＝ 需**真实捐款动作**，不做；
+- `wb_wechat_oa_subscribe_task`（关注官方公众号）＝ 需**真实关注动作**，不做；
+- `black_cat`（夜猫子）＝ 时段窗口限制，**每夜最多计 1 次** → 3 夜自然完成（当前 2/3）。
