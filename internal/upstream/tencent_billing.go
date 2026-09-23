@@ -863,6 +863,64 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 		"schedule": map[string]any{"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"},
 		"prompt":   "每周五自动整理本周工作，生成一份周报。", "userId": uid,
 	})
+	// 市场对象类任务（需要真实对象 id；获取失败不阻断——只记入错误返回）
+	var extras []any
+	if experts, xerr := c.GrowthExperts(acct, 50); xerr == nil {
+		// expert_5：5 位专家（agent 类型）
+		n := 0
+		for _, ex := range experts {
+			if n >= 5 {
+				break
+			}
+			if ex.ID == "" {
+				continue
+			}
+			extras = append(extras, expertUseEvent(uid, ex, "agent", nil))
+			n++
+		}
+		// Expert_lighthouse：名称含「轻量云」的专家
+		for _, ex := range experts {
+			if strings.Contains(ex.Name, "轻量云") {
+				extras = append(extras, expertUseEvent(uid, ex, "agent", nil))
+				break
+			}
+		}
+		// Expert_team_use_3：team 类型 ×3
+		n = 0
+		for _, ex := range experts {
+			if n >= 3 {
+				break
+			}
+			if ex.Type == "team" || strings.Contains(ex.Name, "专家团") {
+				extras = append(extras, expertUseEvent(uid, ex, "team", nil))
+				n++
+			}
+		}
+	}
+	if skills, serr := c.GrowthSkills(acct, 3); serr == nil {
+		for _, sk := range skills {
+			if sk.ID == "" {
+				continue
+			}
+			extras = append(extras, map[string]any{
+				"eventCode": "skill_info", "timestamp": now, "reportDelay": 0,
+				"skillId": sk.ID, "skillName": sk.Name, "skillVersion": sk.Version,
+				"action": "use", "conversationId": runev, "requestId": runev, "userId": uid,
+			})
+			break // skill_1：一个即可
+		}
+	}
+	if buddies, berr := c.PetBuddies(acct); berr == nil {
+		for _, b := range buddies {
+			if b.Current || len(buddies) == 1 {
+				bid := b.InstanceID.String()
+				extras = append(extras, buddy5Events(uid, bid, b.Name, nil)...)
+				extras = append(extras, buddy5Events(uid, bid, b.Name, nil)...) // Buddy_App + Buddy_App_QQ
+				break
+			}
+		}
+	}
+	evs = append(evs, extras...)
 	// 注入桌面指纹（不覆盖事件自有键）
 	fp := desktopFingerprint(acct, now)
 	for i := range evs {
@@ -875,6 +933,160 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 		}
 	}
 	return c.postReport(acct, evs)
+}
+
+// MarketExpert 专家市场条目（/v2/operation-platform/market/expert/list）。
+type MarketExpert struct {
+	ID   string `json:"expert_id"`
+	Name string `json:"agent_name"`
+	Type string `json:"expert_type"`
+}
+
+// MarketSkill 技能市场条目（/v2/operation-platform/market/skill/list）。
+type MarketSkill struct {
+	ID      string `json:"skill_id"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// BuddyInstance 已领养宠物（/activity/growth/buddy/list）。
+type BuddyInstance struct {
+	InstanceID json.Number `json:"instance_id"`
+	Name       string      `json:"name"`
+	Current    bool        `json:"current_buddy"`
+}
+
+// marketPost 市场域 POST（chat 域同源，Bearer + X-User-Id）。
+func (c *TencentClient) marketPost(acct *auth.Auth, path string, body any) ([]byte, error) {
+	raw, _ := json.Marshal(body)
+	base, _ := c.resolve(acct.Domain)
+	req, err := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	billingHeaders(req, billingCred(acct))
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("market %s http=%d: %s", path, resp.StatusCode, truncateStr(string(out), 160))
+	}
+	return out, nil
+}
+
+// GrowthExperts 拉取专家市场（pageSize 上限由调用方控制）。
+func (c *TencentClient) GrowthExperts(acct *auth.Auth, pageSize int) ([]MarketExpert, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required")
+	}
+	raw, err := c.marketPost(acct, "/v2/operation-platform/market/expert/list",
+		map[string]any{"page": 1, "pageSize": pageSize})
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Data struct {
+			Experts []MarketExpert `json:"experts"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return nil, fmt.Errorf("experts parse: %w", uerr)
+	}
+	return env.Data.Experts, nil
+}
+
+// GrowthSkills 拉取技能市场。
+func (c *TencentClient) GrowthSkills(acct *auth.Auth, pageSize int) ([]MarketSkill, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required")
+	}
+	raw, err := c.marketPost(acct, "/v2/operation-platform/market/skill/list",
+		map[string]any{"page": 1, "pageSize": pageSize})
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Data struct {
+			Skills []MarketSkill `json:"skills"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return nil, fmt.Errorf("skills parse: %w", uerr)
+	}
+	return env.Data.Skills, nil
+}
+
+// PetBuddies 已领养宠物列表（buddy5 事件链的 buddyId/buddyName 来源）。
+func (c *TencentClient) PetBuddies(acct *auth.Auth) ([]BuddyInstance, error) {
+	if acct == nil {
+		return nil, fmt.Errorf("account required")
+	}
+	raw, status, err := c.petRequest(acct, http.MethodGet, "/activity/growth/buddy/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Code int64  `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Buddies []BuddyInstance `json:"buddies"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return nil, fmt.Errorf("buddies parse: %w", uerr)
+	}
+	if status >= 400 || env.Code != 0 {
+		return nil, fmt.Errorf("buddies failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 160))
+	}
+	return env.Data.Buddies, nil
+}
+
+// buddy5Events 五连「进入 Buddy 应用」事件（点亮 Buddy_App/_QQ）。
+func buddy5Events(uid string, buddyID, buddyName string, base map[string]any) []any {
+	mk := func(code string, extra map[string]any) map[string]any {
+		e := map[string]any{"eventCode": code, "mode": "LOCAL", "buddyId": buddyID, "buddyName": buddyName}
+		for k, v := range extra {
+			e[k] = v
+		}
+		for k, v := range base {
+			if _, exists := e[k]; !exists {
+				e[k] = v
+			}
+		}
+		return e
+	}
+	return []any{
+		mk("buddyapp_discover_click", map[string]any{}),
+		mk("buddyapp_show", map[string]any{"elementId": buddyID, "elementName": buddyName, "position": 2}),
+		mk("buddyapp_enter_click", map[string]any{"elementId": buddyID, "elementName": buddyName, "position": 2, "isFirstPage": "1"}),
+		mk("buddyapp_auth_confirm_click", map[string]any{"elementId": buddyID, "elementName": buddyName}),
+		mk("buddyapp_bindaccount_skip_click", map[string]any{"elementId": buddyID, "elementName": buddyName}),
+	}
+}
+
+// expertUseEvent 专家使用事件（expert_5 / Expert_team_use_3 / Expert_lighthouse 共用）。
+func expertUseEvent(uid string, ex MarketExpert, expertType string, base map[string]any) map[string]any {
+	now := time.Now().UnixMilli()
+	cid := fmt.Sprintf("wb-ex-%d", now)
+	rid := cid + "-1"
+	e := map[string]any{
+		"eventCode": "expert_actual_use", "timestamp": now, "reportDelay": 0,
+		"mode": "CLOUD", "id": ex.ID, "name": ex.Name,
+		"expertTitle": ex.Name, "type": "", "expertType": expertType,
+		"source": "builtin", "version": "", "cost": 0, "characterCount": 12,
+		"conversationId": cid, "requestId": rid, "messageId": rid,
+		"requestModelId": "deepseek-v4-flash", "requestModelName": "DeepSeek V4 Flash",
+		"userId": uid,
+	}
+	for k, v := range base {
+		if _, exists := e[k]; !exists {
+			e[k] = v
+		}
+	}
+	return e
 }
 
 // postReport 向 chat 域 /v2/report 批量上报事件（桌面 UA + 指纹头）。
