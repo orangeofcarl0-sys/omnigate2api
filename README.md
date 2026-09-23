@@ -103,7 +103,7 @@ flowchart TB
   `auths/workbuddy-{uid}.json`（独立命名空间，与华为并存）。
 - 腾讯侧 sanitize 默认开启（上游内容审核对 client 合规模板误伤是实证刚需）；
   会话默认全量（指纹增量待真链路实测后评估）。
-- **腾讯积分全自动（v1.4，SPEC §32）**：调度器全链路自动化——每日签到
+- **腾讯积分全自动（v1.4，SPEC §32；CN + 全球版双域支持 §32.6）**：调度器全链路自动化——每日签到
   （`daily-checkin`，即「Buddy 加油站」积分，实测 +100/天，解析 credit/streak/
   活动状态）、成长中心任务接单与领奖（`tasks/accept` + `tasks/{code}/claim`，
   积分+能量主来源）、宠物探险状态机（status/config/depart/claim，归来自动领分）
