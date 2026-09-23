@@ -320,17 +320,36 @@ func (h *Handler) responsesCall(w http.ResponseWriter, r *http.Request) {
 	h.serveCompletion(w, r, protoResponses)
 }
 
-// serveCompletion 三协议共用管线：解析（按协议归一化）→ 会话路由 → 折叠 →
-// 账号轮转 → 出站（流式走 streamOut，非流式走 completeChat，均按协议重建）。
+// serveCompletion 三协议共用入口（SPEC §13/§16 管线序）：
+// 解析 → 路由裁决 → 管线预处理（工具链/媒体）→ 会话路由 → 账号轮转出站。
+// 各阶段职责见 parseInbound / resolveRoute / preparePipeline / serveWithAccounts。
 func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto streamProtocol) {
+	req, ok := h.parseInbound(w, r, proto)
+	if !ok {
+		return
+	}
+	profile, model, ok := h.resolveRoute(w, r, proto, req)
+	if !ok {
+		return
+	}
+	toolsOn, projectOn, imgCount := h.preparePipeline(req, profile)
+	rr := h.routeSession(profile, req, projectOn)
+	msgs := buildUpstreamMessages(req, profile, toolsOn, rr.Continue, rr.TailMsgs)
+	h.logFold(model, req.Messages, msgs, toolsOn, rr.Continue, imgCount)
+	h.serveWithAccounts(w, r, proto, req, profile, model, msgs, rr)
+}
+
+// parseInbound 读体 + 按协议解析为统一请求模型（失败已写协议错误帧）。
+func (h *Handler) parseInbound(w http.ResponseWriter, r *http.Request, proto streamProtocol) (*chatRequest, bool) {
 	body, tooLarge, err := readBody(r)
 	if err != nil {
 		writeProtoError(proto, w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
-		return
+		return nil, false
 	}
 	if tooLarge {
-		writeProtoError(proto, w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 8MB limit")
-		return
+		writeProtoError(proto, w, http.StatusRequestEntityTooLarge, "request_too_large",
+			fmt.Sprintf("request body exceeds %dMB limit", maxBodyBytes>>20))
+		return nil, false
 	}
 	var req *chatRequest
 	switch proto {
@@ -343,14 +362,17 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 	}
 	if err != nil {
 		writeProtoError(proto, w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
+		return nil, false
 	}
 	if req.ConversationID == "" {
 		req.ConversationID = r.Header.Get("X-Codearts-Chat-Id")
 	}
+	return req, true
+}
 
-	// SPEC §29.2：显式渠道（X-Provider/body.provider）优先，否则按裸模型名
-	// 查路由表；未命中 → codearts 缺省。
+// resolveRoute 路由裁决（SPEC §29.2）：显式渠道（X-Provider/body.provider）优先，
+// 否则按裸模型名查路由表，未命中回落 codearts。禁用模型 → 404 不回落。
+func (h *Handler) resolveRoute(w http.ResponseWriter, r *http.Request, proto streamProtocol, req *chatRequest) (*adapt.UpstreamProfile, string, bool) {
 	explicit := r.Header.Get("X-Provider")
 	if explicit == "" {
 		explicit = req.Provider
@@ -361,22 +383,22 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 	}
 	profile := h.resolveProfile(explicit, model)
 	if profile == nil {
-		// 模型在路由表禁用集（C1）：明确拒绝，不回落缺省渠道
-		writeProtoError(proto, w, http.StatusNotFound, "model_not_found",
-			"model "+model+" is disabled")
-		return
+		writeProtoError(proto, w, http.StatusNotFound, "model_not_found", "model "+model+" is disabled")
+		return nil, "", false
 	}
-	// Profile 非文本块渲染已后移到 toolchain 之后（§30.3：占位/透传按 profile 分叉）
 	if !profile.Inbound.Allows(string(proto)) {
 		writeProtoError(proto, w, http.StatusNotFound, "not_found",
 			"protocol "+string(proto)+" not enabled (profile "+profile.ID+")")
-		return
+		return nil, "", false
 	}
+	return profile, model, true
+}
 
-	toolsOn := toolsActive(req)
-
-	// 工具层（SPEC §14）：默认全关；project 有损 ⇒ forceNative（与增量互斥）。
-	// 指纹计算输入 = toolchain 变换后的最终消息数组（§15.1）。
+// preparePipeline 管线预处理（工具层 → 媒体渲染）：
+// 工具层（SPEC §14）默认全关，project 有损 ⇒ forceNative（与增量互斥）；
+// 媒体渲染（SPEC §30.3）位于 toolchain 后、指纹路由前。
+func (h *Handler) preparePipeline(req *chatRequest, profile *adapt.UpstreamProfile) (toolsOn, projectOn bool, imgCount int) {
+	toolsOn = toolsActive(req)
 	projectOn, sanitizeOn := toolchainEnabled(profile, h.cfg.ToolchainOverride)
 	if projectOn {
 		msgs, stats := projectRequest(req.Messages, req.Tools, projectCfg(profile))
@@ -390,23 +412,18 @@ func (h *Handler) serveCompletion(w http.ResponseWriter, r *http.Request, proto 
 		log.Printf("toolchain sanitize profile=%s hits=%d", profile.ID, hits)
 		req.Messages = msgs
 	}
-
-	// 媒体渲染（SPEC §30.3 管线位置：toolchain 后、指纹路由前）：
-	// placeholder → 占位折叠；passthrough → URL 转换后保留结构化（roles 分片透传）。
-	imgCount := countImages(req.Messages)
+	imgCount = countImages(req.Messages)
 	mode := mediaMode(profile, h.cfg.MediaOverride)
 	if st := renderMedia(req.Messages, mode, mediaTemplate(profile), guardedImageFetch); st.Images > 0 || st.Deferred > 0 {
 		logMediaRender(profile.ID, mode, st)
 	}
+	return toolsOn, projectOn, imgCount
+}
 
-	// 会话路由：显式 conversation_id 或指纹续接（路线 D）。
-	// 指纹续接：前缀命中 → tail 增量折叠 + 上游会话粘性。
-	rr := h.routeSession(profile, req, projectOn)
+// serveWithAccounts 账号轮转 + 出站（流式走 streamOut、非流式走 completeChat）；
+// 全池不可用写 503。回合成败与账号健康记账在各出站函数内完成。
+func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, proto streamProtocol, req *chatRequest, profile *adapt.UpstreamProfile, model string, msgs []upstream.ChatMessage, rr routeResult) {
 	chatID, stickyAcct := rr.ChatID, rr.StickyAcct
-
-	msgs := buildUpstreamMessages(req, profile, toolsOn, rr.Continue, rr.TailMsgs)
-	h.logFold(model, req.Messages, msgs, toolsOn, rr.Continue, imgCount)
-
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
