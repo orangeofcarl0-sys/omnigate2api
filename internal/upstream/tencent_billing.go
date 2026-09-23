@@ -48,6 +48,11 @@ type BillingAPI interface {
 	GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[string]string, error)
 	// GrowthClaimTask 领取已完成任务奖励；已领 already=true。
 	GrowthClaimTask(acct *auth.Auth, code string) (credit, energy int64, already bool, err error)
+	// ReportActive 活跃上报（chat_request_send 单事件；宠物领养前置解锁，SPEC §32.7）。
+	ReportActive(acct *auth.Auth) error
+	// PetAdopt 领养首只宠物：agreement({"agree":true}) → buddy/first；
+	// 成功直接发放 credit+energy（社区实证 +300c+8e），幂等（已领养返回既有态）。
+	PetAdopt(acct *auth.Auth) (credit, energy int64, err error)
 }
 
 // CheckinResult 签到结果（幂等重复签到 Already=true，Credit 为本轮所得）。
@@ -570,21 +575,30 @@ func (c *TencentClient) GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[
 	if err != nil {
 		return nil, err
 	}
+	type acceptResult struct {
+		TaskCode string `json:"task_code"`
+		Status   string `json:"status"`
+		Message  string `json:"message"`
+	}
 	var env struct {
-		Code    int64  `json:"code"`
-		Msg     string `json:"msg"`
-		Results []struct {
-			TaskCode string `json:"task_code"`
-			Status   string `json:"status"`
-			Message  string `json:"message"`
-		} `json:"results"`
+		Code    int64          `json:"code"`
+		Msg     string         `json:"msg"`
+		Results []acceptResult `json:"results"`
+		Data    struct {
+			Results []acceptResult `json:"results"`
+		} `json:"data"`
 	}
 	_ = json.Unmarshal(raw, &env)
 	if status >= 400 || env.Code != 0 {
 		return nil, fmt.Errorf("task accept failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
 	}
-	out := make(map[string]string, len(codes))
-	for _, r := range env.Results {
+	// 真实嵌套为 data.results（2026-09-23 实证）；顶层形态兼容保留。
+	results := env.Results
+	if len(results) == 0 {
+		results = env.Data.Results
+	}
+	out := make(map[string]string, len(results))
+	for _, r := range results {
 		msg := r.Status
 		if r.Message != "" {
 			msg += ": " + r.Message
@@ -625,4 +639,95 @@ func (c *TencentClient) DebugGet(acct *auth.Auth, path string) ([]byte, int, err
 // DebugPost 计费域 POST {} 原样返回（cmd/probe 实证用；生产路径不经此）。
 func (c *TencentClient) DebugPost(acct *auth.Auth, path string) ([]byte, int, error) {
 	return c.billingPost(acct, path, []byte("{}"))
+}
+
+// DebugPostBody 活动域 POST 指定 body 原样返回（cmd/probe 实证用）。
+func (c *TencentClient) DebugPostBody(acct *auth.Auth, path, body string) ([]byte, int, error) {
+	if body == "" {
+		body = "{}"
+	}
+	return c.petRequest(acct, http.MethodPost, path, []byte(body))
+}
+
+// ---------------------------------------------------------------------------
+// 活跃上报与宠物领养（SPEC §32.7；社区实证：report 前置 → agreement → buddy/first）
+// ---------------------------------------------------------------------------
+
+// ReportActive 上报一条 chat_request_send 活跃事件（领养链路的前置解锁；
+// 事件形状对齐官方客户端埋点，缺 userId 服务端静默丢弃）。
+func (c *TencentClient) ReportActive(acct *auth.Auth) error {
+	if acct == nil {
+		return fmt.Errorf("account required for report")
+	}
+	now := time.Now().UnixMilli()
+	cid := fmt.Sprintf("wgw-%d", now)
+	ev := map[string]any{
+		"eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
+		"mode": "craft", "conversationId": cid, "requestId": cid,
+		"inputLength": 12, "requestModelId": "glm-5.2", "requestModelName": "GLM-5.2",
+		"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+		"codebaseEnable": false, "maxToken": 0, "maxSteps": 0, "temperature": 0,
+		"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
+		"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
+		"command": "", "expertId": "", "recommendId": "", "skillId": "",
+		"skillCount": 0, "totalCount": 0, "fileUri": "", "presentAt": now,
+		"traceId": "", "rootRequestId": cid, "parentConversationId": cid,
+		"agentName": "default", "agentType": "conversation", "userId": acct.UserID,
+	}
+	body, _ := json.Marshal([]any{ev})
+	req, err := http.NewRequest(http.MethodPost, c.billingBaseFor(acct.Domain)+"/v2/report", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	billingHeaders(req, billingCred(acct))
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("report failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
+	}
+	return nil
+}
+
+// PetAdopt 领养首只宠物：先同意领养协议，再领养；成功直接发放 credit+energy。
+// 幂等：已领养时两步接口均返回既有态（不视为错误）。
+func (c *TencentClient) PetAdopt(acct *auth.Auth) (int64, int64, error) {
+	if acct == nil {
+		return 0, 0, fmt.Errorf("account required for pet adopt")
+	}
+	agree, _ := json.Marshal(map[string]any{"agree": true})
+	if _, st, err := c.petRequest(acct, http.MethodPost, "/activity/growth/buddy/agreement", agree); err != nil {
+		return 0, 0, fmt.Errorf("buddy agreement: %w", err)
+	} else if st >= 400 {
+		return 0, 0, fmt.Errorf("buddy agreement http=%d", st)
+	}
+	raw, status, err := c.petRequest(acct, http.MethodPost, "/activity/growth/buddy/first", []byte("{}"))
+	if err != nil {
+		return 0, 0, err
+	}
+	var env struct {
+		Code int64  `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Credit       int64 `json:"credit"`
+			Energy       int64 `json:"energy"`
+			RewardCredit int64 `json:"reward_credit"`
+			RewardEnergy int64 `json:"reward_energy"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	if status >= 400 || env.Code != 0 {
+		return 0, 0, fmt.Errorf("buddy first failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	}
+	credit, energy := env.Data.Credit, env.Data.Energy
+	if credit == 0 {
+		credit = env.Data.RewardCredit
+	}
+	if energy == 0 {
+		energy = env.Data.RewardEnergy
+	}
+	return credit, energy, nil
 }

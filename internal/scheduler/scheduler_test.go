@@ -28,6 +28,9 @@ type fakeClient struct {
 	petErr        error // 活动面故障注入（隔离性测试）
 	opens         int
 	departErr     error // depart 失败注入（no active buddy 激活路径）
+	reports       int
+	adopts        int
+	adoptErr      error
 	tasks         []upstream.GrowthTask
 	taskQueries   int
 	acceptBatches [][]string
@@ -72,6 +75,14 @@ func (f *fakeClient) PetQuota(a *auth.Auth) (*upstream.PetQuota, error) {
 	return &upstream.PetQuota{Affordable: 3, MaxOpenCount: 1, CostPerOpen: 50}, nil
 }
 func (f *fakeClient) PetOpenBox(a *auth.Auth, count int) error { f.opens++; return nil }
+func (f *fakeClient) ReportActive(a *auth.Auth) error          { f.reports++; return nil }
+func (f *fakeClient) PetAdopt(a *auth.Auth) (int64, int64, error) {
+	f.adopts++
+	if f.adoptErr != nil {
+		return 0, 0, f.adoptErr
+	}
+	return 300, 8, nil
+}
 func (f *fakeClient) GrowthTasks(a *auth.Auth) ([]upstream.GrowthTask, error) {
 	f.taskQueries++
 	return f.tasks, nil
@@ -135,7 +146,7 @@ func TestSchedulerPetTravelStateMachine(t *testing.T) {
 		{"idle", true, 0, 0, 0},       // 今日次数上限：跳过
 		{"traveling", false, 0, 0, 0}, // 在路上：等待
 		{"arrived", false, 0, 1, 0},   // 归来：领取
-		{"", false, 0, 0, 1},          // 全球版空 state（无宠物）：能量足够 → 开盒激活
+		{"", false, 0, 0, 0},          // 全球版空 state（无宠物）：走领养链路（adopt 断言见 TestSchedulerBuddyAdoption）
 	}
 	for _, tc := range cases {
 		u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
@@ -193,7 +204,9 @@ func TestSchedulerBuddyActivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stub := &fakeClient{petState: "idle", departErr: errors.New("pet depart failed http=400 code=400 msg=no active buddy")}
+	// 领养不可用（如已领养）→ 验证能量开盒兜底路径
+	stub := &fakeClient{petState: "idle", departErr: errors.New("pet depart failed http=400 code=400 msg=no active buddy"),
+		adoptErr: errors.New("buddy first failed http=400 code=400 msg=already adopted")}
 	p.Accounts()[0].Client = stub
 	s := New(Config{Pool: p, Enabled: true})
 	s.Tick(context.Background())
@@ -232,5 +245,29 @@ func TestSchedulerGrowthTasks(t *testing.T) {
 	}
 	if len(stub.claimCodes) != 1 || stub.claimCodes[0] != "t3" {
 		t.Fatalf("claim codes=%v", stub.claimCodes)
+	}
+}
+
+// TestSchedulerBuddyAdoption SPEC §32.7：领养链路优先（report 前置 → adopt），
+// 成功即不再走能量开盒。
+func TestSchedulerBuddyAdoption(t *testing.T) {
+	u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+		RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+	p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &fakeClient{petState: ""} // 无宠物形态
+	p.Accounts()[0].Client = stub
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+	if stub.reports != 1 || stub.adopts != 1 {
+		t.Fatalf("adoption chain must run: reports=%d adopts=%d", stub.reports, stub.adopts)
+	}
+	if stub.opens != 0 {
+		t.Fatalf("successful adoption must not fall back to energy box: opens=%d", stub.opens)
 	}
 }

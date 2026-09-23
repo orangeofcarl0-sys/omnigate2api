@@ -1355,3 +1355,21 @@ sequenceDiagram
   领取，字段缺失的 CN 形态不预检，零行为变化）；活动开启后自动领取无需再改代码；
 - 全球版宠物：无宠物账号 `travel/status` 返回空 `data`（CN 为 `state=idle`）→ 空 state
   归入激活分支；`buddy/quota` 含 `balance`（能量余额，已入日志）。
+
+### 32.7 活动体系详细调研（2026-09-23，社区四项目 + 活体实证）
+
+**调研结论（关键事实）**：
+
+| 事实 | 证据 |
+|---|---|
+| **任务中心双域均不可用** | `tasks/accept` 真实载荷在 CN 与全球**同样返回** `data.results[].status=error "task not found"`（列表接口返回的是共享代码库的静态任务定义，接单即失败）——此前日志 `accepted=5` 系我方**乐观计数假成功**（已修：真实嵌套 `data.results` + 无 results 记 unknown） |
+| **任务真实体系 = 埋点驱动** | 社区 task_runner：任务靠 `POST /v2/report`（chat_request_send 等事件，须带 userId）+ 设备指纹推进；小程序域（`X-Client-Platform: miniprogram`）下发**另一套任务**；开学季走 `/portal/activity/school/*` |
+| **全球版无签到/无任务** | 社区 simapaocao 结论「global 唯一天然积分增益=一次性 trial 加油包（无签到/任务中心，PLAN D4）」；我方活体：签到 `active:false` + 空活动窗口、accept `task not found`、trial `14051 has applied trial`（**已领过**） |
+| **免费领养链路（高价值）** | `report 前置（chat_request_send 埋点）→ POST /activity/growth/buddy/agreement {"agree":true} → POST /activity/growth/buddy/first`；**buddy/first 直接发 +300 积分 + 8 能量**（社区实证），并解锁宠物使探险循环可跑；前置未满足时 400 `first_buddy not completed yet` |
+| 全球版账号开通流程 | `GET /auth/realms/copilot/overseas/user/register?userId=<uid>`（200=激活；500/region required=需补地区）→ `POST /billing/area/get-country-code` → `POST /console/login/account {attributes:{countryCode/countryFullName/countryName}}` → `POST /billing/ide/trial`（幂等 14051）；我方全球账号实证：register success、地区新加坡 |
+
+**落地（本版）**：`ReportActive`（活跃上报）+ `PetAdopt`（agreement→first）接入激活子流程，
+**领养优先、能量开盲盒兜底**；任务计数诚实化。
+
+**明确不做（§32.7）**：埋点批量刷量、设备指纹伪造、开学季/小程序域任务（指纹面大、风控敏感，
+超出"签到/宠物/状态"范围）；如后续需要，按各活动单独立项。

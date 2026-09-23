@@ -141,15 +141,17 @@ func (s *Scheduler) growthTasks(ctx context.Context) {
 				log.Printf("tencent tasks account=%s action=accept failed err=%v", acct.Name, aerr)
 				break
 			}
+			if len(res) == 0 {
+				// 响应无 results（形态变更）——不乐观计入，如实记未知
+				log.Printf("tencent tasks account=%s action=accept batch=%d result=unknown_no_results", acct.Name, len(batch))
+				continue
+			}
 			for code, msg := range res {
 				if strings.Contains(msg, "ok") || strings.HasPrefix(msg, "accepted") {
 					accepted++
 				} else {
 					log.Printf("tencent tasks account=%s action=accept code=%s result=%s", acct.Name, code, msg)
 				}
-			}
-			if len(res) == 0 {
-				accepted += len(batch)
 			}
 		}
 		var credit, energy int64
@@ -270,9 +272,24 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 	})
 }
 
-// activateBuddy 宠物激活子流程（SPEC §32.2 补）：quota → 能量足够则开盲盒。
-// 能量不足只记日志（能量来自任务/旅行奖励，后续 Tick 自然重试）。
+// activateBuddy 宠物激活子流程（SPEC §32.2/§32.7）：优先**免费领养链路**
+// （活跃上报前置 → 协议 → 领养，成功直接发放 credit+energy，社区实证 +300c+8e）；
+// 领养不可用（如已领养/前置未满足）则退回能量开盲盒（quota → open）。
+// 失败只记日志（§32.2 隔离拍板）。
 func (s *Scheduler) activateBuddy(acct *pool.Account, api upstream.BillingAPI) {
+	// 领养链路：活跃上报为前置（缺则领养 400 first_buddy not completed）
+	if rerr := api.ReportActive(acct.Auth); rerr != nil {
+		log.Printf("tencent pet account=%s action=report failed err=%v", acct.Name, rerr)
+	}
+	credit, energy, aerr := api.PetAdopt(acct.Auth)
+	switch {
+	case aerr == nil:
+		log.Printf("tencent pet account=%s action=adopt credit=+%d energy=+%d", acct.Name, credit, energy)
+		return
+	default:
+		log.Printf("tencent pet account=%s action=adopt skipped err=%v", acct.Name, aerr)
+	}
+
 	q, err := api.PetQuota(acct.Auth)
 	if err != nil {
 		log.Printf("tencent pet account=%s action=activate failed err=%v", acct.Name, err)
