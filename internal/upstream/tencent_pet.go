@@ -63,8 +63,8 @@ func (c *TencentClient) PetTravelStatus(acct *auth.Auth) (*PetTravel, error) {
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("pet status parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("pet status failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("pet status", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	return &env.Data, nil
 }
@@ -88,8 +88,8 @@ func (c *TencentClient) PetTravelConfig(acct *auth.Auth) ([]PetLocation, error) 
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("pet config parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("pet config failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("pet config", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	return env.Data.Locations, nil
 }
@@ -141,8 +141,8 @@ func (c *TencentClient) PetClaim(acct *auth.Auth, recordID string) (int64, error
 	if env.Code == 400 && strings.Contains(strings.ToLower(env.Msg), "no unclaimed") {
 		return 0, ErrPetNoUnclaimed
 	}
-	if status >= 400 || env.Code != 0 {
-		return 0, fmt.Errorf("pet claim failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("pet claim", status, env.Code, env.Msg); err != nil {
+		return 0, err
 	}
 	credit := env.Data.Credit
 	if credit == 0 {
@@ -178,8 +178,8 @@ func (c *TencentClient) PetQuota(acct *auth.Auth) (*PetQuota, error) {
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("pet quota parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("pet quota failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("pet quota", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	// 字段可能在顶层或 data 内（两版契约兼容，quota 优先 data）
 	q := env.Data
@@ -245,8 +245,8 @@ func (c *TencentClient) PetBuddies(acct *auth.Auth) ([]BuddyInstance, error) {
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("buddies parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("buddies failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 160))
+	if err := checkBiz("buddies", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	return env.Data.Buddies, nil
 }
@@ -301,8 +301,8 @@ func (c *TencentClient) PetAdopt(acct *auth.Auth) (int64, int64, error) {
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(raw, &env)
-	if status >= 400 || env.Code != 0 {
-		return 0, 0, fmt.Errorf("buddy first failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("buddy first", status, env.Code, env.Msg); err != nil {
+		return 0, 0, err
 	}
 	credit, energy := env.Data.Credit, env.Data.Energy
 	if credit == 0 {

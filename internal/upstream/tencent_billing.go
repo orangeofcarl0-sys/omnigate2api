@@ -167,8 +167,8 @@ func (c *TencentClient) DailyCheckin(acct *auth.Auth) (*CheckinResult, error) {
 		}
 		return &CheckinResult{Inactive: true, Reason: truncateStr(env.Msg, 120)}, nil
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("daily-checkin failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("daily-checkin", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	credit := env.Data.Credit
 	if credit == 0 {
@@ -199,8 +199,8 @@ func (c *TencentClient) CheckinStatus(acct *auth.Auth) (*CheckinStatus, error) {
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("status parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("checkin-status failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("checkin-status", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	return &env.Data, nil
 }

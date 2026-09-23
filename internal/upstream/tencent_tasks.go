@@ -82,8 +82,8 @@ func (c *TencentClient) GrowthTasks(acct *auth.Auth) ([]GrowthTask, error) {
 	if uerr := json.Unmarshal(raw, &env); uerr != nil {
 		return nil, fmt.Errorf("growth tasks parse: %w", uerr)
 	}
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("growth tasks failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("growth tasks", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	if len(env.Tasks) > 0 {
 		return env.Tasks, nil
@@ -121,8 +121,8 @@ func (c *TencentClient) GrowthAcceptTasks(acct *auth.Auth, codes []string) (map[
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(raw, &env)
-	if status >= 400 || env.Code != 0 {
-		return nil, fmt.Errorf("task accept failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("task accept", status, env.Code, env.Msg); err != nil {
+		return nil, err
 	}
 	// 真实嵌套为 data.results（2026-09-23 实证）；顶层形态兼容保留。
 	results := env.Results
@@ -157,8 +157,8 @@ func (c *TencentClient) GrowthClaimTask(acct *auth.Auth, code string) (int64, in
 		AlreadyClaimed bool   `json:"already_claimed"`
 	}
 	_ = json.Unmarshal(raw, &env)
-	if status >= 400 || env.Code != 0 {
-		return 0, 0, false, fmt.Errorf("task claim failed http=%d code=%d msg=%s", status, env.Code, truncateStr(env.Msg, 200))
+	if err := checkBiz("task claim", status, env.Code, env.Msg); err != nil {
+		return 0, 0, false, err
 	}
 	return env.Credit, env.Energy, env.AlreadyClaimed, nil
 }
