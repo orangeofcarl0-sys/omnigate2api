@@ -186,7 +186,7 @@ func TestSchedulerActivityFailureIsolated(t *testing.T) {
 	p.Accounts()[0].Client = stub
 	s := New(Config{Pool: p, Enabled: true})
 	s.Tick(context.Background())
-	total, healthy, disabled, cooling, _ := p.Stats()
+	total, healthy, disabled, cooling := p.Stats()
 	if total != 1 || healthy != 1 || disabled != 0 || cooling != 0 {
 		t.Fatalf("activity failure must not touch account health: total=%d healthy=%d disabled=%d cooling=%d",
 			total, healthy, disabled, cooling)

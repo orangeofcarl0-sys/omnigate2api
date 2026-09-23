@@ -127,13 +127,13 @@ func renderMedia(msgs []openAIMessage, mode string, ph func(string) string, fetc
 type mediaErr string
 
 const (
-	mErrPrivate    mediaErr = "私网拒绝"
-	mErrRedirect   mediaErr = "重定向拒绝"
-	mErrNonImage   mediaErr = "非图片"
-	mErrTooLarge   mediaErr = "超限"
-	mErrTimeout    mediaErr = "超时"
+	mErrPrivate     mediaErr = "私网拒绝"
+	mErrRedirect    mediaErr = "重定向拒绝"
+	mErrNonImage    mediaErr = "非图片"
+	mErrTooLarge    mediaErr = "超限"
+	mErrTimeout     mediaErr = "超时"
 	mErrUnreachable mediaErr = "网络错误"
-	mErrBadURL     mediaErr = "解析失败"
+	mErrBadURL      mediaErr = "解析失败"
 )
 
 // imageFetchFunc 抓取并转换为 data URI；失败返回类别。

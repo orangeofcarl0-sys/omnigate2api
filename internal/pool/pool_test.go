@@ -72,7 +72,7 @@ func TestCooldownBlocksPickThenClears(t *testing.T) {
 	if a := p.PickFor("workbuddy", map[string]bool{}); a != nil {
 		t.Fatalf("cooling account must not be picked, got %s", a.Name)
 	}
-	_, _, _, cooling, _ := p.Stats()
+	_, _, _, cooling := p.Stats()
 	if cooling != 1 {
 		t.Fatalf("stats cooling=%d want 1", cooling)
 	}
@@ -138,7 +138,7 @@ func TestDisableEnableVisibility(t *testing.T) {
 	if p.Healthy("t1") {
 		t.Fatal("disabled must be unhealthy")
 	}
-	total, healthy, disabled, _, _ := p.Stats()
+	total, healthy, disabled, _ := p.Stats()
 	if total != 1 || healthy != 0 || disabled != 1 {
 		t.Fatalf("stats total=%d healthy=%d disabled=%d", total, healthy, disabled)
 	}
@@ -210,10 +210,9 @@ func TestQuotaReflectedInListAndStats(t *testing.T) {
 	if !found {
 		t.Fatal("t1 must appear in List")
 	}
-	// 注意（结构气味，待改名）：Stats 第 5 个返回值名义为 credits，实为**健康账号数**
-	// （见 pool.go 注释「面板『积分合计』位复用为健康数」）。额度真值走 List()。
-	if _, healthy, _, _, credits := p.Stats(); credits != int64(healthy) || healthy != 2 {
-		t.Fatalf("stats credits(%d) must equal healthy(%d)=2 (documented quirk)", credits, healthy)
+	// Stats 只报健康分布；额度真值走 List()（历史「credits 实为健康数」的假字段已删除）。
+	if _, healthy, _, _ := p.Stats(); healthy != 2 {
+		t.Fatalf("stats healthy=%d want 2", healthy)
 	}
 }
 

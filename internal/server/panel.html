@@ -187,7 +187,7 @@ select option{ background:#fff; color:var(--text); }
     <div class="stat"><div class="k">账号总数</div><div class="v" id="sTotal">—</div></div>
     <div class="stat"><div class="k">健康可用</div><div class="v" id="sHealthy">—</div></div>
     <div class="stat"><div class="k">冷却 / 禁用</div><div class="v" id="sBad">—</div></div>
-    <div class="stat"><div class="k">积分合计</div><div class="v" id="sCredits">—</div></div>
+    <div class="stat"><div class="k">账号健康</div><div class="v" id="sHealthAlias">—</div></div>
   </div>
 
   <div class="card">
@@ -393,7 +393,7 @@ function render(data){
   $("sTotal").textContent = st.total ?? 0;
   $("sHealthy").textContent = st.healthy ?? 0;
   $("sBad").textContent = `${st.cooling??0} / ${st.disabled??0}`;
-  $("sCredits").textContent = Number(st.credits||0).toLocaleString();
+  $("sHealthAlias").textContent = st.healthy ?? 0;
   $("updatedAt").textContent = "更新于 " + new Date().toLocaleTimeString();
   $("baseUrl").textContent = location.origin + BASE + "/v1";
   $("baseUrlAn").textContent = location.origin + BASE;

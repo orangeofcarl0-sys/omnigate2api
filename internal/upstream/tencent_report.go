@@ -132,10 +132,167 @@ func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 	return c.postReport(acct, events)
 }
 
-// ReportTaskEvents 上报任务事件包（SPEC §32.8 逆向逐个任务的已验证形状）：
-// RichMeow 六连 + chat_5(×5) + Model_chat_GLM5.2 + create_canvas + automation_1
-// （+ 夜猫窗口内 black_cat×3）。发往 chat 域 /v2/report（桌面 UA + 指纹）。
-// 说明：事件只做「完成任务」的埋点，奖励由任务领取链路自动入账。
+// ---------------------------------------------------------------------------
+// 任务事件表（SPEC §32.8：新增任务 = 加一行；对象 id 来源与事件形状见各 build）
+// ---------------------------------------------------------------------------
+
+// taskEventCtx 事件包上下文（一次上报的共享输入：账号/时间/市场对象）。
+type taskEventCtx struct {
+	acct    *auth.Auth
+	now     int64
+	uid     string
+	cid     string // run 级会话 id（canvas/automation/skill 复用）
+	experts []MarketExpert
+	skills  []MarketSkill
+	buddies []BuddyInstance
+}
+
+// chatEvent 构造一条 chat_request_send（chat_5 / Model_chat_GLM5.2 / black_cat 共用）。
+func (x *taskEventCtx) chatEvent(idx int, modelID, modelName, mode string) map[string]any {
+	cid := fmt.Sprintf("wb-chat-%d-%d", x.now, idx)
+	return map[string]any{
+		"eventCode": "chat_request_send", "timestamp": x.now, "reportDelay": 0,
+		"mode": mode, "conversationId": cid, "requestId": cid,
+		"inputLength": 12, "requestModelId": modelID, "requestModelName": modelName,
+		"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+		"codebaseEnable": false, "maxToken": 0, "maxSteps": 0, "temperature": 0,
+		"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
+		"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
+		"command": "", "expertId": "", "recommendId": "", "skillId": "",
+		"skillCount": 0, "totalCount": 0, "fileUri": "", "presentAt": x.now,
+		"traceId": "", "rootRequestId": cid, "parentConversationId": cid,
+		"agentName": "default", "agentType": "conversation", "userId": x.uid,
+	}
+}
+
+// taskEventSpec 一类任务的埋点事件构造（表驱动：code 与服务端任务清单/社区 MAPPING 对照）。
+type taskEventSpec struct {
+	code  string
+	build func(*taskEventCtx) []any
+}
+
+// taskEventSpecs 任务事件表。已实证点亮：chat_5 / Model_chat_GLM5.2 / create_canvas /
+// automation_1 / skill_1 / Buddy_App / RichMeow（六连，ReportDesktopChat）。
+// 待补（需各自对象来源）：template_5(Hp/scenes)、Library_read(web 域)、Hp_Appearance(主题
+// resourceKey)、playbook_prompt(灵感案例)、Expert_Philanthropy(真实捐款，不可伪造)。
+var taskEventSpecs = []taskEventSpec{
+	{"chat_5", func(x *taskEventCtx) []any {
+		var out []any
+		for i := 0; i < 5; i++ {
+			out = append(out, x.chatEvent(i, "deepseek-v4-flash", "DeepSeek V4 Flash", "craft"))
+		}
+		return out
+	}},
+	{"Model_chat_GLM5.2", func(x *taskEventCtx) []any {
+		return []any{x.chatEvent(90, "glm-5.2", "GLM-5.2", "craft")}
+	}},
+	{"black_cat", func(x *taskEventCtx) []any {
+		// 夜猫窗口 23:00-08:00（CST）内 3 次
+		if h := time.Now().In(cstZone).Hour(); h < 23 && h >= 8 {
+			return nil
+		}
+		var out []any
+		for i := 0; i < 3; i++ {
+			out = append(out, x.chatEvent(100+i, "glm-5.2", "GLM-5.2", "night"))
+		}
+		return out
+	}},
+	{"create_canvas", func(x *taskEventCtx) []any {
+		// 自造画布 id（服务端不校验归属）
+		return []any{map[string]any{
+			"eventCode": "wbx_design_canvas_task_create", "timestamp": x.now,
+			"reportDelay": 0, "conversationId": x.cid, "requestId": x.cid,
+			"source": "summon_keyword", "isCustomModel": false, "name": "",
+			"inputLength": 12, "id": fmt.Sprintf("wbx-canvas-%d", x.now),
+			"cost": 0, "isSuccessful": true, "userId": x.uid,
+		}}
+	}},
+	{"automation_1", func(x *taskEventCtx) []any {
+		return []any{map[string]any{
+			"eventCode": "automated_task_create_suc", "timestamp": x.now, "reportDelay": 0,
+			"name": "每周五自动生成周报", "source": "manually",
+			"modelId": "deepseek-v4-flash", "modelIsThinking": false,
+			"expertId": "", "expertMarketplace": "", "connectorIds": "",
+			"connectorCount": 0, "skills": "", "skillCount": 0,
+			"scheduleType": "recurring", "pushToWeChat": false, "pushToWecomBot": false,
+			"conversationId": x.cid, "requestId": x.cid,
+			"schedule": map[string]any{"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"},
+			"prompt":   "每周五自动整理本周工作，生成一份周报。", "userId": x.uid,
+		}}
+	}},
+	{"expert_5", func(x *taskEventCtx) []any {
+		var out []any
+		for _, ex := range x.experts {
+			if len(out) >= 5 {
+				break
+			}
+			if ex.ID != "" {
+				out = append(out, expertUseEvent(x.uid, ex, "agent", nil))
+			}
+		}
+		return out
+	}},
+	{"Expert_lighthouse", func(x *taskEventCtx) []any {
+		for _, ex := range x.experts {
+			if strings.Contains(ex.Name, "轻量云") {
+				return []any{expertUseEvent(x.uid, ex, "agent", nil)}
+			}
+		}
+		return nil
+	}},
+	{"Expert_team_use_3", func(x *taskEventCtx) []any {
+		var out []any
+		for _, ex := range x.experts {
+			if len(out) >= 3 {
+				break
+			}
+			if ex.Type == "team" || strings.Contains(ex.Name, "专家团") {
+				out = append(out, expertUseEvent(x.uid, ex, "team", nil))
+			}
+		}
+		return out
+	}},
+	{"skill_1", func(x *taskEventCtx) []any {
+		for _, sk := range x.skills {
+			if sk.ID == "" {
+				continue
+			}
+			return []any{map[string]any{
+				"eventCode": "skill_info", "timestamp": x.now, "reportDelay": 0,
+				"skillId": sk.ID, "skillName": sk.Name, "skillVersion": sk.Version,
+				"action": "use", "conversationId": x.cid, "requestId": x.cid, "userId": x.uid,
+			}}
+		}
+		return nil
+	}},
+	{"Buddy_App", func(x *taskEventCtx) []any {
+		if bid, name, ok := x.currentBuddy(); ok {
+			return buddy5Events(x.uid, bid, name, nil)
+		}
+		return nil
+	}},
+	{"Buddy_App_QQ", func(x *taskEventCtx) []any {
+		// 同一 buddy 的五连（服务端按事件组点亮，_QQ 与 _App 共用形状）
+		if bid, name, ok := x.currentBuddy(); ok {
+			return buddy5Events(x.uid, bid, name, nil)
+		}
+		return nil
+	}},
+}
+
+// currentBuddy 取当前宠物（buddy5 事件链的 buddyId/buddyName 来源）。
+func (x *taskEventCtx) currentBuddy() (string, string, bool) {
+	for _, b := range x.buddies {
+		if b.Current || len(x.buddies) == 1 {
+			return b.InstanceID.String(), b.Name, true
+		}
+	}
+	return "", "", false
+}
+
+// ReportTaskEvents 上报任务事件包（SPEC §32.8 表驱动）：遍历 taskEventSpecs 生成各类任务
+// 的埋点事件，市场对象按需拉取（失败仅跳过相关任务，不阻断其他）。事件只做「完成任务」
+// 的埋点，奖励由任务领取链路自动入账。
 func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 	if acct == nil {
 		return fmt.Errorf("account required for task events")
@@ -143,119 +300,23 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 	if err := c.ReportDesktopChat(acct); err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
-	uid := acct.UserID
+	x := &taskEventCtx{acct: acct, now: time.Now().UnixMilli(), uid: acct.UserID}
+	x.cid = fmt.Sprintf("wb-run-%d", x.now)
+	if experts, err := c.GrowthExperts(acct, 50); err == nil {
+		x.experts = experts
+	}
+	if skills, err := c.GrowthSkills(acct, 3); err == nil {
+		x.skills = skills
+	}
+	if buddies, err := c.PetBuddies(acct); err == nil {
+		x.buddies = buddies
+	}
 	var evs []any
-
-	chatEv := func(idx int, modelID, modelName, mode string) map[string]any {
-		cid := fmt.Sprintf("wb-chat-%d-%d", now, idx)
-		return map[string]any{
-			"eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
-			"mode": mode, "conversationId": cid, "requestId": cid,
-			"inputLength": 12, "requestModelId": modelID, "requestModelName": modelName,
-			"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
-			"codebaseEnable": false, "maxToken": 0, "maxSteps": 0, "temperature": 0,
-			"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
-			"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
-			"command": "", "expertId": "", "recommendId": "", "skillId": "",
-			"skillCount": 0, "totalCount": 0, "fileUri": "", "presentAt": now,
-			"traceId": "", "rootRequestId": cid, "parentConversationId": cid,
-			"agentName": "default", "agentType": "conversation", "userId": uid,
-		}
+	for _, spec := range taskEventSpecs {
+		evs = append(evs, spec.build(x)...)
 	}
-	// chat_5：5 条独立会话
-	for i := 0; i < 5; i++ {
-		evs = append(evs, chatEv(i, "deepseek-v4-flash", "DeepSeek V4 Flash", "craft"))
-	}
-	// Model_chat_GLM5.2
-	evs = append(evs, chatEv(90, "glm-5.2", "GLM-5.2", "craft"))
-	// black_cat（夜猫 23:00-08:00 CST 窗口内 3 次）
-	if h := time.Now().In(cstZone).Hour(); h >= 23 || h < 8 {
-		for i := 0; i < 3; i++ {
-			evs = append(evs, chatEv(100+i, "glm-5.2", "GLM-5.2", "night"))
-		}
-	}
-	// create_canvas（自造画布 id）
-	runev := fmt.Sprintf("wb-run-%d", now)
-	evs = append(evs, map[string]any{
-		"eventCode": "wbx_design_canvas_task_create", "timestamp": now,
-		"reportDelay": 0, "conversationId": runev, "requestId": runev,
-		"source": "summon_keyword", "isCustomModel": false, "name": "",
-		"inputLength": 12, "id": fmt.Sprintf("wbx-canvas-%d", now),
-		"cost": 0, "isSuccessful": true, "userId": uid,
-	})
-	// automation_1
-	evs = append(evs, map[string]any{
-		"eventCode": "automated_task_create_suc", "timestamp": now, "reportDelay": 0,
-		"name": "每周五自动生成周报", "source": "manually",
-		"modelId": "deepseek-v4-flash", "modelIsThinking": false,
-		"expertId": "", "expertMarketplace": "", "connectorIds": "",
-		"connectorCount": 0, "skills": "", "skillCount": 0,
-		"scheduleType": "recurring", "pushToWeChat": false, "pushToWecomBot": false,
-		"conversationId": runev, "requestId": runev,
-		"schedule": map[string]any{"type": "recurring", "rrule": "FREQ=WEEKLY;BYDAY=FR;BYHOUR=9;BYMINUTE=0"},
-		"prompt":   "每周五自动整理本周工作，生成一份周报。", "userId": uid,
-	})
-	// 市场对象类任务（需要真实对象 id；获取失败不阻断——只记入错误返回）
-	var extras []any
-	if experts, xerr := c.GrowthExperts(acct, 50); xerr == nil {
-		// expert_5：5 位专家（agent 类型）
-		n := 0
-		for _, ex := range experts {
-			if n >= 5 {
-				break
-			}
-			if ex.ID == "" {
-				continue
-			}
-			extras = append(extras, expertUseEvent(uid, ex, "agent", nil))
-			n++
-		}
-		// Expert_lighthouse：名称含「轻量云」的专家
-		for _, ex := range experts {
-			if strings.Contains(ex.Name, "轻量云") {
-				extras = append(extras, expertUseEvent(uid, ex, "agent", nil))
-				break
-			}
-		}
-		// Expert_team_use_3：team 类型 ×3
-		n = 0
-		for _, ex := range experts {
-			if n >= 3 {
-				break
-			}
-			if ex.Type == "team" || strings.Contains(ex.Name, "专家团") {
-				extras = append(extras, expertUseEvent(uid, ex, "team", nil))
-				n++
-			}
-		}
-	}
-	if skills, serr := c.GrowthSkills(acct, 3); serr == nil {
-		for _, sk := range skills {
-			if sk.ID == "" {
-				continue
-			}
-			extras = append(extras, map[string]any{
-				"eventCode": "skill_info", "timestamp": now, "reportDelay": 0,
-				"skillId": sk.ID, "skillName": sk.Name, "skillVersion": sk.Version,
-				"action": "use", "conversationId": runev, "requestId": runev, "userId": uid,
-			})
-			break // skill_1：一个即可
-		}
-	}
-	if buddies, berr := c.PetBuddies(acct); berr == nil {
-		for _, b := range buddies {
-			if b.Current || len(buddies) == 1 {
-				bid := b.InstanceID.String()
-				extras = append(extras, buddy5Events(uid, bid, b.Name, nil)...)
-				extras = append(extras, buddy5Events(uid, bid, b.Name, nil)...) // Buddy_App + Buddy_App_QQ
-				break
-			}
-		}
-	}
-	evs = append(evs, extras...)
 	// 注入桌面指纹（不覆盖事件自有键）
-	fp := desktopFingerprint(acct, now)
+	fp := desktopFingerprint(acct, x.now)
 	for i := range evs {
 		if e, ok := evs[i].(map[string]any); ok {
 			for k, v := range fp {

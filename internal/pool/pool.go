@@ -225,7 +225,10 @@ func (p *Pool) List() []map[string]any {
 }
 
 // Stats 汇总。
-func (p *Pool) Stats() (total, healthy, disabled, cooling int, credits int64) {
+// Stats 汇总账号健康分布（total/healthy/disabled/cooling）。
+// 注：历史第 5 返回值名义为 credits、实为健康数（面板曾复用该位），已删除——
+// 额度真值走 List()（credits/quota_total/quota_used）。
+func (p *Pool) Stats() (total, healthy, disabled, cooling int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -241,7 +244,6 @@ func (p *Pool) Stats() (total, healthy, disabled, cooling int, credits int64) {
 		}
 		a.mu.Unlock()
 	}
-	credits = int64(healthy) // 面板「积分合计」位复用为健康数
 	return
 }
 

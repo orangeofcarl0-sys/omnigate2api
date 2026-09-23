@@ -17,7 +17,7 @@ import (
 
 // adminOverview 面板总览。
 func (h *Handler) adminOverview(w http.ResponseWriter, r *http.Request) {
-	total, healthy, disabled, cooling, credits := h.cfg.Pool.Stats()
+	total, healthy, disabled, cooling := h.cfg.Pool.Stats()
 	models := h.modelList()
 	ids := make([]map[string]any, 0, len(models))
 	for _, m := range models {
@@ -31,7 +31,6 @@ func (h *Handler) adminOverview(w http.ResponseWriter, r *http.Request) {
 			"healthy":  healthy,
 			"disabled": disabled,
 			"cooling":  cooling,
-			"credits":  credits,
 		},
 		"accounts": h.cfg.Pool.List(),
 		"models":   ids,
@@ -224,7 +223,7 @@ func (h *Handler) adminReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.cfg.Pool.SyncToDir(auths)
-	total, healthy, _, _, _ := h.cfg.Pool.Stats()
+	total, healthy, _, _ := h.cfg.Pool.Stats()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "message": "已重载 auths", "loaded": len(auths), "total": total, "healthy": healthy,
 	})
