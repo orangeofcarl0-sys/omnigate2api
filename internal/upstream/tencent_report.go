@@ -3,10 +3,13 @@
 package upstream
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -145,6 +148,7 @@ type taskEventCtx struct {
 	experts    []MarketExpert
 	skills     []MarketSkill
 	buddies    []BuddyInstance
+	cases      []PlaybookCase    // playbook_prompt
 	lighthouse []MarketExpert    // Expert_lighthouse（关键词检索结果）
 	scenes     []Scene           // template_5
 	themes     []AppearanceTheme // Hp_Appearance
@@ -266,6 +270,23 @@ var taskEventSpecs = []taskEventSpec{
 		}
 		return out
 	}},
+	{"playbook_prompt", func(x *taskEventCtx) []any {
+		if len(x.cases) == 0 {
+			return nil
+		}
+		cs := x.cases[0]
+		cid := fmt.Sprintf("wb-pb-%d", x.now)
+		return []any{map[string]any{
+			"eventCode": "playbook_prompt_send", "timestamp": x.now, "reportDelay": 0,
+			"id": cs.ID, "name": cs.Title, "type": cs.Type, "promptLength": 0,
+			"isOfficial": 1, "skills": "", "skillNames": "", "expertId": "", "expertName": "",
+			"categoryId": "", "categoryName": "", "query": "", "source": "discover",
+			"conversationId": cid, "requestId": cid, "ext1": "discover", "userId": x.uid,
+		}}
+	}},
+	{"Library_read", func(x *taskEventCtx) []any {
+		return nil // web 域事件由 ReportLibraryRead 单独上报（域不同）
+	}},
 	{"template_5", func(x *taskEventCtx) []any {
 		// 场景 id 来自 /console/as/support/scenes（失败回落内置表）
 		var out []any
@@ -340,6 +361,7 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 	x := &taskEventCtx{acct: acct, now: time.Now().UnixMilli(), uid: acct.UserID}
 	x.cid = fmt.Sprintf("wb-run-%d", x.now)
 	x.experts = c.GrowthExpertsPaged(acct, 3, "")
+	x.cases = c.GrowthPlaybookCases()
 	x.scenes = c.GrowthScenes(acct)
 	x.themes = c.GrowthThemes(acct)
 	for _, kw := range []string{"lighthouse", "轻量云"} {
@@ -368,7 +390,111 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 			}
 		}
 	}
-	return c.postReport(acct, evs)
+	if err := c.postReport(acct, evs); err != nil {
+		return err
+	}
+	// Library_read 走 web 域（Origin/Referer/platform 头与 chat 域不同），单独上报；
+	// 失败不阻断 chat 域事件（下一 Tick 自然重试）。
+	if werr := c.ReportLibraryRead(acct); werr != nil {
+		log.Printf("web report (Library_read) failed: %v", werr)
+	}
+	return nil
+}
+
+// webUserAgent 浏览器 UA（web 域埋点；Library_read 用）。
+const webUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+
+// libraryDocURL 空间文档页（Library_read 的 pageURL）。
+const libraryDocURL = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
+
+// webBase 资料库/成长中心 web 域（与 chat 域分离：Origin/Referer/X-Domain 需一致）。
+const webBase = "https://www.workbuddy.cn"
+
+// ReportLibraryRead 上报 web 域「资料库介绍点击」事件（SPEC §32.8：Library_read 走
+// web 域，浏览器形状指纹 + x-client-platform: web；服务端按 web 域归因该任务）。
+func (c *TencentClient) ReportLibraryRead(acct *auth.Auth) error {
+	if acct == nil {
+		return fmt.Errorf("account required for web report")
+	}
+	now := time.Now().UnixMilli()
+	ev := map[string]any{
+		"eventCode": "web_element_click", "timestamp": now, "reportDelay": 0,
+		"pageURL": libraryDocURL, "elementId": "library_doc_intro_click",
+		"elementName": "WorkBuddy资料库介绍",
+		"os":          "Win32", "arch": "", "osVersion": "10.0", "userAgent": webUserAgent,
+		"machineId":    deriveDeviceID(acct.UserID, "webmachine"),
+		"userId":       acct.UserID,
+		"userNickname": acct.UserName,
+	}
+	body, _ := json.Marshal([]any{ev})
+	req, err := http.NewRequest(http.MethodPost, webBase+"/v2/report", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-client-platform", "web")
+	req.Header.Set("Origin", webBase)
+	req.Header.Set("Referer", libraryDocURL)
+	req.Header.Set("User-Agent", webUserAgent)
+	req.Header.Set("X-User-Id", acct.UserID)
+	req.Header.Set("X-Domain", webBase)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("web report failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
+	}
+	return nil
+}
+
+// PlaybookCase 灵感案例（playbook_prompt 的对象 id 来源）。
+type PlaybookCase struct {
+	ID    string
+	Title string
+	Type  string
+}
+
+// GrowthPlaybookCases 拉取灵感案例注册表（静态 CDN；失败回落内置表，社区同源）。
+func (c *TencentClient) GrowthPlaybookCases() []PlaybookCase {
+	fallback := []PlaybookCase{{"worker-ledger-freedom-dashboard", "打工人小账本", "other"}}
+	req, err := http.NewRequest(http.MethodGet, "https://static.workbuddy.cn/workbuddy/playbook/registry.json", nil)
+	if err != nil {
+		return fallback
+	}
+	req.Header.Set("User-Agent", webUserAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fallback
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fallback
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	var doc struct {
+		Cases []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+			Type  string `json:"artifact_type"`
+		} `json:"cases"`
+	}
+	if uerr := json.Unmarshal(raw, &doc); uerr != nil || len(doc.Cases) == 0 {
+		return fallback
+	}
+	out := make([]PlaybookCase, 0, 4)
+	for _, cs := range doc.Cases {
+		if cs.ID != "" {
+			out = append(out, PlaybookCase{cs.ID, cs.Title, cs.Type})
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 // postReport 埋点上报（chat 域 + 桌面 UA 形态；统一机制·SPEC §32.8）。
