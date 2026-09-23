@@ -67,43 +67,81 @@ func TestTencentDailyCheckinBusinessError(t *testing.T) {
 }
 
 func TestTencentUserResourceAggregate(t *testing.T) {
+	// 实测形态：三层包裹 {code,msg,data:{Response:{Data:{Accounts:[...]}}}}。
+	// 早期实现从根读 Response.Data.Accounts（漏 data 包裹）→ 恒得空列表 → 恒返回 0，
+	// CN 账号真实 4856 积分在面板显示为 0；此用例锁死解包路径。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"Response":{"Data":{"Accounts":[
-		  {"CapacityRemain":100,"CapacityUsed":50,"CycleCapacitySize":0,"CycleCapacityRemain":0,"CycleCapacityUsed":0},
-		  {"CapacityRemain":999,"CapacityUsed":0,"CycleCapacitySize":200,"CycleCapacityRemain":150,"CycleCapacityUsed":30},
-		  {"CapacityRemain":5,"CapacityUsed":5,"CycleCapacitySize":0,"CycleCapacityRemain":30,"CycleCapacityUsed":0}
-		]}}}`))
+		_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":{"Response":{"Data":{"Accounts":[
+		  {"CapacitySize":150,"CapacityRemain":100,"CapacityUsed":50,"CycleCapacitySize":0,"CycleCapacityRemain":0,"CycleCapacityUsed":0},
+		  {"CapacitySize":200,"CapacityRemain":999,"CapacityUsed":0,"CycleCapacitySize":200,"CycleCapacityRemain":150,"CycleCapacityUsed":30},
+		  {"CapacitySize":5,"CapacityRemain":5,"CapacityUsed":5,"CycleCapacitySize":0,"CycleCapacityRemain":30,"CycleCapacityUsed":0}
+		]}}}}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
-	remain, err := c.UserResource(billingAuth())
+	bal, err := c.UserResource(billingAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 规则：CycleCapacitySize>0 → CycleRemain(150)；CycleRemain>0 → Remain(30)；否则 CapacityRemain(100)
-	if remain != 280 {
-		t.Fatalf("aggregate rule: got %d want 280", remain)
+	if bal.Remain != 280 {
+		t.Fatalf("aggregate rule: got %d want 280", bal.Remain)
+	}
+	if bal.Total != 355 || bal.Used != 85 {
+		t.Fatalf("total/used: got %d/%d want 355/85", bal.Total, bal.Used)
+	}
+}
+
+// 兼容无 data 包裹的平铺形态（参考实现遗留），两种形态取不到才报解析错误。
+func TestTencentUserResourceFlatEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Response":{"Data":{"Accounts":[{"CapacityRemain":77}]}}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	bal, err := c.UserResource(billingAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bal.Remain != 77 {
+		t.Fatalf("flat envelope: got %d want 77", bal.Remain)
+	}
+}
+
+// 业务码非 0 必须报错，不得静默当成"余额 0"（正是这条掩盖了上例的解析缺陷）。
+func TestTencentUserResourceBizError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":11000,"msg":"login expired"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
+	c := NewTencent(5 * time.Second)
+	if _, err := c.UserResource(billingAuth()); err == nil || !strings.Contains(err.Error(), "login expired") {
+		t.Fatalf("business error must surface: %v", err)
 	}
 }
 
 func TestTencentUserResourceClampZero(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"Response":{"Data":{"Accounts":[
+		_, _ = w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[
 		  {"CapacityRemain":-10,"CycleCapacitySize":0,"CycleCapacityRemain":0,"CycleCapacityUsed":0}
-		]}}}`))
+		]}}}}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OMNIGATE_BILLING_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
-	remain, err := c.UserResource(billingAuth())
+	bal, err := c.UserResource(billingAuth())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remain != 0 {
-		t.Fatalf("negative must clamp to 0: %d", remain)
+	if bal.Remain != 0 {
+		t.Fatalf("negative must clamp to 0: %d", bal.Remain)
 	}
 }
 

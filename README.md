@@ -113,19 +113,57 @@ flowchart TB
   每日桌面六连事件链与任务事件包（桌面 UA 门控）、专家/技能/主题/场景对象解析、web 域
   资料库事件；宠物探险循环实跑（派出→归来领分→再派）。活动面故障只记日志、
   不影响聊天账号健康。**全球版（www.workbuddy.ai）实证无当前赛季活动**（仅遗留 stub 任务、
-  签到活动未开启、trial 已领），其价值定位为聊天额度。
+  签到活动未开启、trial 已领），其价值定位为聊天额度（新注册账号 350 积分）。
+- **全球域聊天契约（SPEC §28.4 G3）**：全球域要求**首条消息必须是 system prompt**，否则
+  `400 + code=11128`（安全策略拦截）；网关在全球域账号上自动前置一条中性 system，
+  国内域不注入。缺失该前置时全球账号会「看着健康却从不服务」——每次被轮询到都 400，
+  请求靠换号重试兜住，但白付一次往返并把账号推入冷却。
+- **加全球账号（运维）**：设备流的区域由 base 决定，不由账号决定——加国外账号必须带
+  `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 发起（否则拿到的是国内登录页，只有
+  微信/手机号/邮箱，没有 Google/GitHub/X 入口）：
+  ```bash
+  docker compose exec -e OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai \
+    omnigate2api omnigate2api-login-tencent url     # 打印 authUrl，用外部浏览器打开
+  docker compose exec -e OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai \
+    omnigate2api omnigate2api-login-tencent poll    # 授权后落盘 auths/workbuddy-{uid}.json
+  ```
+  两个注意点：① **Google 登录不能用内嵌 webview**（Google 拒绝嵌入式 OAuth），必须用系统
+  浏览器；② 必须用**不同的** Google 账号，否则同一 uid 会覆盖原凭证文件而不新增账号。
+  落盘后 `POST /admin/api/reload`（面板「重载 auths」）热生效，无需重启。
+- **模型级限流与按模型冷却（SPEC §28.4.1）**：上游对单个模型限使用量（`429 + code 6004`，
+  文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
+  解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
+  「模型限流 xxx(剩余分钟)」。账号级积分耗尽（`14018 额度已用尽`）另行归硬额度处理。
 - **裸模型名路由（v1.3）**：客户端只发模型名，渠道完全由网关侧路由表决定
   （默认表 = 两渠道清单合并，撞名组裁决给 codearts，撞名 fail-fast 拒绝重复注册）；
   `X-Provider` 保留为显式覆盖。`/v1/models` 无渠道时返回唯一视图（每模型名一条，
-  附 `family` 字段）。
+  附 `family` 字段；另附 `available_families` 标明哪些渠道目录可见、`routed_family`
+  标明实际归属）。
 - **删除 = 禁用（v1.3）**：路由表条目可禁用——禁用模型的请求返回 `404
   model_not_found`（不回落缺省渠道，显式渠道亦不可绕过）；禁用集随保存全量
   落盘，面板可逐个恢复。
-- **快捷追加（v1.3）**：渠道模型全貌表每行带「＋」按钮，一键加入路由表
-  （已存在则提示），保存后生效。
-- **WebUI 管理入口（v1.3）**：控制台新增「模型与路由」——查看各渠道模型全貌、
-  路由表增删改（保存即热生效并落盘 `data/routes.json`）；账户管理（启用/禁用/
-  清冷却/保活/授权登录）沿用。
+- **付费/免费标注（SPEC §29.7.2）**：取自上游 `GET {base}/v3/config`（桌面 UA）的
+  `models[].credits` 倍率与 `modelPromotions[]` 促销（徽章文案 + 折扣因子 + **起止时间窗/每日时段窗**），
+  按账号区域分别判定——同一模型在国内/国际的标注可能不同（实测 `deepseek-v4.1-flash`
+  国内按量计费 x0.11、国际 `Free now` x0.00），面板仅在两区域不一致时并排显示两枚标签；
+  促销过期自动回落牌价，不留假「免费」。
+- **模型目录与面板重做（SPEC §29.7）**：控制台「模型与路由」改为**联合目录单表**——
+  以模型名为主键，合并两渠道目录并集与路由表，逐行给出访问类别（免费/夜间免费/
+  限时免费/折扣/福利额度/按量计费，取自上游 `tags` 的官方 badge 文案）、能力标记
+  （图片/工具/craft/渠道默认）、上下文与输出规格、目录可见渠道、生效状态；
+  渠道归属用二选一按钮直接裁决，撞名模型两侧各带自己的访问类别。状态语义：
+  `已路由` / `缺省 → 华为` / **`⚠ 会失败`**（未列路由表且缺省渠道无此模型——按名
+  请求必失败，这是旧面板完全看不到的一类问题）/ `已禁用`。另有搜索与归属/状态
+  筛选、改动行高亮与未保存保护、`一键补齐归属`（只补"非缺省渠道独有"的未路由
+  条目）、`载入默认`、手动追加目录外注册名，以及**扫描各账号**（逐账号可见模型
+  与家族目录的差集——付费/免费档差异的唯一可靠来源，如 CN 账号可见 `minimax-m3`、
+  付费档可见 `minimax-m3-pay`）。目录拉取改为单飞 + 逐账号回退（单账号故障不再
+  污染整个家族，实测全球域账号 500 曾导致面板长期显示过期静态表）+ 冷启动非阻塞
+  预热与自愈；面板状态条逐渠道显示目录来源（实时/回落静态表/失败原因），不冒充
+  实时数据。规格见 SPEC §29.7。
+- **WebUI 管理入口（v1.3）**：控制台「模型与路由」——查看各渠道模型全貌、
+  路由归属裁决与禁用（保存即热生效并落盘 `data/routes.json`，形态见上方
+  「模型目录与面板重做」）；账户管理（启用/禁用/清冷却/保活/授权登录）沿用。
 
 ### 工具层（v1.1，默认全关，显式 opt-in）
 - `OMNIGATE_TOOLCHAIN=none|project|sanitize|project,sanitize` 或 Profile `toolchain.*` 开启：
@@ -212,7 +250,12 @@ docker compose restart omnigate2api          # 新账号加载进池
   网关按路由表自动分流（`kimi-k2.7` / `hy3` 等 → 腾讯，`glm-5.2` 等 → 华为），
   路由表可在 WebUI「模型与路由」里增删改；
 - 腾讯侧功能：每日自动签到（幂等）+ 积分余额查询（`daily-checkin` /
-  `get-user-resource`），随调度器（北京时间）运行。
+  `get-user-resource`），随调度器（北京时间）运行；
+- 积分口径（2026-09 修复）：`get-user-resource` 的可花费余额是**多套餐聚合**值，
+  响应为三层包裹 `data.Response.Data.Accounts`（早期漏解外层 `data` → 面板恒显示 0，
+  且业务码未判定，错误响应也被静默当成"余额 0"）。面板两处含义不同：账号列表「余额」
+  与成长中心「可用积分」= 可花费余额；成长中心「签到」列副行 = 活动期内累计签到获得
+  （`checkin-activity-status.total_credits`）。
 
 ## 环境变量
 
@@ -233,6 +276,7 @@ docker compose restart omnigate2api          # 新账号加载进池
 | `OMNIGATE_TENCENT_BASE` | 覆盖腾讯 copilot 地址（测试/实验） | copilot.tencent.com |
 | `OMNIGATE_ROUTES_FILE` | 裸模型名路由表（WebUI 保存；缺省 `data/routes.json`） | 自动 |
 | `OMNIGATE_MEDIA` | 非文本块语义全局覆盖（SPEC §30）：`placeholder`（默认，占位折叠）/ `passthrough`（图片分片透传，仅 roles 渠道生效） | 空 → Profile 声明 |
+| `OMNIGATE_GOPROXY` | **构建期** Go 模块代理链（`docker compose build` 传参给 Dockerfile 的 `GOPROXY`） | `goproxy.cn,proxy.golang.org,direct` |
 
 ## 目录结构（增补要点）
 

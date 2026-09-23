@@ -35,6 +35,9 @@ type fakeClient struct {
 	taskQueries   int
 	acceptBatches [][]string
 	claimCodes    []string
+	// inactiveActivity 注入「签到活动未开启」（全球版形态，active=false）：
+	// 用于验证跳过领取时余额仍被刷新。
+	inactiveActivity bool
 }
 
 func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
@@ -49,11 +52,17 @@ func (f *fakeClient) DailyCheckin(a *auth.Auth) (*upstream.CheckinResult, error)
 }
 func (f *fakeClient) CheckinStatus(a *auth.Auth) (*upstream.CheckinStatus, error) {
 	f.statuses++
-	return &upstream.CheckinStatus{ThemeName: "t", TodayCheckedIn: true, StreakDays: 7, TotalCredits: 700}, nil
+	st := &upstream.CheckinStatus{ThemeName: "t", TodayCheckedIn: true, StreakDays: 7, TotalCredits: 700}
+	if f.inactiveActivity {
+		// 全球版形态：active 字段显式为 false（字段缺失才是 CN 形态，不预检）
+		inactive := false
+		st.Active = &inactive
+	}
+	return st, nil
 }
-func (f *fakeClient) UserResource(a *auth.Auth) (int64, error) {
+func (f *fakeClient) UserResource(a *auth.Auth) (*upstream.ResourceBalance, error) {
 	f.balances++
-	return 42, nil
+	return &upstream.ResourceBalance{Remain: 42, Total: 100, Used: 58}, nil
 }
 func (f *fakeClient) PetTravelStatus(a *auth.Auth) (*upstream.PetTravel, error) {
 	f.petStates++
@@ -279,5 +288,43 @@ func TestSchedulerBuddyAdoption(t *testing.T) {
 	}
 	if stub.opens != 0 {
 		t.Fatalf("successful adoption must not fall back to energy box: opens=%d", stub.opens)
+	}
+}
+
+// 全球版形态（签到活动未开启 active=false）：跳过**领取**，但余额必须刷新——
+// 余额与活动态无关，全球账号仍在消耗聊天额度；不刷新则面板每次重启后一直显示
+// "未查询"（0 与"没查过"在面板上无法区分，曾造成误判）。
+func TestSchedulerTencentBalanceRefreshedWhenActivityInactive(t *testing.T) {
+	u := &auth.Auth{UserID: "u1", UserName: "global", Profile: "workbuddy", CloudDragonTok: "t",
+		RefreshToken: "r", Expiration: "2099-01-01T00:00:00Z", Domain: "www.workbuddy.ai"}
+	p, err := pool.New([]*auth.Auth{u}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &fakeClient{inactiveActivity: true}
+	for _, a := range p.Accounts() {
+		a.Client = stub
+	}
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+
+	if stub.checkins != 0 {
+		t.Fatalf("inactive activity must skip checkin: %d", stub.checkins)
+	}
+	if stub.balances != 1 {
+		t.Fatalf("balance must be refreshed even when activity is inactive: %d", stub.balances)
+	}
+	var credits, updated int64 = -1, 0
+	for _, row := range p.List() {
+		if row["uid"] == "u1" {
+			credits, _ = row["credits"].(int64)
+			updated, _ = row["quota_updated_at"].(int64)
+		}
+	}
+	if credits != 42 || updated == 0 {
+		t.Fatalf("quota snapshot must be recorded: credits=%d updated=%d", credits, updated)
 	}
 }

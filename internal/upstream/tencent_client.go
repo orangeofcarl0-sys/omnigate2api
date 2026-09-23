@@ -50,12 +50,7 @@ func NewTencent(timeout time.Duration) *TencentClient {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
-	tr := &http.Transport{
-		MaxIdleConns:          20,
-		MaxIdleConnsPerHost:   4,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 300 * time.Second,
-	}
+	tr := newTransport()
 	return &TencentClient{
 		http:       &http.Client{Timeout: timeout, Transport: tr},
 		streamHTTP: &http.Client{Transport: tr},
@@ -192,6 +187,11 @@ func tencentChatHeaders(req *http.Request, cred SignCredential, origin string) {
 // 模型名不做映射（上游按真实 ID 匹配，参考实现实证）；toolChoice 已按上游
 // string 语义归一化（§28.4 决策 D：none 在上层已删 tools，此处仅拼非空值）。
 func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+	// 全球域要求首条为 system prompt（区域契约差异，见 tencent_realm.go）：
+	// 缺失则上游 400 + code=11128，且会把账号连续错误推入冷却。
+	if tencentRegion(cred.Domain) {
+		messages = ensureLeadingSystem(messages)
+	}
 	body := map[string]any{
 		"model":    model,
 		"stream":   true,
@@ -315,9 +315,10 @@ func parseTencentTokenEnvelope(raw []byte) (*tencentTokenData, error) {
 type TencentErrKind int
 
 const (
-	TencentErrOther       TencentErrKind = iota
-	TencentErrHardCredit                 // 402 / 积分不足：冷却至次日 04:00
-	TencentErrSessionDead                // 12153 / Offline user session not found：永久禁用
+	TencentErrOther          TencentErrKind = iota
+	TencentErrHardCredit                    // 402 / 积分不足 / 14018 额度已用尽：冷却至次日 04:00
+	TencentErrSessionDead                   // 12153 / Offline user session not found：永久禁用
+	TencentErrModelRateLimit                // 429 + code 6004：**按模型**限流，解封时刻由上游给出
 )
 
 // tencentHardCreditMarkers 额度耗尽标记（中英双通道，对齐参考实现）。
@@ -325,6 +326,9 @@ var tencentHardCreditMarkers = []string{
 	"insufficient credit", "no credit", "credit exhausted", "out of credit",
 	"quota exceeded", "quota exhaust", "payment required", "credit not enough",
 	"not enough credit", "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
+	// 实测文案：14018「额度已用尽」/「Credits exhausted」——注意「额度已用尽」并不含
+	// 子串「额度用尽」（中间隔着「已」），旧表因此漏判，必须逐条列出。
+	"额度已用尽", "credits exhausted", "quota exhausted", "usage quota exceeded",
 }
 
 // tencentSessionDeadMarkers 会话死亡标记（离线会话/账号失效）。
@@ -334,6 +338,11 @@ var tencentSessionDeadMarkers = []string{"12153", "offline user session not foun
 // 需要专属动作；429/5xx 由通用映射继续处理）。
 func ClassifyTencent(status int, body string) TencentErrKind {
 	low := strings.ToLower(body)
+	// 模型级限流优先于通用 429：上游明确「您也可以切换其他模型继续使用」，
+	// 按整账号冷却会白白减少可用容量（见 tencent_limits.go）。
+	if IsModelRateLimit(body) {
+		return TencentErrModelRateLimit
+	}
 	if status == http.StatusPaymentRequired {
 		return TencentErrHardCredit
 	}

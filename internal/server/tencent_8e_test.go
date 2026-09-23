@@ -44,18 +44,20 @@ func tencent8eUpstream(t *testing.T, chatResp string, chatRec *[]string, refresh
 	}))
 }
 
-// resetModelCaches 清空跨测试共享的模型缓存（正/负缓存）。
+// resetModelCaches 清空跨测试共享的模型缓存（正缓存/负缓存/单飞标记/账号优先序）。
 func resetModelCaches() {
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-	tencentModelsCache.Lock()
-	tencentModelsCache.ids = nil
-	tencentModelsCache.fetched = time.Time{}
-	tencentModelsCache.lastFail = time.Time{}
-	tencentModelsCache.Unlock()
+	for _, c := range []*modelCache{dynamicModelsCache, tencentModelsCache} {
+		c.Lock()
+		c.ids = nil
+		c.fetched = time.Time{}
+		c.lastFail = time.Time{}
+		c.lastErrMsg = ""
+		c.inflight = false
+		c.lastGood = ""
+		c.lastGoodRealm = ""
+		c.badAt = nil
+		c.Unlock()
+	}
 }
 
 // providerChat 发一条带 X-Provider: workbuddy 的 chat 请求，返回响应体。

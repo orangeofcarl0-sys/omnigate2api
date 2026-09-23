@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,12 +38,16 @@ type Account struct {
 	// ProfileID 账号归属的上游（SPEC §24.1）：决定客户端/刷新/调度分支
 	ProfileID string
 
-	mu                sync.Mutex
-	quota             AccountQuota // 额度快照（华为活动 token 余额 / 腾讯积分）
-	lastValidated     time.Time
-	errCount          int
-	coolUntil         time.Time
-	coolKind          CoolKind
+	mu            sync.Mutex
+	quota         AccountQuota // 额度快照（华为活动 token 余额 / 腾讯积分）
+	lastValidated time.Time
+	errCount      int
+	coolUntil     time.Time
+	coolKind      CoolKind
+	// modelCool 按 (账号, 模型) 的冷却截止时刻（SPEC §28.4 决策 B 补充）：
+	// 上游的 429+code 6004 是**模型级**限流（文案自证"可切换其他模型继续使用"），
+	// 把整账号冷却会平白丢掉该账号对其余模型的容量，故按模型维度记账。
+	modelCool         map[string]time.Time
 	disabled          bool
 	disabledReason    string
 	lastErr           string
@@ -135,6 +140,34 @@ func newAccount(a *auth.Auth, maxConcurrent int) *Account {
 	return acct
 }
 
+// modelCoolingList 生效中的模型冷却（面板展示用，按到期时间排序，附剩余分钟）。
+func modelCoolingList(m map[string]time.Time, now time.Time) []map[string]any {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(m))
+	for model, until := range m {
+		if !now.Before(until) {
+			continue
+		}
+		out = append(out, map[string]any{
+			"model": model, "until": until.Format(time.RFC3339),
+			"in_min": int(until.Sub(now).Minutes()),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["until"].(string) < out[j]["until"].(string) })
+	return out
+}
+
+// truncateReason 日志用短文案（避免把整段上游 body 写进日志）。
+func truncateReason(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 120 {
+		return s[:120]
+	}
+	return s
+}
+
 // Accounts 返回全部账号。
 func (p *Pool) Accounts() []*Account {
 	p.mu.Lock()
@@ -213,6 +246,7 @@ func (p *Pool) List() []map[string]any {
 			"err_count":         a.errCount,
 			"reason":            reason,
 			"last_error":        a.lastErr,
+			"model_cooling":     modelCoolingList(a.modelCool, now),
 			"active_concurrent": a.activeConcurrent,
 			"max_concurrent":    a.maxConcurrent,
 			"token_remaining":   a.Auth.Remaining().Round(time.Minute).String(),
@@ -257,6 +291,7 @@ func (p *Pool) Enable(name string) bool {
 			a.disabled = false
 			a.disabledReason = ""
 			a.lastErr = ""
+			a.clearModelCools()
 			a.mu.Unlock()
 			p.saveState()
 			return true
@@ -265,7 +300,76 @@ func (p *Pool) Enable(name string) bool {
 	return false
 }
 
-// ClearCooldown 清冷却。
+// CoolModel 冷却某账号的某个模型对（到 until 为止）；其余模型不受影响。
+// reason 记入账号 lastErr 便于面板/日志观察（不改账号级冷却与禁用状态）。
+func (p *Pool) CoolModel(name, model string, until time.Time, reason string) {
+	if model == "" {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(model))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		if a.modelCool == nil {
+			a.modelCool = map[string]time.Time{}
+		}
+		a.modelCool[key] = until
+		a.lastErr = reason
+		a.mu.Unlock()
+		log.Printf("pool model cooldown account=%s model=%s until=%s reason=%s",
+			name, key, until.Format(time.RFC3339), truncateReason(reason))
+		p.saveState()
+		return
+	}
+}
+
+// ModelCooled 该账号的该模型当前是否在冷却中。
+func (p *Pool) ModelCooled(name, model string) bool {
+	key := strings.ToLower(strings.TrimSpace(model))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		until, ok := a.modelCool[key]
+		return ok && time.Now().Before(until)
+	}
+	return false
+}
+
+// ModelCools 该账号全部生效中的模型冷却（模型 → 截止时刻；已过期的不返回）。
+func (p *Pool) ModelCools(name string) map[string]time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	out := map[string]time.Time{}
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		for m, until := range a.modelCool {
+			if now.Before(until) {
+				out[m] = until
+			}
+		}
+		a.mu.Unlock()
+		return out
+	}
+	return out
+}
+
+// clearModelCools 清空某账号的按模型冷却（账号级"清冷却/启用"时一并清）。
+func (a *Account) clearModelCools() { a.modelCool = nil }
+
+// ClearCooldown 清冷却（账号级 + 按模型）。
 func (p *Pool) ClearCooldown(name string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -274,6 +378,7 @@ func (p *Pool) ClearCooldown(name string) bool {
 			a.mu.Lock()
 			a.coolUntil = time.Time{}
 			a.coolKind = CoolSoft
+			a.clearModelCools()
 			a.mu.Unlock()
 			p.saveState()
 			return true
@@ -326,6 +431,44 @@ func (p *Pool) PickFor(family string, tried map[string]bool) *Account {
 		}
 	}
 	return nil
+}
+
+// PickForModel 按家族 + 模型选号：账号健康 **且该模型未在该账号上冷却**。
+// 这是模型级限流（6004）下的正确轮换口径——别再因为一个模型被限就把整个账号跳过。
+func (p *Pool) PickForModel(family, model string, tried map[string]bool) *Account {
+	key := strings.ToLower(strings.TrimSpace(model))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	var fallback *Account // 所有账号该模型都在冷却时的兜底（可能已解封但表未清）
+	for _, a := range p.accounts {
+		if family != "" && a.ProfileID != family {
+			continue
+		}
+		if tried != nil && tried[a.Name] {
+			continue
+		}
+		a.mu.Lock()
+		healthy := !a.disabled && now.After(a.coolUntil)
+		var pairCooling bool
+		if key != "" {
+			if until, ok := a.modelCool[key]; ok {
+				pairCooling = now.Before(until)
+			}
+		}
+		a.mu.Unlock()
+		if !healthy {
+			continue
+		}
+		if pairCooling {
+			if fallback == nil {
+				fallback = a
+			}
+			continue
+		}
+		return a
+	}
+	return fallback
 }
 
 // PickExcluding 挑一个健康账号（全池，兼容既有调用）。
@@ -425,7 +568,10 @@ func (p *Pool) NoteError(name string, threshold int, cooldown time.Duration) {
 	p.saveState()
 }
 
-// NoteSuccess 清零错误计数。
+// NoteSuccess 清零错误计数与上次错误文案。
+// 必须一并清 lastErr：否则面板「原因」列会在健康账号上长期显示历史错误
+// （如 "consecutive errors"），把已恢复的账号显示成有问题——误导排障。
+// disabledReason 仅在未禁用时清（禁用账号的成功回调不该抹掉禁用原因）。
 func (p *Pool) NoteSuccess(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -433,6 +579,10 @@ func (p *Pool) NoteSuccess(name string) {
 		if a.Name == name {
 			a.mu.Lock()
 			a.errCount = 0
+			a.lastErr = ""
+			if !a.disabled {
+				a.disabledReason = ""
+			}
 			a.mu.Unlock()
 		}
 	}
@@ -660,12 +810,13 @@ func (p *Pool) loadState() {
 		return
 	}
 	var data []struct {
-		Name      string    `json:"name"`
-		ErrCount  int       `json:"err_count"`
-		CoolUntil time.Time `json:"cool_until"`
-		Disabled  bool      `json:"disabled"`
-		Reason    string    `json:"reason"`
-		LastErr   string    `json:"last_error"`
+		Name      string               `json:"name"`
+		ErrCount  int                  `json:"err_count"`
+		CoolUntil time.Time            `json:"cool_until"`
+		Disabled  bool                 `json:"disabled"`
+		Reason    string               `json:"reason"`
+		LastErr   string               `json:"last_error"`
+		ModelCool map[string]time.Time `json:"model_cool,omitempty"`
 	}
 	if json.Unmarshal(raw, &data) != nil {
 		return
@@ -679,6 +830,7 @@ func (p *Pool) loadState() {
 				a.disabled = s.Disabled
 				a.disabledReason = s.Reason
 				a.lastErr = s.LastErr
+				a.modelCool = s.ModelCool
 				a.mu.Unlock()
 			}
 		}
@@ -690,12 +842,13 @@ func (p *Pool) saveState() {
 		return
 	}
 	type entry struct {
-		Name      string    `json:"name"`
-		ErrCount  int       `json:"err_count"`
-		CoolUntil time.Time `json:"cool_until"`
-		Disabled  bool      `json:"disabled"`
-		Reason    string    `json:"reason"`
-		LastErr   string    `json:"last_error"`
+		Name      string               `json:"name"`
+		ErrCount  int                  `json:"err_count"`
+		CoolUntil time.Time            `json:"cool_until"`
+		Disabled  bool                 `json:"disabled"`
+		Reason    string               `json:"reason"`
+		LastErr   string               `json:"last_error"`
+		ModelCool map[string]time.Time `json:"model_cool,omitempty"`
 	}
 	out := make([]entry, 0, len(p.accounts))
 	for _, a := range p.accounts {
@@ -707,6 +860,7 @@ func (p *Pool) saveState() {
 			Disabled:  a.disabled,
 			Reason:    a.disabledReason,
 			LastErr:   a.lastErr,
+			ModelCool: a.modelCool,
 		})
 		a.mu.Unlock()
 	}

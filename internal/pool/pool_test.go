@@ -131,6 +131,26 @@ func TestNoteErrorThresholdAndReset(t *testing.T) {
 	}
 }
 
+// NoteSuccess 必须清掉历史错误文案：健康账号在面板「原因」列显示
+// "consecutive errors" 会把已恢复的账号误报成有问题（误导排障）。
+func TestNoteSuccessClearsLastError(t *testing.T) {
+	p := newTestPool(t, "", testAuth("t1", "workbuddy"))
+	p.Cooldown("t1", CoolErr, time.Millisecond, "boom")
+	if a := p.Get("t1"); a == nil || a.lastErr != "boom" {
+		t.Fatalf("Cooldown must record lastErr: %+v", a)
+	}
+	p.NoteSuccess("t1")
+	if a := p.Get("t1"); a == nil || a.lastErr != "" || a.disabledReason != "" {
+		t.Fatalf("NoteSuccess must clear stale reason: %+v", a)
+	}
+	// 禁用原因不得被成功回调抹掉（禁用态需要保留原因供排障）。
+	p.Disable("t1", "manual disable")
+	p.NoteSuccess("t1")
+	if a := p.Get("t1"); a == nil || a.disabledReason != "manual disable" {
+		t.Fatalf("disable reason must survive NoteSuccess: %+v", a)
+	}
+}
+
 // 禁用/启用及其在 Stats/List 中的可见性。
 func TestDisableEnableVisibility(t *testing.T) {
 	p := newTestPool(t, "", testAuth("t1", "workbuddy"))
@@ -229,5 +249,49 @@ func TestValidateExpiredWithoutRefreshTokenStaysUsable(t *testing.T) {
 	}
 	if !p.Healthy("t1") {
 		t.Fatal("account must remain healthy")
+	}
+}
+
+// 模型级限流：只冷却 (账号, 模型) 对，其余模型照常可选；账号级"清冷却"一并清掉。
+func TestModelScopedCooldown(t *testing.T) {
+	p := newTestPool(t, "", testAuth("t1", "workbuddy"), testAuth("t2", "workbuddy"))
+	p.CoolModel("t1", "glm-5.2", time.Now().Add(30*time.Minute), "model rate limit")
+
+	if !p.ModelCooled("t1", "glm-5.2") {
+		t.Fatal("pair must be cooling")
+	}
+	// 大小写不敏感（模型名统一小写归一）
+	if !p.ModelCooled("t1", "GLM-5.2") {
+		t.Fatal("model key must be case-insensitive")
+	}
+	// 账号本身仍健康：模型级限流不是账号故障
+	if !p.Healthy("t1") {
+		t.Fatal("model-scoped limit must not cool the whole account")
+	}
+	// 同一账号的其它模型照常可选（这是本机制的全部意义）
+	if a := p.PickForModel("workbuddy", "kimi-k2.7", nil); a == nil || a.Name != "t1" {
+		t.Fatalf("other models on the same account must remain usable: %+v", a)
+	}
+	// 被限的模型在该账号上被跳过 → 落到另一个账号
+	if a := p.PickForModel("workbuddy", "glm-5.2", nil); a == nil || a.Name != "t2" {
+		t.Fatalf("limited pair must rotate to another account: %+v", a)
+	}
+	// 该模型的冷却明细可见（面板展示）
+	if l := p.ModelCools("t1"); l["glm-5.2"].IsZero() {
+		t.Fatalf("model cool detail must be exposed: %v", l)
+	}
+	// 账号级清冷却一并清模型冷却
+	if !p.ClearCooldown("t1") || p.ModelCooled("t1", "glm-5.2") {
+		t.Fatal("ClearCooldown must also drop model-scoped cooldowns")
+	}
+}
+
+// 所有账号的该模型都在冷却时：不应整体拒绝（退化返回兜底账号，让上游再判一次），
+// 否则单模型限流会把整个家族打成不可用。
+func TestModelScopedCooldownFallback(t *testing.T) {
+	p := newTestPool(t, "", testAuth("t1", "workbuddy"))
+	p.CoolModel("t1", "glm-5.2", time.Now().Add(time.Minute), "limit")
+	if a := p.PickForModel("workbuddy", "glm-5.2", nil); a == nil || a.Name != "t1" {
+		t.Fatalf("sole account must still be returned as fallback: %+v", a)
 	}
 }

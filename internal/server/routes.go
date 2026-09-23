@@ -10,20 +10,17 @@ import (
 
 // buildDefaultRoutes 内置默认路由表（SPEC §29.1）：
 //   - 华为静态清单（含活动模型）全量注册给 codearts；
-//   - 腾讯静态清单中与华为撞名的模型（glm-5.2/glm-5.1/deepseek-v4-flash）
+//   - 腾讯静态清单中与华为撞名的模型（实测 glm-5.2/glm-5.1/glm-5.3-flash）
 //     由 codearts 持有裸名（保持现状缺省语义），其余固有模型注册给 workbuddy；
 //   - 运行时动态模型（如腾讯动态清单新增）未命中表 → 缺省 codearts。
 func buildDefaultRoutes() []adapt.ModelRoute {
 	codearts := map[string]bool{}
 	var routes []adapt.ModelRoute
-	for _, m := range staticModels {
-		if id, ok := m["id"].(string); ok && id != "" {
-			codearts[id] = true
-			routes = append(routes, adapt.ModelRoute{Model: id, Family: "codearts"})
-		}
+	for _, id := range staticIDs(staticModels) {
+		codearts[id] = true
+		routes = append(routes, adapt.ModelRoute{Model: id, Family: "codearts"})
 	}
-	for _, m := range staticTencentModels {
-		id, _ := m["id"].(string)
+	for _, id := range staticIDs(staticTencentModels) {
 		if id == "" || codearts[id] {
 			continue // 撞名组：codearts 持有裸名（fail-fast 保证唯一）
 		}
@@ -58,29 +55,44 @@ func (h *Handler) resolveProfile(explicit, model string) *adapt.UpstreamProfile 
 // unifiedModelList /v1/models 唯一视图（无显式渠道，SPEC §29.3）：
 // 两家族清单按 family 标注并入，再按路由表顺序输出——模型名全局唯一；
 // 表内模型在家族清单缺失时按缺省 context 兜底展示。
+// 每条额外带 available_families（哪些渠道可见，撞名模型 >1）与 routed_family
+// （路由表实际归属），供客户端与面板裁决。
 func (h *Handler) unifiedModelList() []map[string]any {
 	byID := map[string]map[string]any{}
+	avail := map[string][]string{}
 	for _, fam := range []string{"codearts", "workbuddy"} {
 		for _, e := range h.modelListFor(fam) {
-			if id, ok := e["id"].(string); ok && id != "" {
-				// 撞名模型由路由表裁决的家族持有裸名：其它家族清单里出现
-				// 同名模型时跳过（否则后遍历的家族会覆盖归属）。
-				if owned, ok := h.routesTable().FamilyOf(id); ok && owned != fam {
-					continue
-				}
-				e["family"] = fam
-				byID[strings.ToLower(id)] = e
+			id, ok := e["id"].(string)
+			if !ok || id == "" {
+				continue
 			}
+			key := strings.ToLower(id)
+			avail[key] = append(avail[key], fam)
+			// 撞名模型由路由表裁决的家族持有裸名：其它家族清单里出现
+			// 同名模型时跳过（否则后遍历的家族会覆盖归属）。
+			if owned, ok := h.routesTable().FamilyOf(key); ok && owned != fam {
+				continue
+			}
+			e["family"] = fam
+			byID[key] = e
 		}
 	}
 	out := make([]map[string]any, 0, len(h.routesTable().Routes()))
 	for _, r := range h.routesTable().Routes() {
-		e, ok := byID[strings.ToLower(r.Model)]
+		key := strings.ToLower(r.Model)
+		e, ok := byID[key]
 		if !ok {
 			e = map[string]any{
-				"id": r.Model, "object": "model", "created": 1753600000,
-				"family": r.Family, "context_length": 131072,
+				"id": r.Model, "object": "model", "created": modelCreated,
+				"family": r.Family, "owned_by": r.Family, "source": "route",
+				"context_length": 131072,
 			}
+		}
+		e["routed_family"] = r.Family
+		if fams := avail[key]; fams != nil {
+			e["available_families"] = fams
+		} else {
+			e["available_families"] = []string{}
 		}
 		out = append(out, e)
 	}

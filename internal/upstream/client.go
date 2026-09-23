@@ -102,13 +102,7 @@ func New(timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
-	tr := &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     90 * time.Second,
-		// 首字节超时：活动模型/大会话冷启动可达数分钟，120s 会误杀并连累账号冷却。
-		ResponseHeaderTimeout: 300 * time.Second,
-	}
+	tr := newTransport()
 	base := SnapEngineApiHost
 	if v := os.Getenv("OMNIGATE_UPSTREAM_BASE"); v != "" {
 		base = strings.TrimRight(v, "/")
@@ -640,12 +634,22 @@ func truncateStr(s string, n int) string {
 	return s
 }
 
-// ModelInfo 模型信息（与 workbuddy/trae 一致）。
+// ModelInfo 模型目录条目（SPEC §29.7）：华为/腾讯共用。元数据仅腾讯目录下发，
+// 华为侧（含静态表）留零值，由调用方按 AccessFor 补访问类别。
 type ModelInfo struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
 	ContextWindow int64  `json:"contextWindow,omitempty"`
 	MaxTokens     int64  `json:"maxTokens,omitempty"`
+	// 以下为腾讯目录元数据（/console/enterprises/personal/models）。
+	Vendor         string   `json:"vendor,omitempty"`
+	Modes          []string `json:"modes,omitempty"`  // 非 badge 标签（如 craft）
+	Access         string   `json:"access,omitempty"` // 访问类别（见 access* 常量）
+	AccessLabel    string   `json:"accessLabel,omitempty"`
+	SupportsImages bool     `json:"supportsImages,omitempty"`
+	SupportsTools  bool     `json:"supportsTools,omitempty"`
+	IsDefault      bool     `json:"isDefault,omitempty"`
+	Description    string   `json:"description,omitempty"`
 }
 
 // FetchModels 从 agent-center 拉取当前账号可用的模型列表（动态缓存 1h）。
@@ -694,11 +698,15 @@ func (c *Client) FetchModels(acct *auth.Auth) ([]ModelInfo, error) {
 		if id == "" {
 			continue
 		}
+		// 华为目录不下发付费/免费标注：活动（福利）模型由福利网关清单单独判定。
+		access, accessLabel := AccessForStatic(id)
 		out = append(out, ModelInfo{
 			ID:            id,
 			Name:          id,
 			ContextWindow: m.Params.ContextWindow,
 			MaxTokens:     m.Params.MaxTokens,
+			Access:        access,
+			AccessLabel:   accessLabel,
 		})
 	}
 	return out, nil

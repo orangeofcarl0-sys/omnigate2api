@@ -49,11 +49,17 @@ func (c *TencentClient) FetchModels(acct *auth.Auth) ([]ModelInfo, error) {
 		Code int64 `json:"code"`
 		Data struct {
 			Models []struct {
-				ID              string `json:"id"`
-				Name            string `json:"name"`
-				MaxInputTokens  int64  `json:"maxInputTokens"`
-				MaxOutputTokens int64  `json:"maxOutputTokens"`
-				Disabled        bool   `json:"disabled"`
+				ID               string   `json:"id"`
+				Name             string   `json:"name"`
+				MaxInputTokens   int64    `json:"maxInputTokens"`
+				MaxOutputTokens  int64    `json:"maxOutputTokens"`
+				Disabled         bool     `json:"disabled"`
+				Vendor           string   `json:"vendor"`
+				Tags             []string `json:"tags"`
+				SupportsImages   bool     `json:"supportsImages"`
+				SupportsToolCall bool     `json:"supportsToolCall"`
+				IsDefault        bool     `json:"isDefault"`
+				DescriptionZh    string   `json:"descriptionZh"`
 			} `json:"models"`
 			Agents []struct {
 				Name   string   `json:"name"`
@@ -68,14 +74,21 @@ func (c *TencentClient) FetchModels(acct *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("models api business error code=%d", env.Code)
 	}
 	type modelDetail struct {
-		name            string
-		maxInputTokens  int64
-		maxOutputTokens int64
-		disabled        bool
+		name             string
+		maxInputTokens   int64
+		maxOutputTokens  int64
+		disabled         bool
+		vendor           string
+		tags             []string
+		supportsImages   bool
+		supportsToolCall bool
+		isDefault        bool
+		description      string
 	}
 	byID := map[string]modelDetail{}
 	for _, m := range env.Data.Models {
-		byID[m.ID] = modelDetail{m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled}
+		byID[m.ID] = modelDetail{m.Name, m.MaxInputTokens, m.MaxOutputTokens, m.Disabled,
+			m.Vendor, m.Tags, m.SupportsImages, m.SupportsToolCall, m.IsDefault, m.DescriptionZh}
 	}
 	out := make([]ModelInfo, 0, 8)
 	for _, ag := range env.Data.Agents {
@@ -91,8 +104,15 @@ func (c *TencentClient) FetchModels(acct *auth.Auth) ([]ModelInfo, error) {
 			if name == "" {
 				name = id
 			}
-			out = append(out, ModelInfo{ID: id, Name: name,
-				ContextWindow: detail.maxInputTokens, MaxTokens: detail.maxOutputTokens})
+			access, accessLabel, modes := ParseModelTags(detail.tags)
+			out = append(out, ModelInfo{
+				ID: id, Name: name,
+				ContextWindow: detail.maxInputTokens, MaxTokens: detail.maxOutputTokens,
+				Vendor: detail.vendor, Modes: modes,
+				Access: access, AccessLabel: accessLabel,
+				SupportsImages: detail.supportsImages, SupportsTools: detail.supportsToolCall,
+				IsDefault: detail.isDefault, Description: detail.description,
+			})
 		}
 	}
 	if len(out) == 0 {

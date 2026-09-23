@@ -20,6 +20,17 @@
 > v0.5 变更：多模态图片透传立项（§30）——三协议图片归一化与占位对齐、
 > URL→base64 转换层（SSRF 防护）、Profile `message.media` 兑现 §13.3 预留
 > 接口位、真链路 probe 条件拍板树；§20.2「不实现多模态像素透传」随之撤销。
+> v0.6 变更：模型目录与「模型与路由」面板重做（§29.7）——上游目录元数据
+> （付费/免费标注、能力标记）贯通到面板、静态回落表按实测校正、目录拉取改为
+> 单飞 + 逐账号回退 + 非阻塞预热；面板由「自由文本路由表」改为「联合目录单表 +
+> 渠道归属裁决」，未路由且缺省渠道无此模型的条目显式告警。
+> v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
+> `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
+> 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.7 变更：两处实测缺陷修复——① 积分余额解包漏外层 `data` 导致恒显示 0
+> （§24.2.1，含聚合口径与两类「积分」语义区分）；② 全球域要求首条消息为
+> system prompt 的区域契约差异（§28.4 G3 延伸：缺失时账号"看着健康"却每次 400
+> 并被推入冷却）。
 
 ---
 
@@ -760,6 +771,33 @@ type ChatAPI interface {
   余额日志，BillingAPI 断言分发；`claimTencentCheckin` 与华为 benefit 并行）；
 - keepalive/保活：共用。
 
+### 24.2.1 积分余额口径（get-user-resource，2026-09 修复）
+
+`UserResource` 的实测响应是**三层包裹**：
+
+```
+{code,msg,data:{Response:{Data:{Accounts:[{CapacitySize,CapacityUsed,CapacityRemain,
+                                            CycleCapacitySize,CycleCapacityUsed,CycleCapacityRemain}]}}}}
+```
+
+- **外层 `data` 必须解到**。早期实现从根读 `Response.Data.Accounts`，漏掉 `data` 包裹后
+  恒得空列表 → 恒返回 0：CN 账号真实 4856 积分、全球账号 350 积分在面板与账号池快照里
+  都显示成 0（且业务码未被判定，错误响应同样被静默当成"余额 0"）。现同时解 `data` 包裹
+  与平铺形态（参考实现遗留），并走 `checkBiz` 判定业务码。
+- **聚合规则**：逐套餐取剩余——周期套餐（`CycleCapacitySize>0` 或周期字段非零）用
+  `CycleCapacityRemain`，否则用 `CapacityRemain`；负值钳 0；求和。同时聚合 `Total`
+  （套餐容量合计）与 `Used`（已消耗），供面板「共 X · 已用 Y」拆解。
+- **口径区分**（面板两处都显示，勿混淆）：`get-user-resource` 的 Remain = **可花费余额**
+  （账号池 `quota.remain`，账号列表「余额」列与成长中心「可用积分」列）；`checkin-activity-status`
+  的 `total_credits` = **活动期内累计签到获得**（成长中心「签到」列副行）。两者是不同的量。
+- **刷新时机与"未查询"语义**：额度快照非持久化，重启后由调度器补齐——签到**跳过领取**
+  （`active=false`，全球版形态）时**同样刷新余额**（余额与活动态无关；不刷新则面板在每次
+  重启后一直显示"未查询"）。面板对「从未查询」（`quota_updated_at==0`）显示**未查询**而非 0：
+  0 与"没查过"不可区分，曾直接造成误判。`已用` 为 0 时省略（上游该字段滞后于 Remain，
+  并列显示会自相矛盾）。
+- 验证：`billing_test.go` 锁死三种形态（data 包裹 / 平铺 / 业务码错误）+ 负值钳零；
+  `scheduler_test.go` 锁死"活动未开启仍刷新余额"。
+
 ### 24.3 登录 CLI
 
 华为 PKCE 二段握手保持；腾讯 OAuth 设备流新增 `cmd/login-tencent`（或
@@ -941,6 +979,17 @@ sequenceDiagram
 - 区域解析：按 `cred.Domain` 后缀 `.workbuddy.ai` → base
   `https://www.workbuddy.ai` + Origin/Referer 同域；否则 CN 默认；
   `OMNIGATE_TENCENT_BASE` 仍优先。
+- **区域契约差异：全球域要求首条消息为 system prompt**（2026-09-24 补，G3 延伸）。
+  同一请求实测：国内域 `copilot.tencent.com` 仅 user → 200；全球域
+  `www.workbuddy.ai` 仅 user → 400 + `code=11128 first message is not system
+  prompt`（displayMsg「请求被安全策略拦截」），加一条 system 后 200。
+  故 `ChatStream` 在全球域（`tencentRegion(cred.Domain)`）对首条非 system 的消息
+  列表前置一条中性 system（`upstream.ensureLeadingSystem`，文案见
+  `globalRealmSystemPrompt`）；**国内域不注入**，保持"模型所见 = 客户端所发"。
+  不注入的后果不是报错而是**静默劣化**：全球账号被轮询到时每次 400，请求靠换号
+  重试兜住但白付一次往返，并把账号连续错误推入冷却（面板显示 "consecutive
+  errors"）——账号"看着健康"却从不真正服务。回归测试
+  `tencent_realm_test.go`（注入/不重复注入/国内不注入/不改动入参切片）。
 
 **G4 腾讯错误语义迁移**（severity: 中）
 - `upstream` 增分类器（对齐 workbuddy2api Classify）：402 + 中英关键词
@@ -1021,7 +1070,7 @@ sequenceDiagram
 | 默认路由 | 内置路由表 = 两家族清单合并 + 撞名组裁决给 codearts（保持现状缺省语义）：glm-5.2/glm-5.1/deepseek-v4-flash/glm-5.3-flash → codearts；腾讯固有模型（kimi-*/hy*/glm-5.3/glm-5v-turbo/minimax-m3*/deepseek-v4-pro/auto）→ workbuddy；未声明模型 → 缺省 codearts |
 | 显式覆盖 | `X-Provider`/`body.provider` 保留为最高优先级的显式覆盖（现有请求语义不变，向后兼容） |
 | 删除 = 禁用 | 路由表条目可**禁用**（blocked 集）：禁用模型请求 → `404 model_not_found`，不回落缺省渠道，显式渠道亦不可绕过；`blocked` 随 PUT 全量保存（空列表清空全部禁用），`data/routes.json` 结构 `{routes, blocked}`（兼容旧顶层数组格式） |
-| 管理入口 | WebUI 新增「模型与路由」区块：查看两渠道模型全貌、路由表增删改（PUT 全量替换、校验后热生效 + 落盘 `data/routes.json`） |
+| 管理入口 | WebUI「模型与路由」区块：两渠道目录并集（含付费/免费标注与能力标记）+ 路由归属裁决 + 禁用集（PUT 全量替换、校验后热生效 + 落盘 `data/routes.json`）；v0.6 形态见 §29.7.3 |
 | 持久化 | `data/routes.json`（WebUI 保存）；启动加载（缺失 → 内置默认表；文件非法 → fail-fast 拒绝启动，与 Profiles 目录同哲学） |
 | 管道不变 | 路由只决定 Profile/家族；折叠/roles、指纹/熔断（按 Profile 隔离）、账号池（按家族）全部复用，零改动 |
 
@@ -1036,30 +1085,140 @@ sequenceDiagram
 
 ### 29.3 /v1/models 视图
 
-- 无渠道标记：**唯一视图**（按路由表，每模型名一条，附 `family` 字段）——客户端拿到的模型 ID 全局唯一；
+- 无渠道标记：**唯一视图**（按路由表，每模型名一条，附 `family` 字段）——客户端拿到的模型 ID 全局唯一；另附 `available_families`（哪些渠道目录可见）与 `routed_family`（路由表归属，见 §29.7.4）；
 - 带 `X-Provider: codearts|workbuddy`：该家族全量清单（调试/管理视角，可能含未注册裸名）；
-- WebUI 管理页基于家族视图展示渠道全貌 + 路由表编辑。
+- WebUI 管理页基于「两家族目录并集 + 路由表」的联合视图编辑（§29.7.3）。
 
 ### 29.4 管理 API（Bearer 保护，与既有 /admin/api/* 一致）
 
 | 端点 | 语义 |
 |---|---|
-| `GET /admin/api/routes` | 当前路由表（model/family 数组） |
+| `GET /admin/api/routes` | 当前路由表（model/family 数组）+ `blocked` |
 | `PUT /admin/api/routes` | 全量替换：校验（模型名非空且唯一、家族已注册、非空表）→ 落盘 + 热生效；非法 → 409 + 原因。body 含 `blocked[]`（全量语义：空列表清空禁用） |
-| `GET /admin/api/routes` | 返回 `{routes, blocked}`（禁用集供面板「已禁用」chips 展示与恢复） |
-| `GET /admin/api/models` | 家族全貌（family 过滤可选；每模型含 context/max_output/owned_by） |
+| `GET /admin/api/routes/overview` | 面板单请求数据源：`{families, routes, blocked, defaults}`（见 §29.7）；`?refresh=1` 同步等待一次上游目录拉取 |
+| `GET /admin/api/models` | 家族全貌（family 过滤可选）；`?refresh=1` 同上。每模型含目录元数据（见 §29.7.2） |
+| `GET /admin/api/models/scan` | 逐账号目录扫描（`?family=`）：各账号可见模型 + 与家族目录的差集（付费/免费档差异的唯一可靠来源） |
 
 ### 29.5 交付件与验收
 
 - adapt 层：`RouteTable`（内置默认表、`Resolve(model, explicit)`、加载/校验/落盘）；
-- server：serveCompletion 路由接入、/v1/models 唯一视图、admin routes/models API；
-- WebUI：「模型与路由」面板区块（表格 + 编辑 + 保存）；
-- 测试：默认表与现状行为一致性（无 provider 请求零回归）、撞名 fail-fast、X-Provider 覆盖优先级、PUT 校验/持久化/热生效、面板 API 鉴权；
-- v0.4 版本面随实现提交同步。
+- server：serveCompletion 路由接入、/v1/models 唯一视图、admin routes/models/overview/scan API；
+- upstream：`ModelInfo` 目录元数据 + `ParseModelTags` 访问类别归一（§29.7.2）；
+- WebUI：「模型与路由」联合目录单表（§29.7.3）；
+- 测试：默认表与现状行为一致性（无 provider 请求零回归）、撞名 fail-fast、X-Provider 覆盖优先级、PUT 校验/持久化/热生效、面板 API 鉴权；目录侧另有账号级故障回退、静态回落带原因、冷缓存不阻塞、overview 形状、唯一视图 `available_families`、逐账号扫描（`internal/server/models_test.go`）与 tags 归一（`internal/upstream/modelinfo_test.go`）；
+- v0.4/v0.6 版本面随实现提交同步。
+
+### 28.4.1 模型级限流与按模型冷却（v0.7 补，决策 B 延伸）
+
+上游对**单个模型**有使用量限制，形态为 `HTTP 429 + code 6004`：
+
+```
+{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-22 09:46:39 UTC+8 重置，
+             您也可以切换其他模型继续使用。"}
+国际版英文："Your usage has exceeded the rate limit. It will reset at 2026-09-05 01:57:00 UTC+8."
+```
+
+**上游自证这是模型级**（"您也可以切换其他模型继续使用"），故正确处置是「把 (账号, 模型)
+这一对冷却到上游声明的解封时刻，并轮换换号」，而不是把整账号软冷却——后者会平白丢掉该
+账号对其余模型的容量，且把账号从池里摘掉（可用容量假性下降）。
+
+| 决策点 | 结论 |
+|---|---|
+| 识别 | `upstream.IsModelRateLimit(body)`：业务码 6004 **或**文案标记（中英"使用量已超出频率限制/切换其他模型/usage has exceeded the rate limit"）。**裸 429 无标记不算模型级**——无法区分账号级/渠道级，宁可整账号短暂冷却，也不要在没证据时继续打 |
+| 解封时刻 | 优先 `upstream.ParseTencentResetAt` 解析上游声明（"将在 \<t\> 重置" / "reset at \<t\>"，中英语序都是**时间在前**；只给时刻则取当天、已过顺延明天）；解析失败退 `SoftCooldown`；最终钳在 24h 内（防上游给出离谱时间把账号废掉） |
+| 记账 | 账号池 `Account.modelCool map[model]until`：`CoolModel` / `ModelCooled` / `ModelCools`；`PickForModel(family, model, tried)` 跳过"该模型在该账号冷却中"的账号；**账号级健康不受影响**，面板「模型限流」列可见 |
+| 轮换 | 选号走 `PickForModel`；续接会话的黏性账号若该模型正被限流则**解绑重分配**（换模型后继续用同账号是允许的）。全部账号该模型都在冷却时退化返回兜底账号（让上游再判一次），不让单模型限流把整个家族打成不可用 |
+| 持久化 | `state.json` 增加 `model_cool`（重启不丢，可能长达数小时） |
+| 与账号级区分 | `14018 额度已用尽` / `Credits exhausted` 是**账号级**积分耗尽（连免费模型也拒）→ 归 `TencentErrHardCredit`（冷却至次日 04:00）。注意「额度已用尽」并不含子串「额度用尽」（中间隔着「已」），旧标记表会漏判，已逐条补齐 |
+
+**传输层必须有界（同批修复）**：手工构造 `&http.Transport{}` **不继承** `DefaultTransport`
+的默认值——`DialContext` 为 nil 即无超时拨号、`TLSHandshakeTimeout` 为 0 即无限等握手。
+实测后果：某区域不可达时流式请求会一直挂在建连/握手阶段，**既不报错也不换号**，直到客户端
+自己断开（日志表现为 `client canceled upstream wait; no penalty`），「号池自动切换」在此情形下
+完全失效。现两个家族共用 `upstream.newTransport()`：拨号 10s、TLS 握手 10s、
+`ResponseHeaderTimeout` 保持宽松 300s（活动模型/大会话冷启动可达数分钟，收紧会误杀正常请求）。
+分工原则：**连接与握手必须有界且短，首字节可以等**。修复后实测：不可达账号从"挂 90s 无响应"
+变为"1.5–6.7s 内换号成功"。
+
+**关于"每模型 2 亿 token 硬上限"**：2026-09-24 多方检索（GitHub 代码搜索 + 20 余个生态仓库
+全量 grep + 中英社区）**未找到任何一手证据**；上游 6004 的 msg 只给解封时刻、不给累计 token
+数。故本实现按"上游自述的模型级限流"处理，不实现"额度耗尽"式的按模型硬封禁——后者会在
+证据不足时误伤。若日后拿到含 token 计数的真实响应，再据此校准。
 
 ### 29.6 触发回退
 
 路由表解析失败（文件损坏）→ 拒绝启动（fail-fast）；运行期 PUT 校验失败 → 409 且保持当前表不变；X-Provider 覆盖遇到未注册家族 → 回退 codearts（既有行为）。
+
+### 29.7 模型目录与面板重做（v0.6）
+
+#### 29.7.1 立项依据（2026-09 实测）
+
+1. **面板显示的腾讯模型目录是过期静态表**：`/admin/api/models?family=workbuddy` 长期返回 8 条，实为 `staticTencentModels` 回落值——它宣称的 `minimax-m3-pay`/`deepseek-v4-flash` 在实测 cli 绑定清单中并不存在，且漏掉 10 个真实模型（`auto`/`hy3`/`hy3-x`/`hy4-preview`/`deepseek-v4.1-flash`/`glm-5.3`/`glm-5.3-flash`/`kimi-k3-1`/`kimi-k2.8-preview`/`minimax-m3`）。
+2. **根因是单账号失败污染全家族**：`fetchModels` 取「池中首个健康账号」拉取，失败即写家族级负缓存 5min 并全线回落静态表。本机全球域账号（`www.workbuddy.ai`）端点不可达（HTTP 500 / 握手超时）且排在候选首位，于是 CN 账号明明可用（实测 16 条），面板却始终显示静态表。
+3. **上游目录元数据被丢弃**：`/console/enterprises/personal/models` 返回 30 条模型定义（含 `tags`/`vendor`/`supportsImages`/`supportsToolCall`/`isDefault`/`descriptionZh`），cli 代理绑定 16 条；旧解析只取 id/context/maxOutput，付费与免费语义（`badge:夜间免费`/`badge:限时免费`/`badge:夜间折扣`）在面板上完全不可见——而这是选型的首要依据。
+4. **未路由模型静默失败**：路由表 11 条 vs 目录 24 条，其中 10 个腾讯独有模型未列路由表 → 按 §29.2 缺省回落华为 → 华为目录无此模型 → 按名请求必失败。旧面板没有任何位置能看出这一点（`glm-5.3`/`glm-5v-turbo`/`hy3`/`auto`/`kimi-k3-1` 等）。
+5. **旧面板形态本身易错**：路由表是「自由文本模型名 + 渠道下拉」的空表，允许重复名与拼写错误，而重复名只在保存时被服务端 fail-fast 拒绝——用户拿到一句报错却要在自己输入的行里找是哪一行。同一模型在两渠道是否可见、撞名时各渠道的付费属性，旧面板都不呈现。
+
+#### 29.7.2 目录元数据与访问类别（拍板）
+
+| 决策点 | 结论 |
+|---|---|
+| 元数据来源 | 腾讯 `/console/enterprises/personal/models` 的 `models[]`（全量定义）+ `agents[]` 中 `name=="cli"` 的绑定清单（只暴露 cli 可见集，对齐参考实现）；华为 agent-detail 的 `gpts.models`（无付费标注） |
+| **访问类别权威源（v0.7）** | `GET {base}/v3/config`（**桌面 UA**）的 `models[].credits`（牌价倍率）与 `modelPromotions[]`（结构化促销：`badge.label`、`discount.factor`、`schedule.validFrom/validUntil`、`schedule.daily`、`hover.textZh`）。旧的 `tags` 徽章文案降级为**兜底**（无配置背书时用），因为文案既无倍率也无时间窗，且 CLI UA 的 config 根本不下发 `modelPromotions` |
+| 访问类别归一 | 单一入口 `upstream.ParseModelTags`：`badge:<文案>[:#RRGGBB]` → 枚举 `free`/`night_free`/`limited_free`/`discount`/`benefit`/`paid`，**官方文案原文保留**在 `access_label`（展示以官方为准，不自造）；非 badge 标签归入 `modes`（如 `craft`） |
+| 无 badge 的语义 | `paid`（"无免费标注"即按量计费），**不臆测免费**——猜错的代价是用户按免费预期选了计费模型 |
+| 华为侧 | 目录不下发付费标注：活动（福利）模型由福利网关清单判定（`IsBenefitModel`）→ `benefit`，其余 `paid` |
+| 静态回落表 | 按实测校正为 cli 真实绑定集（17 条，含付费档变体 `minimax-m3-pay`）；条目带 `source:"static"`，面板显式标注"静态表"，**绝不冒充实时** |
+| 账号间目录差异 | 逐账号拉取只在面板「扫描各账号」按需触发（账号间可见模型集确实不同：CN 账号 16 条含 `minimax-m3`，付费档账号可见 `minimax-m3-pay`），不做缺省拉取——每账号一次往返，不该由打开面板隐式付出 |
+| **元数据的来源与区域边界** | 家族目录来自**某一个账号**（逐账号回退的第一个成功者），因此 `familyCatalog` 必须带上 `source_account`/`source_realm` 与家族账号的 `realms` 集合；面板据此标注「来自 <账号>（CN）」并在**跨区家族**上打出「跨区 CN/全球」提示——付费/免费标注只对被取样账号所在区域有效，不得冒充全家族事实 |
+
+**已知不可读项（2026-09-24 实测，勿当已核对）**：全球域 `www.workbuddy.ai` 的
+`/console/enterprises/personal/models` **恒返 HTTP 500**（与请求头无关：CLI 头／加账号标识／
+桌面 UA／两者叠加，四种组合均 500；全球 console SPA 的 JS bundle 里也不含该 API 引用）——
+即**全球域的模型清单与付费/免费标注目前读不到**，凡涉及"某模型在全球域是否免费/折扣"的
+结论，都必须由官方客户端或该域其它端点单独取证，不能用 CN 账号的标注替代。
+同样地，`get-user-resource` 的 `Remain`/`CapacityUsed` 在**分钟级窗口内不随用量变化**
+（国内/全球账号各 6 次重负载请求，两个字段均纹丝不动），故它**不能**用来做"某模型是否
+计费"的实时判定（CN 账号的 `已用 112` 是结算后回填的）；判定计费属性要靠元数据标注。
+
+#### 29.7.3 面板形态（拍板）
+
+- **单表联合目录，主键 = 模型名**：行 = 两渠道目录的并集 ∪ 路由表中的注册名；列 = 模型（名/中文名/访问类别/能力标记）、渠道归属（华为|腾讯 二选一，即裁决）、目录可见（该模型在哪些渠道目录里）、上下文/输出、状态、操作（禁用/移除）。
+- **主键化消除整类错误**：重复名在界面上不可能构造，拼写错误退化为「目录中不存在」的手动条目（显式标记），服务端 fail-fast 从"日常报错"回到"最后防线"。
+- **状态语义（与服务端 `RouteTable.Resolve` 同语义）**：`已路由`（表内命中）/ `缺省 → 华为`（未列路由表，但缺省渠道有此模型，可用）/ `⚠ 会失败`（未列路由表**且**缺省渠道无此模型——按名请求必失败）/ `已禁用`（blocked，请求 404，显式渠道亦不可绕过）。
+- **撞名裁决**：同一模型在两渠道目录都出现时标 `双渠道同名`，两个归属按钮各自带该渠道的访问类别，选择是有信息依据的（如 `glm-5.3-flash` 华为侧为福利额度、腾讯侧为按量计费）。
+- **批量动作**：`一键补齐归属`（只把"非缺省渠道独有"的未路由条目补到其唯一可见渠道——这是唯一真正会失败的组合，不替用户做多余的显式化）、`载入默认`（载入内置默认表，保存前不生效）。
+- **脏检查与保护**：工作副本 vs 载入快照比对，改动行左侧高亮；有未保存改动时保存按钮激活、离开页面与重新载入均需确认；保存成功后先对齐快照再回读（否则回读会被自己的脏检查拦下）。
+- **筛选/搜索**：按归属（全部/华为/腾讯）、按状态（未路由/已禁用）筛选 + 模型名/中文名/厂商/说明全文搜索；排序把问题条目（会失败 → 未路由 → 已禁用）排在最前。
+- **状态条**：逐渠道显示目录来源（实时 / 回落静态表 / 失败 + 失败原因 tooltip + 刷新中指示）与条目数——面板必须能自证数据新鲜度。
+
+#### 29.7.4 目录拉取策略（拍板）
+
+| 决策点 | 结论 |
+|---|---|
+| 并发 | **单飞**（`inflight`）：并发调用只触发一次上游拉取，其余等待结果 |
+| 账号选择 | 上次成功账号 → 健康账号 → 近期失败账号 → 其余；失败只降序不剔除（其余都不可用时它仍是唯一机会）。失败账号 5min 内降序，避免每次刷新都在已知不可达账号上耗掉一个等待窗口 |
+| 单账号等待上限 | 25s（`modelFetchAttemptTimeout`）。上游客户端的传输层超时（120s）属上游内部约定，不该成为面板/客户端的等待时间；超时即转下一账号 |
+| 负缓存 | 仅当**全部**候选失败才写家族级负冷却 5min，失败原因留在缓存并暴露给面板 |
+| 面板路径 | `wait<=0` **绝不等待上游**：冷缓存立即返回静态表 + `warming` 标记，后台预热；面板另有冷启动自愈（约 4s 一次、最多 9 次）在预热完成后自动回读，用户不必手动刷新 |
+| 客户端路径 | `/v1/models` 有限等待 12s（保证能拿到实时清单，也不至于挂死）；面板「刷新目录」/`?refresh=1` 等待 15s |
+| 唯一视图附加字段 | 每条附 `available_families`（哪些渠道目录可见，撞名 >1）与 `routed_family`（路由表实际归属）——客户端与面板都不必自己反推 |
+
+**促销/倍率配置的拉取与判定（v0.7）**
+
+| 决策点 | 结论 |
+|---|---|
+| 标注判定 | **只认 `discount.factor`**：`enabled` ∧ 当前在窗口内 ∧ `factor<1` 的促销里取 factor 最小者 → `free`/`night_free`/`limited_free`/`discount`；无生效促销 → `paid`（牌价倍率另取）。同一模型常成对下发「夜间折扣 + 白天徽章」，后者**只有 badge 没有 factor**，仅用于白天展示——按 factor 判定才不会把白天的夜间免费误标成免费 |
+| 时间窗 | 日期窗（`validFrom`/`validUntil`）与每日时段窗（`schedule.daily`，含跨零点如 23:00–7:50）取交集，时区固定 Asia/Shanghai；**过期自动回落牌价**，不留假"免费" |
+| 区域维度 | 配置按**账号区域**分别拉取缓存（cn / global）——同一模型两区域促销可能不同（实测 `deepseek-v4.1-flash` 国内按量计费 x0.11、国际 `Free now` x0.00；`hy4-preview` 国内夜间免费、国际按量计费）。条目附 `access_by_realm`，面板仅在**两区域标注不一致**时并排显示两枚 chip |
+| 只贴标签不增删 | 配置里的模型清单**只用于给目录中已有的模型贴标签**，绝不据它新增条目（部署决策：不因国际版清单而扩充目录） |
+| 失败与并发 | 单飞 + 成功缓存 1h + 失败负冷却 5min；**区域间并行**且单区域等待上限同目录拉取（25s）。面板「刷新目录」会一并重试配置（否则模型缓存尚热时永远不重试） |
+| 可观测 | `familyCatalog.access_config` 暴露各区域配置状态（`ok`/`at`/`error`/`fetching`）；某区域取不到时面板打「标注缺 xx」而不是假装有该区域的标注 |
+
+**两个实测坑（均已修 + 回归测试）**
+
+1. **不支持的家族污染共享区域缓存**：华为客户端没有 `/v3/config`，若把它也算进候选，它会先抢到 `realm=cn` 再以"不支持"收场，给 cn 打上 5min 负冷却 → 腾讯 CN 的配置被饿死（症状：只有全球有标注、国内没有，且状态里看不出原因）。现在先按 `ConfigAPI` 能力过滤候选。
+2. **区域串行导致互相拖累**：本机到 `www.workbuddy.ai` 时通时断，串行拉取下一个区域会被前一个卡住（症状同上）。现在区域并行 + 单区域有界等待。
 
 ---
 
@@ -1249,7 +1408,7 @@ sequenceDiagram
 - codearts text-only 的像素通道升级（probe 仅收集数据）；
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
-*文档状态：Draft v0.4。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+*文档状态：Draft v0.8。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

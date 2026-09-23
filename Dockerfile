@@ -1,4 +1,8 @@
 FROM golang:1.24-alpine AS build
+# 模块代理链（构建期可覆盖）：镜像源优先，官方代理兜底，最后回源——单一代理
+# 不可达时不必改 Dockerfile（proxy.golang.org 在部分网络下 TLS 握手超时）。
+ARG GOPROXY="https://goproxy.cn,https://proxy.golang.org,direct"
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod ./
 COPY go.sum ./

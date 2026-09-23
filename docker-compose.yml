@@ -1,6 +1,10 @@
 services:
   omnigate2api:
-    build: .
+    build:
+      context: .
+      args:
+        # Go 模块代理链（构建期）：可用 OMNIGATE_GOPROXY 覆盖，默认镜像源优先。
+        GOPROXY: ${OMNIGATE_GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}
     container_name: omnigate2api
     restart: unless-stopped
     ports:

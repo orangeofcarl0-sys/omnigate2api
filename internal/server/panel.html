@@ -140,6 +140,85 @@ select option{ background:#fff; color:var(--text); }
 /* 渠道徽章：账号归属标识（codearts 蓝 / workbuddy 绿） */
 .badge[data-fam="workbuddy"]{background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:color-mix(in srgb,var(--ok) 42%,transparent);color:color-mix(in srgb,var(--ok) 84%,#0F172A)}
 .badge[data-fam="codearts"]{background:color-mix(in srgb,var(--info) 12%,transparent);border-color:color-mix(in srgb,var(--info) 40%,transparent);color:color-mix(in srgb,var(--info) 82%,#0F172A)}
+
+/* ── 模型与路由（SPEC §29.7）：单表联合目录 + 渠道归属裁决 ─────────────── */
+.mroute-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mroute-src{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.src-pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;font-size:12px;
+  background:rgba(255,255,255,.7);border:1px solid var(--line)}
+.src-pill b{font-weight:600}
+.src-pill.live{border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.src-pill.fallback{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 8%,#fff)}
+.src-pill.warn{border-color:color-mix(in srgb,var(--bad) 42%,var(--line));background:color-mix(in srgb,var(--bad) 6%,#fff)}
+.src-dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.src-pill.live .src-dot{background:var(--ok)}
+.src-pill.fallback .src-dot{background:var(--warn)}
+.src-pill.warn .src-dot{background:var(--bad)}
+.mroute-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.mroute-bar input[type="text"]{min-width:220px;flex:1 1 240px;max-width:340px}
+.mroute-sum{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.seg{display:inline-flex;background:rgba(255,255,255,.72);border:1px solid var(--line);border-radius:999px;padding:2px;gap:2px}
+.seg-b{border:none;background:transparent;color:var(--muted);padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;transition:background .15s,color .15s}
+.seg-b:hover{color:var(--text)}
+.seg-b.on{background:color-mix(in srgb,var(--accent) 88%,#fff);color:#fff;box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 26%,transparent)}
+.mroute-banner{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;margin-bottom:10px;
+  border-radius:var(--radius-sm);font-size:13px;
+  background:color-mix(in srgb,var(--warn) 10%,#fff);border:1px solid color-mix(in srgb,var(--warn) 38%,var(--line))}
+.mroute-banner.bad{background:color-mix(in srgb,var(--bad) 7%,#fff);border-color:color-mix(in srgb,var(--bad) 36%,var(--line))}
+.mroute-banner .sp{flex:1}
+.mroute-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius-sm);background:rgba(255,255,255,.42)}
+.mroute-table{margin:0;table-layout:fixed;min-width:900px}
+.mroute-table th{padding:9px 11px;white-space:nowrap;position:sticky;top:0;background:rgba(248,250,252,.96);z-index:1}
+.mroute-table td{padding:9px 11px;vertical-align:middle}
+/* 列宽固定：模型列吸收剩余宽度（描述单行省略），其余列按内容收窄——
+   否则描述文字会把渠道/状态列挤到换行（渠道按钮曾因此竖排成两个字）。 */
+.mroute-table th:nth-child(2),.mroute-table td:nth-child(2){width:124px}
+.mroute-table th:nth-child(3),.mroute-table td:nth-child(3){width:112px}
+.mroute-table td .badge{white-space:nowrap}
+.mroute-table th:nth-child(4),.mroute-table td:nth-child(4){width:132px;white-space:nowrap}
+.mroute-table th:nth-child(5),.mroute-table td:nth-child(5){width:168px}
+.mroute-table th:nth-child(6),.mroute-table td:nth-child(6){width:132px}
+.mroute-table tbody tr.row-dirty td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.mroute-table tbody tr.row-blocked{opacity:.62}
+.m-ident{display:flex;flex-direction:column;gap:4px;min-width:0}
+.m-ident .m-name{font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:#0F172A;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.m-ident .m-sub{font-size:11.5px;color:var(--muted);display:flex;gap:8px;min-width:0}
+.m-ident .m-sub span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.m-chips{display:flex;gap:4px;flex-wrap:wrap}
+.mc{padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:600;border:1px solid transparent;white-space:nowrap}
+.mc.cap{background:rgba(100,116,139,.1);color:#475569;border-color:rgba(100,116,139,.24)}
+.mc.acc-paid{background:rgba(100,116,139,.12);color:#475569;border-color:rgba(100,116,139,.28)}
+.mc.acc-free{background:rgba(22,163,74,.13);color:#15803d;border-color:rgba(22,163,74,.34)}
+.mc.acc-night_free{background:rgba(79,70,229,.12);color:#4338ca;border-color:rgba(79,70,229,.32)}
+.mc.acc-limited_free{background:rgba(13,148,136,.13);color:#0f766e;border-color:rgba(13,148,136,.34)}
+.mc.acc-discount{background:rgba(2,132,199,.12);color:#0369a1;border-color:rgba(2,132,199,.3)}
+.mc.acc-benefit{background:rgba(147,51,234,.12);color:#7e22ce;border-color:rgba(147,51,234,.3)}
+.mc.dual{background:rgba(217,119,6,.13);color:#b45309;border-color:rgba(217,119,6,.32)}
+.mc.manual{background:rgba(220,38,38,.1);color:#b91c1c;border-color:rgba(220,38,38,.3)}
+.mc.src{background:rgba(100,116,139,.08);color:var(--muted);border-color:rgba(100,116,139,.22)}
+.fam-pick{display:inline-flex;gap:4px;flex-wrap:nowrap}
+.fam-pick button{border:1px solid var(--line);background:rgba(255,255,255,.8);color:var(--muted);
+  padding:4px 9px;border-radius:8px;font-size:11.5px;font-weight:600;white-space:nowrap;transition:.15s}
+.fam-pick button:hover:not(:disabled){border-color:color-mix(in srgb,var(--accent) 50%,var(--line));color:var(--text)}
+.fam-pick button.on{color:#fff;border-color:transparent}
+.fam-pick button.on[data-fam="codearts"]{background:linear-gradient(135deg,var(--info),color-mix(in srgb,var(--info) 74%,#fff))}
+.fam-pick button.on[data-fam="workbuddy"]{background:linear-gradient(135deg,var(--ok),color-mix(in srgb,var(--ok) 74%,#fff))}
+.fam-pick button.on.miss::after{content:"⚠";margin-left:4px;font-size:10px}
+.fam-pick button:disabled{opacity:.45;cursor:not-allowed}
+.mroute-extra{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+.mroute-add{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mroute-add input[type="text"]{flex:1 1 260px;max-width:360px}
+.mroute-hint{font-size:11.5px;line-height:1.6}
+.mroute-scan{margin-top:12px;border:1px solid var(--line);border-radius:var(--radius-sm);overflow:hidden;background:rgba(255,255,255,.5)}
+.mroute-scan .scan-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600}
+.mroute-scan table{width:100%;border-collapse:collapse;font-size:12px}
+.mroute-scan td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.mroute-scan tr:last-child td{border-bottom:none}
+.diff-add{color:var(--ok);font-weight:600}
+.diff-miss{color:var(--bad);font-weight:600}
+@media (max-width:760px){
+  .mroute-table th:nth-child(4), .mroute-table td:nth-child(4){display:none}
+}
 </style>
 
 
@@ -215,7 +294,6 @@ select option{ background:#fff; color:var(--text); }
   </div>
 
   <div class="card">
-  <div class="card">
     <div class="card-h">
       <h2>腾讯成长中心</h2>
       <div style="display:flex;gap:8px;align-items:center">
@@ -240,44 +318,68 @@ select option{ background:#fff; color:var(--text); }
     </div>
   </div>
 
+  <div class="card">
     <div class="card-h"><h2>模型</h2><span class="muted" id="modelCount"></span></div>
     <div class="card-b"><div class="chips" id="modelChips"></div></div>
   </div>
 
-  <div class="card">
   <div class="card" id="mrouteCard">
-    <div class="card-h"><h2>模型与路由</h2><span class="muted">裸模型名 → 渠道（SPEC §29）</span></div>
-    <div class="card-b">
-      <div class="chips">
-        <select id="famSelect">
-          <option value="codearts">codearts（华为）</option>
-          <option value="workbuddy">workbuddy（腾讯）</option>
-        </select>
-        <button class="btn" id="btnFamLoad">查看渠道模型</button>
-        <span class="muted" style="margin-left:auto">模型名全局唯一 · 撞名 fail-fast · X-Provider 仍可显式覆盖</span>
+    <div class="card-h">
+      <h2>模型与路由</h2>
+      <div class="mroute-actions">
+        <button class="btn" id="btnMrouteRefresh" title="重新拉取两渠道的实时模型目录">刷新目录</button>
+        <button class="btn" id="btnMrouteScan" title="逐账号拉取：各账号可见模型可能不同（付费 / 免费档差异）">扫描各账号</button>
+        <button class="btn" id="btnMrouteDefaults" title="载入内置默认路由表（未保存前不生效）">载入默认</button>
+        <button class="btn primary" id="btnMrouteSave" disabled>保存更改</button>
       </div>
-      <table class="table">
-        <thead><tr><th>模型</th><th>context</th><th>max_output</th></tr></thead>
-        <tbody id="famBody"></tbody>
-      </table>
-      <div class="foot" style="display:flex;gap:10px;align-items:flex-start;justify-content:space-between">
-        <table class="table" style="margin:0;flex:1">
-          <thead><tr><th style="width:55%">模型名（裸名）</th><th>渠道</th><th></th></tr></thead>
-          <tbody id="routeBody"></tbody>
+    </div>
+    <div class="card-b">
+      <div class="mroute-src" id="mrouteSrc"></div>
+      <div class="mroute-bar">
+        <input id="mrouteSearch" type="text" placeholder="搜索模型名 / 厂商 / 说明…" autocomplete="off"/>
+        <div class="seg" id="mrouteFilter">
+          <button class="seg-b on" data-f="all">全部</button>
+          <button class="seg-b" data-f="codearts">华为</button>
+          <button class="seg-b" data-f="workbuddy">腾讯</button>
+          <button class="seg-b" data-f="unrouted">未路由</button>
+          <button class="seg-b" data-f="blocked">已禁用</button>
+        </div>
+        <span class="mroute-sum" id="mrouteSummary"></span>
+      </div>
+      <div class="mroute-banner hidden" id="mrouteBanner"></div>
+      <div class="mroute-wrap">
+        <table class="table mroute-table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th>渠道归属</th>
+              <th>目录可见</th>
+              <th>上下文 / 输出</th>
+              <th>状态</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="mrouteBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
         </table>
-        <div style="display:flex;gap:8px;flex-direction:column">
-          <button class="btn" id="btnAddRoute">＋ 追加</button>
-          <button class="btn primary" id="btnSaveRoutes">保存路由表</button>
+      </div>
+      <div class="mroute-extra">
+        <div class="mroute-add">
+          <input id="mrouteAddName" type="text" placeholder="手动追加注册名（目录中暂无的模型）" autocomplete="off"/>
+          <select id="mrouteAddFam">
+            <option value="codearts">华为 codearts</option>
+            <option value="workbuddy">腾讯 workbuddy</option>
+          </select>
+          <button class="btn" id="btnMrouteAdd">＋ 追加</button>
+        </div>
+        <div class="muted mroute-hint">
+          模型名全局唯一，撞名在保存时 fail-fast · 禁用 = 请求返回 404（显式 X-Provider 亦不可绕过）· 未列入路由表的模型缺省回落华为
         </div>
       </div>
-      <div class="foot" style="margin-top:8px">
-        <span class="muted">已禁用（删除 = 禁用，请求返回 404）：</span>
-        <span id="blockedChips"></span>
-      </div>
-      </div>
+      <div id="mrouteScanBox" class="hidden"></div>
     </div>
   </div>
 
+  <div class="card">
     <div class="card-h"><h2>调度</h2></div>
     <div class="card-b">
       <div class="chips" id="schedChips"></div>
@@ -414,10 +516,14 @@ function render(data){
             <span class="badge" data-fam="${escapeAttr(a.family||"")}">${a.family==="workbuddy"?"workbuddy":"codearts"}</span></div>
           <div class="mono muted" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div>
         </td>
-        <td><strong>${Number(a.credits||0).toLocaleString()}</strong>${
-          a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()} · 用 ${Number(a.quota_used||0).toLocaleString()}</div>` : ""
+        <td>${a.quota_updated_at
+          ? `<strong>${Number(a.credits||0).toLocaleString()}</strong>${a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()}${a.quota_used ? ` · 用 ${Number(a.quota_used).toLocaleString()}` : ""}</div>` : ""}`
+          : `<span class="muted" title="尚未查询过余额（额度快照不持久化，重启后需重新查询；调度器每日也会刷新）">未查询</span>`}</td>
+        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${
+          (a.model_cooling && a.model_cooling.length)
+            ? `<div class="muted" style="font-size:11px" title="上游模型级限流（429/code 6004）：只影响这些模型，同账号其它模型仍可用">模型限流 ${a.model_cooling.map(m => `${escapeHtml(m.model)}(${m.in_min}m)`).join(" ")}</div>`
+            : ""
         }</td>
-        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}</td>
         <td><div class="muted">${escapeHtml(reason)}</div><div class="mono muted" style="font-size:11px">${escapeHtml(until)}</div></td>
         <td><div class="row-actions">
           <button class="btn" data-act="credits" data-uid="${escapeAttr(a.uid)}">积分</button>
@@ -432,9 +538,9 @@ function render(data){
   }
 
   const models = data.models || [];
-  $("modelCount").textContent = models.length + " 个";
+  $("modelCount").textContent = models.length + " 个（唯一视图：/v1/models 实际返回）";
   $("modelChips").innerHTML = models.length
-    ? models.map(m => `<span class="chip mono">${escapeHtml(m.id || m)}</span>`).join("")
+    ? models.map(m => `<span class="chip mono" title="${escapeAttr((m.access_label||"") + " · " + (m.family||""))}" data-fam="${escapeAttr(m.family||"")}">${escapeHtml(m.id || m)}</span>`).join("")
     : `<span class="muted">暂无模型</span>`;
 
   const sch = (data.schedule || {}).watch || {}; // 调度配置在 schedule.watch 层
@@ -477,7 +583,7 @@ async function loadGrowth(){
         <span class="badge" data-fam="workbuddy">${realm}</span>
         <div class="mono muted" style="font-size:11px" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div></td>
       <td><strong>${Number(a.credits||0).toLocaleString()}</strong>
-        ${ck.total_credits?`<div class="muted" style="font-size:11px">活动累计 ${Number(ck.total_credits).toLocaleString()}</div>`:""}
+        ${a.credits_total?`<div class="muted" style="font-size:11px" title="套餐容量合计（上游字段聚合；与余额的差额即已消耗）">套餐共 ${Number(a.credits_total).toLocaleString()}${a.credits_used?` · 已用 ${Number(a.credits_used).toLocaleString()}`:""}</div>`:""}
         ${a.credits_error?`<div class="muted" style="font-size:11px">${escapeHtml(a.credits_error)}</div>`:""}</td>
       <td>${a.energy!==undefined?`<strong>${a.energy}</strong>`:"—"}</td>
       <td>${active} ${today}<div class="muted" style="font-size:11px">连续 ${ck.streak_days||0} 天 · 累计 ${Number(ck.total_credits||0).toLocaleString()}</div></td>
@@ -690,74 +796,436 @@ $("oauthCopy").onclick = async () => {
 // 失败（如直连且未带 key）再回退到登录表单。
 showApp();
 
-// ── 模型与路由（SPEC §29.4）────────────────────────────────────────────
-let pendingBlocked = new Set(); // 本次会话待保存的禁用模型
+// ── 模型与路由（SPEC §29.7）：单表联合目录 + 渠道归属裁决 ────────────────
+// 数据模型：主表以「模型名」为主键（与路由表同键），行 = 该模型在两渠道目录
+// 中的可见性 + 当前归属 + 生效状态。不再用「自由文本 + 渠道下拉」的空表，
+// 因为那种形态允许重复/拼错，而重复名在保存时会被服务端 fail-fast 拒绝，
+// 用户却要自己对着报错找哪一行——主键化后这类错误在界面上不可能发生。
+const MR_FAM = { codearts: "华为", workbuddy: "腾讯" };
+const MR_REALM_NAME = { cn: "CN", global: "全球" };
+const MR_DEFAULT_FAM = "codearts"; // 未列路由表 → 缺省家族（SPEC §29.2）
+const MR_ACCESS_CLASS = {
+  free: "acc-free", night_free: "acc-night_free", limited_free: "acc-limited_free",
+  discount: "acc-discount", benefit: "acc-benefit", paid: "acc-paid",
+};
 
-async function loadRoutes(){
-  const res = await api("/admin/api/routes");
-  const routes = Array.isArray(res) ? res : ((res && res.routes) || []);
-  const blocked = (res && res.blocked) || [];
-  pendingBlocked = new Set(blocked);
-  const body = $("routeBody");
-  body.innerHTML = "";
-  if (!routes.length) body.innerHTML = '<tr><td colspan="3" class="empty">路由表为空</td></tr>';
-  routes.forEach(r => addRouteRow(r.model, r.family));
-  renderBlocked();
+const mr = {
+  families: [],             // [{family,label,source,error,warming,models}]
+  routes: new Map(),        // 模型名(小写) → 家族（工作副本）
+  blocked: new Set(),       // 禁用集（工作副本）
+  defaults: [],             // 内置默认路由表
+  snap: "",                 // 载入时的序列化快照（脏检查基准）
+  loaded: false,            // 是否已成功载入（首次载入前不得视为脏：空工作副本
+                            // 与空快照本就相等，但初始 snap 为空串，会把首屏
+                            // 误判成"有未保存改动"并弹出确认框）
+  scan: null,               // 各账号扫描结果
+  filter: "all",
+  q: "",
+};
+
+function mrSnap(){
+  const routes = [...mr.routes.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+  return JSON.stringify({r: routes, b: [...mr.blocked].sort()});
 }
-function renderBlocked(){
-  $("blockedChips").innerHTML = [...pendingBlocked].map(m =>
-    `<span class="chip">${escapeHtml(m)} <a href="javascript:void 0" data-unblock="${escapeAttr(m)}">恢复</a></span>`
-  ).join("") || `<span class="muted">无</span>`;
-  document.querySelectorAll('[data-unblock]').forEach(a => {
-    a.onclick = () => { pendingBlocked.delete(a.dataset.unblock); renderBlocked(); };
+function mrDirty(){ return mr.loaded && mrSnap() !== mr.snap; }
+function mrFamLabel(f){ return MR_FAM[f] || f; }
+
+// mrIndex 联合目录：两渠道清单并集 + 路由表里目录中不存在的注册名。
+// per = 该模型在哪些渠道目录里可见（撞名时 >1）；meta = 展示元数据（取首个渠道）。
+function mrIndex(){
+  const idx = new Map();
+  for (const fam of mr.families){
+    for (const m of (fam.models || [])){
+      const key = String(m.id).toLowerCase();
+      let e = idx.get(key);
+      if (!e){ e = { id: m.id, per: new Set(), meta: m, manual: false }; idx.set(key, e); }
+      e.per.add(fam.family);
+    }
+  }
+  for (const key of mr.routes.keys()){
+    if (!idx.has(key)) idx.set(key, { id: key, per: new Set(), meta: {id:key}, manual: true });
+  }
+  return idx;
+}
+
+// mrEff 生效归属（与服务端 RouteTable.Resolve 同语义）：禁用 → 无；
+// 表内 → 表内家族；未列 → 缺省家族。
+function mrEff(key, entry){
+  if (mr.blocked.has(key)) return { fam: "", blocked: true };
+  const assigned = mr.routes.get(key);
+  if (assigned) return { fam: assigned, assigned: true };
+  return { fam: MR_DEFAULT_FAM, assigned: false, missing: entry && entry.per.size > 0 && !entry.per.has(MR_DEFAULT_FAM) };
+}
+
+// fmtTok 上下文/输出规格缩写：口径是 token 数，用十进制（256000 → 256K，
+// 1000000 → 1M），不用 1024 进制——否则 256K 上下文会显示成 250K，与官方文案不符。
+function fmtTok(n){
+  n = Number(n||0);
+  if (!n) return "—";
+  if (n >= 1e6) return (n/1e6).toFixed(n % 1e6 ? 2 : 0).replace(/\.?0+$/,"") + "M";
+  if (n >= 1000) return (n/1000).toFixed(n % 1000 ? 1 : 0).replace(/\.?0+$/,"") + "K";
+  return String(n);
+}
+
+function mrRender(){
+  mrRenderSrc();
+  const idx = mrIndex();
+  const rows = [];
+  for (const [key, entry] of idx){
+    const eff = mrEff(key, entry);
+    const meta = entry.meta || {};
+    if (mr.filter === "blocked" && !eff.blocked) continue;
+    if (mr.filter === "unrouted" && (eff.assigned || eff.blocked)) continue;
+    if ((mr.filter === "codearts" || mr.filter === "workbuddy") && eff.fam !== mr.filter) continue;
+    if (mr.q){
+      const hay = [key, meta.name, meta.vendor, meta.description, meta.access_label, meta.id]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(mr.q)) continue;
+    }
+    rows.push({key, entry, eff});
+  }
+  // 排序：先暴露问题（会失败 → 未路由 → 已禁用），再按渠道与名称——用户打开
+  // 面板第一眼就该看到需要动手的条目。
+  const rank = ({eff, entry}) => eff.blocked ? 3 : (eff.missing ? 0 : (eff.assigned ? 2 : 1));
+  rows.sort((a,b) => (rank(a)-rank(b)) || a.eff.fam.localeCompare(b.eff.fam) || a.key.localeCompare(b.key));
+
+  const body = $("mrouteBody");
+  body.innerHTML = rows.length
+    ? rows.map(r => mrRowHTML(r.key, r.entry, r.eff)).join("")
+    : `<tr><td colspan="6" class="empty">没有匹配的模型</td></tr>`;
+  mrRenderSummary(idx);
+  mrRenderBanner(idx);
+  $("btnMrouteSave").disabled = !mrDirty();
+}
+
+function mrRenderSrc(){
+  const realmName = { cn: "CN", global: "全球" };
+  const pills = mr.families.map(f => {
+    const cls = f.source === "live" ? "live" : (f.error ? "warn" : "fallback");
+    const state = f.source === "live" ? "实时" : (f.error ? "失败" : "回落静态表");
+    const tip = f.error ? ` title="${escapeAttr(f.error)}"` : "";
+    const warm = f.warming ? ' <span class="spin"></span>' : "";
+    // 元数据来源必须标出：付费/免费标注来自**某一个账号**，跨区家族里它不代表
+    // 其它区域的账号（全球域目录端点读不到，无从核对）。
+    const src = (f.source === "live" && f.source_account)
+      ? ` <span class="muted">· 来自 ${escapeHtml(shortUID(f.source_account))}${f.source_realm ? "（" + (realmName[f.source_realm] || f.source_realm) + "）" : ""}</span>`
+      : "";
+    const realms = f.realms || [];
+    const crossTip = `该家族含 ${realms.map(r => realmName[r] || r).join(" + ")} 账号：模型清单与付费/免费标注仅代表来源账号所在区域，其它区域可能不同`;
+    const cross = realms.length > 1
+      ? ` <span class="mc dual" title="${escapeAttr(crossTip)}">跨区 ${realms.map(r => realmName[r] || r).join("/")}</span>`
+      : "";
+    // 标注要靠各区域的 /v3/config 背书；某区域没取到就别假装有它的标注。
+    const ac = f.access_config || {};
+    const missing = realms.filter(r => ac[r] && ac[r].ok === false);
+    const noCfg = missing.length
+      ? ` <span class="mc manual" title="${escapeAttr("这些区域的模型配置未取到，其付费/免费标注不可用（当前只显示已取到区域的标注）：" + missing.map(r => (realmName[r] || r) + (ac[r].error ? "：" + ac[r].error : "")).join("；"))}">标注缺 ${missing.map(r => realmName[r] || r).join("/")}</span>`
+      : "";
+    return `<span class="src-pill ${cls}"${tip}><span class="src-dot"></span>${escapeHtml(f.label)} 目录：<b>${state}</b>` +
+      ` <span class="muted">${(f.models||[]).length} 个</span>${src}${cross}${noCfg}${warm}</span>`;
   });
+  $("mrouteSrc").innerHTML = pills.join("") || `<span class="muted">无已注册渠道</span>`;
 }
-function routeFamOptions(sel){
-  return ["codearts","workbuddy"].map(f => `<option value="${f}"${f===sel?" selected":""}>${f}</option>`).join("");
+
+function mrRenderSummary(idx){
+  let routed = 0, fallback = 0, bad = 0, blocked = 0;
+  for (const [key, entry] of idx){
+    const eff = mrEff(key, entry);
+    if (eff.blocked){ blocked++; continue; }
+    if (eff.assigned) routed++; else fallback++;
+    if (eff.missing) bad++;
+  }
+  $("mrouteSummary").textContent =
+    `共 ${idx.size} · 已路由 ${routed} · 缺省回落 ${fallback} · 已禁用 ${blocked}` + (bad ? ` · ⚠ 会失败 ${bad}` : "");
 }
-function addRouteRow(model, family){
-  const tr = document.createElement("tr");
-  tr.innerHTML = `<td><input class="route-model" value="${escapeAttr(model||"")}" placeholder="模型名"/></td>
-    <td><select class="route-fam">${routeFamOptions(family||"codearts")}</select></td>
-    <td><button class="btn danger" data-act="route-block">禁用</button></td>`;
-  tr.querySelector('[data-act="route-block"]').onclick = () => {
-    const m = tr.querySelector(".route-model").value.trim();
-    if (m) { pendingBlocked.add(m); tr.remove(); renderBlocked(); toast("已加入禁用（保存后生效）"); }
-  };
-  $("routeBody").appendChild(tr);
+
+function mrRenderBanner(idx){
+  const box = $("mrouteBanner");
+  let bad = 0, unrouted = 0;
+  for (const [key, entry] of idx){
+    const eff = mrEff(key, entry);
+    if (eff.blocked || eff.assigned) continue;
+    unrouted++;
+    if (eff.missing) bad++;
+  }
+  if (!unrouted){ box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.classList.remove("hidden");
+  box.classList.toggle("bad", bad > 0);
+  const fill = `<button class="btn" id="btnMrouteFill">一键补齐归属</button>`;
+  box.innerHTML = bad
+    ? `<span>⚠ <b>${bad}</b> 个模型未列路由表，且缺省渠道（华为）没有该模型——请求会失败。</span><span class="sp"></span>${fill}`
+    : `<span>${unrouted} 个模型未列路由表，当前按缺省渠道（华为）生效。</span><span class="sp"></span>${fill}`;
+  $("btnMrouteFill").onclick = mrFillUnrouted;
 }
-async function saveRoutes(){
-  const rows = [...document.querySelectorAll("#routeBody tr")].map(tr => {
-    const model = (tr.querySelector(".route-model")?.value || "").trim();
-    const family = tr.querySelector(".route-fam")?.value || "codearts";
-    return model ? {model, family} : null;
-  }).filter(Boolean);
-  const res = await api("/admin/api/routes", {method:"PUT", body: JSON.stringify({routes: rows, blocked: [...pendingBlocked]})});
-  if (res && res.ok){ toast("路由表已保存并生效"); loadRoutes(); }
-  else { toast("保存失败: " + ((res && res.error) || "未知错误"), false); }
+
+function mrRowHTML(key, entry, eff){
+  const meta = entry.meta || {};
+  const assigned = mr.routes.get(key);
+  const dirty = mrDirty() && (assigned !== mrLoadedFor(key) || mr.blocked.has(key) !== mrLoadedBlocked.has(key));
+  const chips = [];
+  // 访问标注：优先按区域分开显示（同一模型国内/国际的促销可能不同，如
+  // dsv41f 国内按量计费、国际限免），仅一区域或标注一致时退回单枚 chip。
+  // 倍率与促销窗口都放 tooltip（窗口含到期日，过期后自动回落，不留假"免费"）。
+  const byRealm = meta.access_by_realm;
+  const realmKeys = byRealm ? Object.keys(byRealm).sort() : [];
+  if (realmKeys.length > 1){
+    const distinct = new Set(realmKeys.map(r => JSON.stringify([byRealm[r].access, byRealm[r].multiplier])));
+    if (distinct.size > 1){
+      realmKeys.forEach(r => {
+        const a = byRealm[r], cls = MR_ACCESS_CLASS[a.access] || "acc-paid";
+        const tip = [a.window, a.multiplier].filter(Boolean).join(" ｜ ");
+        chips.push(`<span class="mc ${cls}" title="${escapeAttr((MR_REALM_NAME[r]||r) + "：" + a.access_label + (tip ? " ｜ " + tip : ""))}">${MR_REALM_NAME[r]||r} ${escapeHtml(a.access_label)}${a.multiplier ? " " + escapeHtml(a.multiplier) : ""}</span>`);
+      });
+    }
+  }
+  if (!chips.length && meta.access_label){
+    const cls = MR_ACCESS_CLASS[meta.access] || "acc-paid";
+    const tip = [meta.access_label, meta.window, meta.multiplier].filter(Boolean).join(" ｜ ");
+    chips.push(`<span class="mc ${cls}" title="${escapeAttr(tip)}">${escapeHtml(meta.access_label)}${meta.multiplier ? " " + escapeHtml(meta.multiplier) : ""}</span>`);
+  }
+  if (meta.modes && meta.modes.includes("craft")) chips.push(`<span class="mc cap">craft</span>`);
+  if (meta.supports_images) chips.push(`<span class="mc cap">图片</span>`);
+  if (meta.supports_tools) chips.push(`<span class="mc cap">工具</span>`);
+  if (meta.is_default) chips.push(`<span class="mc cap">渠道默认</span>`);
+  if (entry.per.size > 1) chips.push(`<span class="mc dual">双渠道同名</span>`);
+  if (entry.manual) chips.push(`<span class="mc manual">目录中不存在</span>`);
+  if (meta.source === "static") chips.push(`<span class="mc src">静态表</span>`);
+  const sub = [];
+  if (meta.name && meta.name !== meta.id) sub.push(`<span title="${escapeAttr(meta.name)}">${escapeHtml(meta.name)}</span>`);
+  if (meta.description) sub.push(`<span title="${escapeAttr(meta.description)}">${escapeHtml(meta.description)}</span>`);
+
+  const pick = ["codearts","workbuddy"].map(f => {
+    const on = eff.fam === f;
+    const miss = !entry.per.has(f) && !entry.manual;
+    return `<button data-fam="${f}" class="${on?"on":""} ${miss?"miss":""}"` +
+      (eff.blocked ? " disabled" : "") +
+      ` title="${miss ? "该渠道目录中没有此模型（仍可指定，请求可能失败）" : "归属 "+mrFamLabel(f)}">${mrFamLabel(f)}</button>`;
+  }).join("");
+
+  const visible = ["codearts","workbuddy"].filter(f => entry.per.has(f))
+    .map(f => `<span class="badge" data-fam="${f}">${mrFamLabel(f)}</span>`).join(" ")
+    || `<span class="muted">—</span>`;
+
+  let status;
+  if (eff.blocked) status = `<span class="badge bad">已禁用</span><div class="m-sub">请求返回 404</div>`;
+  else if (eff.assigned) status = `<span class="badge ok">已路由</span><div class="m-sub">→ ${mrFamLabel(eff.fam)}</div>`;
+  else if (eff.missing) status = `<span class="badge bad">⚠ 会失败</span><div class="m-sub">未路由 · 华为无此模型</div>`;
+  else status = `<span class="badge info">缺省·${mrFamLabel(MR_DEFAULT_FAM)}</span><div class="m-sub">未列路由表</div>`;
+
+  return `<tr class="${dirty?"row-dirty":""} ${eff.blocked?"row-blocked":""}" data-key="${escapeAttr(key)}">
+    <td><div class="m-ident">
+      <div class="m-name">${escapeHtml(meta.id || key)}<div class="m-chips">${chips.join("")}</div></div>
+      ${sub.length ? `<div class="m-sub">${sub.join("")}</div>` : ""}
+    </div></td>
+    <td><div class="fam-pick" data-act="pick">${pick}</div>
+      ${entry.manual ? `<div class="m-sub">未列渠道目录</div>` : ""}</td>
+    <td>${visible}</td>
+    <td class="mono muted" title="上下文 ${Number(meta.context_length||0).toLocaleString()} tokens · 最大输出 ${Number(meta.max_output_tokens||0).toLocaleString()} tokens">${fmtTok(meta.context_length)} / ${fmtTok(meta.max_output_tokens)}</td>
+    <td>${status}</td>
+    <td><div class="row-actions">
+      <button class="btn ${eff.blocked?"":"danger"}" data-act="toggle-block">${eff.blocked?"启用":"禁用"}</button>
+      ${entry.manual ? `<button class="btn" data-act="remove">移除条目</button>` : ""}
+    </div></td>
+  </tr>`;
 }
-async function loadFamilyModels(){
-  const fam = $("famSelect").value;
-  const res = await api("/admin/api/models?family=" + encodeURIComponent(fam));
-  const rows = (res && res.data) || [];
-  $("famBody").innerHTML = rows.map(m =>
-    `<tr><td><button class="btn" data-add="${escapeAttr(m.id)}" title="追加到路由表">＋</button> <span class="mono">${escapeHtml(m.id)}</span></td><td class="mono muted">${escapeHtml(String(m.context_length ?? ""))}</td><td class="mono muted">${escapeHtml(String(m.max_output_tokens ?? ""))}</td></tr>`
-  ).join("") || '<tr><td colspan="3" class="empty">暂无模型</td></tr>';
-  document.querySelectorAll('#famBody [data-add]').forEach(b => {
-    b.onclick = () => {
-      const id = b.dataset.add, fam = $("famSelect").value;
-      const exists = [...document.querySelectorAll("#routeBody .route-model")].some(i => i.value.trim() === id);
-      if (exists) { toast("已在路由表中", false); return; }
-      addRouteRow(id, fam);
-      toast("已加入路由表，保存后生效");
-    };
+
+// mrLoadedFor / mrLoadedBlocked 载入快照（脏标记只标真正改动的行）。
+let mrLoadedMap = new Map();
+let mrLoadedBlocked = new Set();
+function mrLoadedFor(key){ return mrLoadedMap.get(key); }
+
+// mrLoadSelfHeal 冷启动自愈：首屏可能拿到静态回落表（服务端后台正在预热），
+// 预热完成后自动回读一次，避免用户对着过期目录做裁决。只补一次，不轮询。
+function mrLoadSelfHeal(attempt = 0){
+  const pending = mr.families.some(f => f.source !== "live" && (f.warming || f.error));
+  if (!pending || attempt >= 9) return; // 覆盖服务端逐账号串行回退的最坏窗口（约 36s）
+  setTimeout(async () => {
+    if (mrDirty()) return; // 用户已在编辑：不打断
+    try {
+      const d = await api("/admin/api/routes/overview");
+      if (mrDirty()) return;
+      mr.families = d.families || [];
+      mr.defaults = d.defaults || [];
+      mrRender();
+      const stillPending = mr.families.some(f => f.source !== "live" && (f.warming || f.error));
+      if (stillPending) mrLoadSelfHeal(attempt + 1);
+      else toast("渠道目录已更新为实时清单");
+    } catch (e) { /* 自愈失败保持现状，用户可手动刷新目录 */ }
+  }, 4000);
+}
+
+async function mrLoad(withRefresh){
+  if (mrDirty() && !confirm("有未保存的改动，重新载入会丢弃。继续？")) return;
+  const body = $("mrouteBody");
+  body.innerHTML = `<tr><td colspan="6" class="empty">加载中…</td></tr>`;
+  let d;
+  try {
+    d = await api("/admin/api/routes/overview" + (withRefresh ? "?refresh=1" : ""));
+  } catch (e){
+    body.innerHTML = `<tr><td colspan="6" class="empty">加载失败：${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  mr.families = d.families || [];
+  mr.routes = new Map((d.routes || []).map(r => [String(r.model).toLowerCase(), r.family]));
+  mr.blocked = new Set((d.blocked || []).map(s => String(s).toLowerCase()));
+  mr.defaults = d.defaults || [];
+  mrLoadedMap = new Map(mr.routes);
+  mrLoadedBlocked = new Set(mr.blocked);
+  mr.snap = mrSnap();
+  mr.loaded = true;
+  mrRender();
+}
+
+// 行内交互（事件委托：表格整体重渲染，不逐个绑定）
+$("mrouteBody").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-key]");
+  if (!tr) return;
+  const key = tr.dataset.key;
+  const act = e.target.closest("[data-act]");
+  if (act && act.dataset.act === "pick"){
+    const btn = e.target.closest("button[data-fam]");
+    if (btn){ mr.routes.set(key, btn.dataset.fam); mrRender(); }
+  } else if (act && act.dataset.act === "toggle-block"){
+    if (mr.blocked.has(key)) mr.blocked.delete(key); else mr.blocked.add(key);
+    mrRender();
+  } else if (act && act.dataset.act === "remove"){
+    mr.routes.delete(key);
+    mrRender();
+  }
+});
+
+$("mrouteFilter").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-f]");
+  if (!b) return;
+  mr.filter = b.dataset.f;
+  [...$("mrouteFilter").children].forEach(c => c.classList.toggle("on", c === b));
+  mrRender();
+});
+$("mrouteSearch").addEventListener("input", (e) => {
+  mr.q = e.target.value.trim().toLowerCase();
+  mrRender();
+});
+
+// mrFillUnrouted 把「未路由」条目按其在渠道目录中的可见性补齐归属：
+// 只在非缺省渠道可见的模型补到该渠道（这是当前唯一会真正失败的组合），
+// 其余保持缺省（不替用户做多余的显式化）。
+function mrFillUnrouted(){
+  const idx = mrIndex();
+  let n = 0;
+  for (const [key, entry] of idx){
+    const eff = mrEff(key, entry);
+    if (eff.blocked || eff.assigned) continue;
+    if (entry.per.size === 0) continue; // 目录中不存在的注册名：无从判断，留给用户
+    if (entry.per.has(MR_DEFAULT_FAM)) continue;
+    const fam = entry.per.size === 1 ? [...entry.per][0] : null;
+    if (!fam) continue;
+    mr.routes.set(key, fam);
+    n++;
+  }
+  mrRender();
+  toast(n ? `已补齐 ${n} 个模型归属，保存后生效` : "没有需要补齐的条目（其余仍按缺省渠道生效）", !!n);
+}
+
+$("btnMrouteRefresh").onclick = () => mrLoad(true).then(() => toast("已刷新渠道目录"));
+$("btnMrouteDefaults").onclick = () => {
+  if (!mr.defaults.length){ toast("默认表为空", false); return; }
+  if (mrDirty() && !confirm("将覆盖当前未保存的改动，继续？")) return;
+  mr.routes = new Map(mr.defaults.map(r => [String(r.model).toLowerCase(), r.family]));
+  mr.blocked = new Set();
+  mrRender();
+  toast("已载入内置默认路由表（保存后生效）");
+};
+$("btnMrouteAdd").onclick = () => {
+  const name = $("mrouteAddName").value.trim().toLowerCase();
+  if (!name){ toast("请输入模型名", false); return; }
+  const fam = $("mrouteAddFam").value;
+  if (mr.routes.get(name) === fam && !mr.blocked.has(name)){ toast("该模型已在该渠道", false); return; }
+  mr.routes.set(name, fam);
+  mr.blocked.delete(name);
+  $("mrouteAddName").value = "";
+  mrRender();
+  toast(`已追加 ${name} → ${mrFamLabel(fam)}（保存后生效）`);
+};
+$("mrouteAddName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnMrouteAdd").click(); });
+
+async function mrSave(){
+  const routes = [...mr.routes.entries()].map(([model, family]) => ({model, family}));
+  if (!routes.length){ toast("路由表不能为空", false); return; }
+  const btn = $("btnMrouteSave");
+  btn.disabled = true;
+  try {
+    await api("/admin/api/routes", {
+      method: "PUT",
+      body: JSON.stringify({routes, blocked: [...mr.blocked]}),
+    });
+    // 服务端已接受本次全量提交：先把快照对齐，再回读（否则回读会被自己的
+    // 脏检查拦下并弹出"未保存"确认框）。
+    mr.snap = mrSnap();
+    mrLoadedMap = new Map(mr.routes);
+    mrLoadedBlocked = new Set(mr.blocked);
+    toast(`已保存并热生效：${routes.length} 条路由 · ${mr.blocked.size} 个禁用`);
+    await mrLoad(false);
+  } catch (e){
+    toast("保存失败：" + e.message, false);
+    btn.disabled = false;
+  }
+}
+$("btnMrouteSave").onclick = mrSave;
+
+// mrScan 逐账号扫描（付费/免费档可见模型不同，只有逐账号往返才知道）。
+async function mrScan(){
+  const box = $("mrouteScanBox");
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="mroute-scan"><div class="scan-h"><span>扫描中…（每账号一次上游调用）</span></div></div>`;
+  const fams = mr.families.map(f => f.family);
+  if (!fams.length){ box.innerHTML = `<div class="mroute-scan"><div class="scan-h">无已注册渠道</div></div>`; return; }
+  const results = [];
+  for (const fam of fams){
+    try { results.push(await api("/admin/api/models/scan?family=" + encodeURIComponent(fam))); }
+    catch (e){ results.push({family: fam, label: fam, accounts: [], error: e.message}); }
+  }
+  mr.scan = results;
+  mrRenderScan(box, results);
+}
+
+function mrRenderScan(box, results){
+  const parts = results.map(res => {
+    const cat = new Set((((mr.families.find(f => f.family === res.family) || {}).models) || []).map(m => String(m.id).toLowerCase()));
+    const rows = (res.accounts || []).map(a => {
+      const who = a.nick || a.account || a.uid || "（未命名）";
+      if (!a.ok){
+        return `<tr><td>${escapeHtml(who)}</td><td class="muted">${escapeHtml(a.region || "")}</td>
+          <td><span class="badge bad">失败</span></td><td class="muted">${escapeHtml((a.error || "").slice(0, 160))}</td></tr>`;
+      }
+      const have = new Set((a.models || []).map(m => String(m.id).toLowerCase()));
+      const extra = [...have].filter(x => !cat.has(x));
+      const miss = [...cat].filter(x => !have.has(x));
+      const diff = [
+        extra.length ? `<span class="diff-add">+${extra.map(escapeHtml).join(" +")}</span>` : "",
+        miss.length ? `<span class="diff-miss">−${miss.map(escapeHtml).join(" −")}</span>` : "",
+      ].filter(Boolean).join(" &nbsp;") || `<span class="muted">与目录一致</span>`;
+      return `<tr><td>${escapeHtml(who)}</td><td class="muted">${escapeHtml(a.region || "")}</td>
+        <td><b>${(a.models || []).length}</b> 个</td><td>${diff}</td></tr>`;
+    }).join("");
+    const err = res.error ? `<tr><td colspan="4" class="muted">${escapeHtml(res.error)}</td></tr>` : "";
+    return `<div class="mroute-scan">
+      <div class="scan-h"><span>各账号可见模型 · ${escapeHtml(res.label || res.family)}</span></div>
+      <table>
+        <tr><td class="muted">账号</td><td class="muted">区域</td><td class="muted">可见</td><td class="muted">与渠道目录差异</td></tr>
+        ${rows}${err}
+      </table>
+    </div>`;
   });
+  box.innerHTML = parts.join("") || `<div class="mroute-scan"><div class="scan-h">无结果</div></div>`;
 }
-$("btnAddRoute").onclick = () => addRouteRow("", "codearts");
-$("btnSaveRoutes").onclick = saveRoutes;
-$("btnFamLoad").onclick = loadFamilyModels;
-loadRoutes();
-loadFamilyModels();
+$("btnMrouteScan").onclick = mrScan;
+
+// 未保存时离开页面提醒（脏检查覆盖全部编辑动作，无需逐处标记）
+window.addEventListener("beforeunload", (e) => {
+  if (mrDirty()){ e.preventDefault(); e.returnValue = ""; }
+});
+
+mrLoad(false).then(mrLoadSelfHeal);
 
 </script>
 </body>

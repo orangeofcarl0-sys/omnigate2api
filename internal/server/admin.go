@@ -18,10 +18,15 @@ import (
 // adminOverview 面板总览。
 func (h *Handler) adminOverview(w http.ResponseWriter, r *http.Request) {
 	total, healthy, disabled, cooling := h.cfg.Pool.Stats()
-	models := h.modelList()
+	// 模型卡展示唯一视图（不是华为单渠道清单）：否则面板顶部「模型」与「模型与
+	// 路由」两处口径不一致，运维会以为腾讯模型不存在。
+	models := h.unifiedModelList()
 	ids := make([]map[string]any, 0, len(models))
 	for _, m := range models {
-		ids = append(ids, map[string]any{"id": m["id"]})
+		ids = append(ids, map[string]any{
+			"id": m["id"], "family": m["family"],
+			"access": m["access"], "access_label": m["access_label"],
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "omnigate2api",
@@ -129,13 +134,14 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 			return res
 		}
 		if api, ok := acct.Client.(upstream.BillingAPI); ok && acct.ProfileID == "workbuddy" {
-			if remain, err := api.UserResource(acct.Auth); err != nil {
+			if bal, err := api.UserResource(acct.Auth); err != nil {
 				res.Message = err.Error()
 			} else {
-				acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
+				acct.SetQuota(pool.AccountQuota{Remain: bal.Remain, Total: bal.Total, Used: bal.Used, UpdatedAt: time.Now().Unix()})
 				res.OK = true
-				res.Message = "积分余额 " + strconv.FormatInt(remain, 10)
-				res.Credits = remain
+				res.Message = "积分余额 " + strconv.FormatInt(bal.Remain, 10) +
+					"（套餐共 " + strconv.FormatInt(bal.Total, 10) + " · 已用 " + strconv.FormatInt(bal.Used, 10) + "）"
+				res.Credits = bal.Remain
 			}
 			return res
 		}
@@ -332,7 +338,8 @@ func (h *Handler) adminRoutesPut(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminModelsGet 模型全貌：?family=codearts|workbuddy → 该家族清单；
-// 缺省 → 唯一视图（与 /v1/models 无渠道一致）。
+// 缺省 → 唯一视图（与 /v1/models 无渠道一致）。query 参数 refresh=1 → 同步等待
+// 一次上游拉取（面板「刷新目录」按钮；缺省只读缓存，不阻塞）。
 func (h *Handler) adminModelsGet(w http.ResponseWriter, r *http.Request) {
 	fam := r.URL.Query().Get("family")
 	if fam != "" {
@@ -340,10 +347,61 @@ func (h *Handler) adminModelsGet(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown family"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"family": fam, "data": h.modelListFor(fam)})
+		cat := h.catalog(fam, adminWait(r))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"family": cat.Family, "label": cat.Label, "source": cat.Source,
+			"source_account": cat.SourceAccount, "source_realm": cat.SourceRealm,
+			"realms": cat.Realms, "warming": cat.Warming, "error": cat.Error,
+			"data": cat.Models,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": h.unifiedModelList()})
+}
+
+// adminWait 面板同步等待策略：refresh=1 → 等待上游；否则 0（只读缓存）。
+func adminWait(r *http.Request) time.Duration {
+	if r.URL.Query().Get("refresh") == "1" {
+		return modelFetchPanelWait
+	}
+	return 0
+}
+
+// adminRoutesOverview 面板单请求数据源（SPEC §29.7）：两家族目录（含来源与失败
+// 原因）+ 当前路由表 + 禁用集 + 内置默认表。面板据此渲染唯一主表；拆成多个
+// 请求会让"渠道全貌/路由状态/默认值"三份数据在时间上不一致。
+// 缺省只读缓存（打开面板必然秒开），refresh=1 才等待上游。
+func (h *Handler) adminRoutesOverview(w http.ResponseWriter, r *http.Request) {
+	wait := adminWait(r)
+	cats := make([]familyCatalog, 0, 2)
+	for _, fam := range []string{"codearts", "workbuddy"} {
+		if h.profiles().Get(fam) == nil {
+			continue
+		}
+		cats = append(cats, h.catalog(fam, wait))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"families": cats,
+		"routes":   h.routesTable().Routes(),
+		"blocked":  h.routesTable().Blocked(),
+		"defaults": buildDefaultRoutes(),
+	})
+}
+
+// adminModelsScan 逐账号模型扫描（面板「扫描各账号」按需触发，?family=）：
+// 账号间可见模型集可能不同（付费/免费档差异），逐账号往返必要，故不做缺省拉取。
+func (h *Handler) adminModelsScan(w http.ResponseWriter, r *http.Request) {
+	fam := r.URL.Query().Get("family")
+	if fam == "" {
+		fam = "workbuddy"
+	}
+	if h.profiles().Get(fam) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown family"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"family": fam, "label": familyLabel(fam), "accounts": h.scanModelAccounts(fam),
+	})
 }
 
 // adminGrowth 腾讯成长中心状态（SPEC §32 观测面）：按账号拉取积分/能量/签到/任务/宠物。
@@ -380,9 +438,13 @@ func (h *Handler) adminGrowth(w http.ResponseWriter, r *http.Request) {
 		} else if err != nil {
 			row["checkin_error"] = truncateText(err.Error(), 120)
 		}
-		if credits, err := api.UserResource(acct.Auth); err == nil {
-			row["credits"] = credits
-		} else {
+		if bal, err := api.UserResource(acct.Auth); err == nil && bal != nil {
+			row["credits"] = bal.Remain
+			row["credits_total"] = bal.Total
+			row["credits_used"] = bal.Used
+			// 顺带刷新账号池额度快照：面板「余额」列与成长中心口径保持一致。
+			acct.SetQuota(pool.AccountQuota{Remain: bal.Remain, Total: bal.Total, Used: bal.Used, UpdatedAt: time.Now().Unix()})
+		} else if err != nil {
 			row["credits_error"] = truncateText(err.Error(), 120)
 		}
 		if q, err := api.PetQuota(acct.Auth); err == nil && q != nil {

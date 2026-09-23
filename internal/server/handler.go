@@ -255,7 +255,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/growth", h.withAuth(h.adminGrowth))
 	h.mux.HandleFunc("GET /admin/api/routes", h.withAuth(h.adminRoutesGet))
 	h.mux.HandleFunc("PUT /admin/api/routes", h.withAuth(h.adminRoutesPut))
+	h.mux.HandleFunc("GET /admin/api/routes/overview", h.withAuth(h.adminRoutesOverview))
 	h.mux.HandleFunc("GET /admin/api/models", h.withAuth(h.adminModelsGet))
+	h.mux.HandleFunc("GET /admin/api/models/scan", h.withAuth(h.adminModelsScan))
 	h.mux.HandleFunc("POST /admin/api/oauth/tencent/start", h.withAuth(h.adminTencentOAuthStart))
 	h.mux.HandleFunc("POST /admin/api/oauth/tencent/poll", h.withAuth(h.adminTencentOAuthPoll))
 	h.mux.HandleFunc("POST /admin/api/accounts/disable", h.withAuth(h.adminDisable))
@@ -427,7 +429,7 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickAccount(profile.Auth.Family(), &stickyAcct, tried)
+		acct := h.pickAccount(profile.Auth.Family(), model, &stickyAcct, tried)
 		if acct == nil {
 			break
 		}
@@ -486,7 +488,7 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 				return
 			}
 			lastErr = serr
-			h.handleUpstreamError(acct, serr)
+			h.handleUpstreamError(acct, model, serr)
 			continue
 		}
 
@@ -542,18 +544,19 @@ func readBody(r *http.Request) (body []byte, tooLarge bool, err error) {
 // pickAccount 取本回合账号：续接会话优先原账号（若仍健康），否则按客户端
 // 家族（AuthProfile.ClientFamily）轮换一个未试账号（SPEC §24.1：不同上游
 // 家族池内并存互不混用；同家族多 Profile 共享账号）。
-func (h *Handler) pickAccount(family string, stickyAcct *string, tried map[string]bool) *pool.Account {
+func (h *Handler) pickAccount(family, model string, stickyAcct *string, tried map[string]bool) *pool.Account {
 	if *stickyAcct != "" {
-		// 续接会话：锁定原账号（若仍健康）。
+		// 续接会话：锁定原账号（若仍健康 **且该模型未被限流**）。
+		// 模型级限流只影响一个模型，续接会话换模型时应自动解绑重分配。
 		acct := h.cfg.Pool.Get(*stickyAcct)
-		if acct != nil && h.cfg.Pool.Healthy(*stickyAcct) {
+		if acct != nil && h.cfg.Pool.Healthy(*stickyAcct) && !h.cfg.Pool.ModelCooled(*stickyAcct, model) {
 			tried[acct.Name] = true
 			return acct
 		}
 		*stickyAcct = ""
 	}
 	var acct *pool.Account
-	if acct = h.cfg.Pool.PickFor(family, tried); acct != nil {
+	if acct = h.cfg.Pool.PickForModel(family, model, tried); acct != nil {
 		tried[acct.Name] = true
 	}
 	return acct

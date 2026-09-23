@@ -26,8 +26,8 @@ type BillingAPI interface {
 	DailyCheckin(acct *auth.Auth) (*CheckinResult, error)
 	// CheckinStatus 签到活动状态（主题/连续/今日可得/活动累计/周期）。
 	CheckinStatus(acct *auth.Auth) (*CheckinStatus, error)
-	// UserResource 返回当前可花费积分余额（多套餐 Cycle 优先聚合，负值钳 0）。
-	UserResource(acct *auth.Auth) (remain int64, err error)
+	// UserResource 返回当前可花费积分余额（多套餐周期语义聚合，负值钳 0）。
+	UserResource(acct *auth.Auth) (*ResourceBalance, error)
 	// PetTravelStatus 成长中心宠物探险状态（idle|traveling|arrived）。
 	PetTravelStatus(acct *auth.Auth) (*PetTravel, error)
 	// PetDepart 派出宠物探险（config 地点 id，原生 json.Number 保类型透传）。
@@ -205,10 +205,37 @@ func (c *TencentClient) CheckinStatus(acct *auth.Auth) (*CheckinStatus, error) {
 	return &env.Data, nil
 }
 
-// UserResource 查询可花费积分余额（多套餐聚合规则对齐参考实现）。
-func (c *TencentClient) UserResource(acct *auth.Auth) (int64, error) {
+// resourceAccount get-user-resource 的单条套餐（credits 口径）。
+type resourceAccount struct {
+	CapacitySize        int64 `json:"CapacitySize"`
+	CapacityUsed        int64 `json:"CapacityUsed"`
+	CapacityRemain      int64 `json:"CapacityRemain"`
+	CycleCapacitySize   int64 `json:"CycleCapacitySize"`
+	CycleCapacityRemain int64 `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   int64 `json:"CycleCapacityUsed"`
+}
+
+// ResourceBalance 积分余额快照：Remain 为可花费余额，Total/Used 为套餐总量与已用
+// （面板"共 X · 已用 Y"拆解用；三者口径均为套餐 Capacity* 字段的聚合）。
+type ResourceBalance struct {
+	Remain int64 `json:"remain"`
+	Total  int64 `json:"total"`
+	Used   int64 `json:"used"`
+}
+
+// UserResource 查询可花费积分余额（多套餐按周期语义逐条取剩余后聚合）。
+//
+// 实测响应（2026-09，CN/全球双域一致）为三层包裹：
+//
+//	{code,msg,data:{Response:{Data:{Accounts:[{CapacitySize,CapacityRemain,...}]}}}}
+//
+// 外层 data 必须解到——早期实现从根读 Response.Data.Accounts，漏掉 data 包裹后
+// 恒得空列表 → 恒返回 0：CN 账号真实 4856 积分、全球账号 350 积分在面板与调度器
+// 快照里都显示成 0（本次修复）。同时按业务码判定，避免错误响应被静默当成"余额 0"。
+// 兼容无 data 包裹的平铺形态（参考实现遗留），两种形态都取不到才报解析错误。
+func (c *TencentClient) UserResource(acct *auth.Auth) (*ResourceBalance, error) {
 	if acct == nil {
-		return 0, fmt.Errorf("account required for balance")
+		return nil, fmt.Errorf("account required for balance")
 	}
 	now := time.Now()
 	body := map[string]any{
@@ -222,47 +249,64 @@ func (c *TencentClient) UserResource(acct *auth.Auth) (int64, error) {
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.billingBaseFor(acct.Domain)+"/v2/billing/meter/get-user-resource", bytes.NewReader(raw))
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	billingHeaders(req, billingCred(acct))
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return 0, fmt.Errorf("get-user-resource http %d: %s", resp.StatusCode, truncateStr(string(data), 200))
+
+	type accountsData struct {
+		Accounts []resourceAccount `json:"Accounts"`
 	}
 	var r struct {
+		Code int64  `json:"code"`
+		Msg  string `json:"msg"`
+		// 实测形态：data.Response.Data.Accounts
+		Data struct {
+			Response struct {
+				Data accountsData `json:"Data"`
+			} `json:"Response"`
+		} `json:"data"`
+		// 兼容平铺形态：Response.Data.Accounts
 		Response struct {
-			Data struct {
-				Accounts []struct {
-					CapacityRemain      int64 `json:"CapacityRemain"`
-					CapacityUsed        int64 `json:"CapacityUsed"`
-					CycleCapacitySize   int64 `json:"CycleCapacitySize"`
-					CycleCapacityRemain int64 `json:"CycleCapacityRemain"`
-					CycleCapacityUsed   int64 `json:"CycleCapacityUsed"`
-				} `json:"Accounts"`
-			} `json:"Data"`
+			Data accountsData `json:"Data"`
 		} `json:"Response"`
 	}
-	if err := json.Unmarshal(data, &r); err != nil {
-		return 0, fmt.Errorf("resource parse: %w", err)
+	if uerr := json.Unmarshal(data, &r); uerr != nil {
+		return nil, fmt.Errorf("resource parse: %w", uerr)
 	}
-	var remain int64
-	for _, a := range r.Response.Data.Accounts {
+	if err := checkBiz("get-user-resource", resp.StatusCode, r.Code, r.Msg); err != nil {
+		return nil, err
+	}
+	accounts := r.Data.Response.Data.Accounts
+	if len(accounts) == 0 {
+		accounts = r.Response.Data.Accounts
+	}
+	bal := &ResourceBalance{}
+	for _, a := range accounts {
+		// 周期套餐（CycleCapacitySize>0）以周期余量为准，否则用总量余量。
 		v := a.CapacityRemain
-		switch {
-		case a.CycleCapacitySize > 0:
-			v = a.CycleCapacityRemain
-		case a.CycleCapacityRemain > 0 || a.CycleCapacityUsed > 0:
+		if a.CycleCapacitySize > 0 || a.CycleCapacityRemain > 0 || a.CycleCapacityUsed > 0 {
 			v = a.CycleCapacityRemain
 		}
 		if v < 0 {
 			v = 0
 		}
-		remain += v
+		size := a.CapacitySize
+		if a.CycleCapacitySize > 0 {
+			size = a.CycleCapacitySize
+		}
+		used := a.CapacityUsed
+		if a.CycleCapacitySize > 0 {
+			used = a.CycleCapacityUsed
+		}
+		bal.Remain += v
+		bal.Total += size
+		bal.Used += used
 	}
-	return remain, nil
+	return bal, nil
 }

@@ -35,12 +35,26 @@ func isQuotaError(msg string) bool {
 	return false
 }
 
+// modelRateLimitHorizon 模型级限流冷却上限：上游给出的解封时刻可能很远（甚至误报），
+// 钳住以免一对 (账号,模型) 被长期废掉——到期自然重试，真限流会再次触发。
+const modelRateLimitHorizon = 24 * time.Hour
+
+// settleModelRateLimit 模型级限流结算（429 + code 6004）：**只冷却 (账号, 模型)**，
+// 不动账号级健康——上游文案自证"可切换其他模型继续使用"，整账号冷却会平白丢掉该账号
+// 对其余模型的容量；解封时刻优先取上游声明值。
+func (h *Handler) settleModelRateLimit(acct *pool.Account, model, msg string) {
+	until := upstream.ModelRateLimitUntil(msg, time.Now(), h.cfg.SoftCooldown, modelRateLimitHorizon)
+	h.cfg.Pool.CoolModel(acct.Name, model, until, msg)
+	log.Printf("upstream model rate limit account=%s model=%s until=%s msg=%s",
+		acct.Name, model, until.Format(time.RFC3339), truncateText(msg, 140))
+}
+
 // handleUpstreamError 按上游错误分类结算账号：401 禁用、429 软冷却、
 // 并发会话上限仅记日志（瞬时）、5xx 硬冷却、其余累计错误计数。
 // 腾讯家族先按实证语义分类（SPEC §28.4 决策 B）：硬额度/会话死亡专属动作。
 // 传输层错误（非 ApiError，如 tls bad record MAC / 连接重置）视为瞬时：
 // 只记日志并轮换账号，不计错误数、不冷却（网络抖动不该惩罚账号）。
-func (h *Handler) handleUpstreamError(acct *pool.Account, err error) {
+func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err error) {
 	var ae *upstream.ApiError
 	if !errors.As(err, &ae) {
 		// 传输层错误（tls bad record MAC / 连接重置等）是瞬时网络抖动：
@@ -56,12 +70,16 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, err error) {
 		case upstream.TencentErrSessionDead:
 			h.cfg.Pool.Disable(acct.Name, ae.Error()+" (re-login via login-tencent)")
 			return
+		case upstream.TencentErrModelRateLimit:
+			h.settleModelRateLimit(acct, model, ae.Message)
+			return
 		}
 	}
 	switch {
 	case ae.Status == 401 || ae.Code == 401:
 		h.cfg.Pool.Disable(acct.Name, "401 "+ae.Message)
 	case ae.Status == 429:
+		// 无模型级证据的 429：按账号软冷却（可能账号级/渠道级，无法定位到模型）
 		h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, h.cfg.SoftCooldown, ae.Error())
 	case ae.Status == 400 && isConcurrentLimitError(ae.Message):
 		// 并发会话上限（TM.00001041）是瞬时错误：上游会话槽位会被其他请求释放，

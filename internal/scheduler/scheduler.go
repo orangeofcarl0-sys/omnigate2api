@@ -253,9 +253,12 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 		}
 		// 活动态预检（2026-09-23 实证）：status 显式给出 active=false 时直接跳过
 		// 领取（全球版活动未开启时领取必 10001）；字段缺失（CN 形态）不预检。
+		// 注意：跳过的是**领取**，不是余额查询——全球版没有签到活动但仍在消耗
+		// 聊天额度，余额必须刷新（否则面板在每次重启后一直显示"未查询"）。
 		st, serr := api.CheckinStatus(acct.Auth)
 		if serr == nil && st != nil && st.Active != nil && !*st.Active {
-			return fmt.Sprintf("skip reason=activity_inactive theme=%s", st.ThemeName), nil
+			return fmt.Sprintf("skip reason=activity_inactive theme=%s%s", st.ThemeName,
+				refreshTencentBalance(acct, api)), nil
 		}
 		res, err := api.DailyCheckin(acct.Auth)
 		if err != nil {
@@ -265,7 +268,8 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 		if res != nil {
 			switch {
 			case res.Inactive:
-				return fmt.Sprintf("skip reason=activity_inactive msg=%s", res.Reason), nil
+				return fmt.Sprintf("skip reason=activity_inactive msg=%s%s", res.Reason,
+					refreshTencentBalance(acct, api)), nil
 			case res.Already:
 				gain = " already"
 			default:
@@ -278,13 +282,22 @@ func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 		if st2, serr2 := api.CheckinStatus(acct.Auth); serr2 == nil && st2 != nil {
 			gain += fmt.Sprintf(" total=%d theme=%s", st2.TotalCredits, st2.ThemeName)
 		}
-		remain, rerr := api.UserResource(acct.Auth)
-		if rerr != nil {
-			return "ok" + gain + " (balance query failed: " + rerr.Error() + ")", nil
-		}
-		acct.SetQuota(pool.AccountQuota{Remain: remain, UpdatedAt: time.Now().Unix()})
-		return fmt.Sprintf("ok%s balance=%d", gain, remain), nil
+		return "ok" + gain + refreshTencentBalance(acct, api), nil
 	})
+}
+
+// refreshTencentBalance 刷新积分余额快照并返回日志后缀。
+// 与签到活动态解耦：全球版活动未开启（领取必跳过）但账号仍在使用，余额是面板
+// 与排障都要看的量——跳过领取时同样要刷新，否则额度快照永远停在"未查询"。
+func refreshTencentBalance(acct *pool.Account, api upstream.BillingAPI) string {
+	bal, err := api.UserResource(acct.Auth)
+	if err != nil {
+		return " (balance query failed: " + err.Error() + ")"
+	}
+	acct.SetQuota(pool.AccountQuota{
+		Remain: bal.Remain, Total: bal.Total, Used: bal.Used, UpdatedAt: time.Now().Unix(),
+	})
+	return fmt.Sprintf(" balance=%d/%d", bal.Remain, bal.Total)
 }
 
 // activateBuddy 宠物激活子流程（SPEC §32.2/§32.7）：优先**免费领养链路**
