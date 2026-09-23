@@ -1383,5 +1383,21 @@ sequenceDiagram
 - 叠加社区「global 无签到/任务中心」结论 + 我方签到 `active:false`、trial 已领 14051，
   **全球版积分面维持"无活动可领"现状**；全球版价值定位为聊天额度（模型能力）而非积分。
 
-**明确不做（§32.7）**：埋点批量刷量、设备指纹伪造、开学季/小程序域任务（指纹面大、风控敏感，
-超出"签到/宠物/状态"范围）；如后续需要，按各活动单独立项。
+**程序级分析（2026-09-23，官方程序下载静态分析，零风控）**：
+
+- 国际版程序面 = 官方 CLI `@tencent-ai/codebuddy-code` v2.157（177MB 解包）+
+  `@workbuddy/cli-vnext`；IDE 安装包（与 CN 同构建）内含 `product-ide.json`（国际：
+  `www.codebuddy.ai`）与 `product-ide-cn.json`（CN）——**一个安装包双域切换**；
+- **CLI 全量检索确认无成长中心代码**：`activity/growth`/`daily-checkin`/`buddy/first`/
+  `credits` 等端点与概念零命中（`checkin`/`buddy`/`trial` 的命中全是文件上传状态、
+  codebuddy.ai A2A 路径、Windows 许可串等无关项）——**国际版程序面不含任何积分活动**；
+- 成长中心（加油站/任务/宠物/盲盒）为**桌面端运行时加载的远程 H5**：CN 客户端本地
+  bundle 无该 H5（`growth` 命中均为无关词），Electron 缓存亦无（本机未访问过该页面）；
+  IDE 主 bundle 仅含埋点事件枚举（`chat_request_send`/`chat_request_response` 等），
+  证实埋点体系存在但活动契约由远端 H5 承载；
+- 结论：叠加全球域活体（签到 `active:false`/任务 `task not found`/trial 已领 14051）与
+  社区 PLAN D4，**国际版当前无积分活动体系**；用户所见"活动更多"应为 CN 域活动
+  （同安装包切 CN 即见 season 9「高校新生攻略」，active:true）。
+
+**明确不做（§32.7）**：埋点批量刷量、设备指纹伪造、远程 H5 活动契约的逆向（需抓取 H5 资源，
+风控敏感且超出"签到/宠物/状态"范围）；如后续需要，按各活动单独立项。
