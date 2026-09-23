@@ -270,8 +270,8 @@ func (s *Scheduler) activateBuddy(acct *pool.Account, api upstream.BillingAPI) {
 		return
 	}
 	if q == nil || q.Affordable < 1 {
-		log.Printf("tencent pet account=%s action=activate skipped reason=no_buddy_energy_insufficient affordable=%d cost=%d",
-			acct.Name, affordable(q), costPer(q))
+		log.Printf("tencent pet account=%s action=activate skipped reason=no_buddy_energy_insufficient affordable=%d cost=%d energy=%d",
+			acct.Name, affordable(q), costPer(q), energyBalance(q))
 		return
 	}
 	count := q.Affordable
@@ -300,6 +300,13 @@ func costPer(q *upstream.PetQuota) int {
 	return q.CostPerOpen
 }
 
+func energyBalance(q *upstream.PetQuota) int {
+	if q == nil {
+		return 0
+	}
+	return q.Balance
+}
+
 // petTravel 成长中心宠物探险（SPEC §32.2）：每 Tick 状态机——
 // arrived → claim；idle 且未达上限 → depart（config 首个地点）；traveling → 等待。
 // 幂等（no unclaimed / daily_limit_reached 均按跳过）；失败只记日志，
@@ -319,6 +326,12 @@ func (s *Scheduler) petTravel(ctx context.Context) {
 			continue
 		}
 		if st == nil {
+			continue
+		}
+		// 全球版形态（2026-09-23 实证）：无宠物账号 data 为空对象（state=""），
+		// 等同 CN 的「no active buddy」——归入激活分支。
+		if st.State == "" {
+			s.activateBuddy(acct, api)
 			continue
 		}
 		switch st.State {

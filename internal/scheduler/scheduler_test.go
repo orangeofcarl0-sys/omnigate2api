@@ -129,11 +129,13 @@ func TestSchedulerPetTravelStateMachine(t *testing.T) {
 		limit      bool
 		wantDepart int
 		wantClaim  int
+		wantOpens  int
 	}{
-		{"idle", false, 1, 0},
-		{"idle", true, 0, 0},       // 今日次数上限：跳过
-		{"traveling", false, 0, 0}, // 在路上：等待
-		{"arrived", false, 0, 1},   // 归来：领取
+		{"idle", false, 1, 0, 0},
+		{"idle", true, 0, 0, 0},       // 今日次数上限：跳过
+		{"traveling", false, 0, 0, 0}, // 在路上：等待
+		{"arrived", false, 0, 1, 0},   // 归来：领取
+		{"", false, 0, 0, 1},          // 全球版空 state（无宠物）：能量足够 → 开盒激活
 	}
 	for _, tc := range cases {
 		u2 := &auth.Auth{UserID: "u2", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
@@ -149,9 +151,9 @@ func TestSchedulerPetTravelStateMachine(t *testing.T) {
 		p.Accounts()[0].Client = stub
 		s := New(Config{Pool: p, Enabled: true})
 		s.Tick(context.Background())
-		if stub.departs != tc.wantDepart || stub.claims != tc.wantClaim {
-			t.Fatalf("state=%s limit=%v depart=%d want %d claim=%d want %d",
-				tc.state, tc.limit, stub.departs, tc.wantDepart, stub.claims, tc.wantClaim)
+		if stub.departs != tc.wantDepart || stub.claims != tc.wantClaim || stub.opens != tc.wantOpens {
+			t.Fatalf("state=%s limit=%v depart=%d want %d claim=%d want %d opens=%d want %d",
+				tc.state, tc.limit, stub.departs, tc.wantDepart, stub.claims, tc.wantClaim, stub.opens, tc.wantOpens)
 		}
 	}
 }

@@ -416,11 +416,13 @@ func (c *TencentClient) PetClaim(acct *auth.Auth, recordID string) (int64, error
 	return credit, nil
 }
 
-// PetQuota 宠物盲盒能量额度（能量为开盒唯一出口）。
+// PetQuota 宠物盲盒能量额度（能量为开盒唯一出口）。Balance 为能量余额
+// （全球版实测存在 2026-09-23）。
 type PetQuota struct {
 	Affordable   int `json:"affordable"`
 	MaxOpenCount int `json:"max_open_count"`
 	CostPerOpen  int `json:"cost_per_open"`
+	Balance      int `json:"balance"`
 }
 
 // PetQuota 查询宠物盲盒能量额度。
