@@ -3,14 +3,11 @@
 package upstream
 
 import (
-	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -271,35 +268,15 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 	return c.postReport(acct, evs)
 }
 
-// postReport 向 chat 域 /v2/report 批量上报事件（桌面 UA + 指纹头）。
+// postReport 埋点上报（chat 域 + 桌面 UA 形态；统一机制·SPEC §32.8）。
 func (c *TencentClient) postReport(acct *auth.Auth, events []any) error {
 	body, _ := json.Marshal(events)
-	base, _ := c.resolve(acct.Domain)
-	req, err := http.NewRequest(http.MethodPost, base+"/v2/report", bytes.NewReader(body))
+	raw, status, err := c.chatDo(acct, http.MethodPost, "/v2/report", body, true)
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1")
-	req.Header.Set("X-Request-ID", deriveDeviceID(acct.UserID, "req")+strconv.FormatInt(now%1000000, 10))
-	if acct.CloudDragonTok != "" {
-		req.Header.Set("Authorization", "Bearer "+acct.CloudDragonTok)
-	}
-	req.Header.Set("X-User-Id", acct.UserID)
-	if acct.Domain != "" {
-		req.Header.Set("X-Domain", acct.Domain)
-	}
-	req.Header.Set("X-Product", "SaaS")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("report failed http=%d: %s", resp.StatusCode, truncateStr(string(raw), 160))
+	if status >= 400 {
+		return fmt.Errorf("report failed http=%d: %s", status, truncateStr(string(raw), 160))
 	}
 	return nil
 }

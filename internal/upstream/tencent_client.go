@@ -18,7 +18,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+
+	"omnigate2api/internal/auth"
 	"time"
 )
 
@@ -58,6 +61,71 @@ func NewTencent(timeout time.Duration) *TencentClient {
 		streamHTTP: &http.Client{Transport: tr},
 		base:       strings.TrimRight(os.Getenv("OMNIGATE_TENCENT_BASE"), "/"),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 统一请求路径（SPEC §32：计费/活动/chat/market 四域共用一个执行机制）
+// ---------------------------------------------------------------------------
+
+// tencentHTTPOpts 统一请求参数。base 由调用方按域选择（计费域/活动域/chat 域）。
+type tencentHTTPOpts struct {
+	base      string
+	method    string
+	path      string
+	body      []byte
+	desktopUA bool // 埋点上报形态：桌面 UA + X-Request-ID（服务端按 UA 归因任务）
+	platform  bool // 活动域客户端平台标识（OMNIGATE_ACTIVITY_PLATFORM，实证用）
+}
+
+// tencentDo 统一执行：设头 → Do → 限长读体；返回（原始体, HTTP 状态, 传输错误）。
+// 业务码判定留给调用方——HTTP 4xx 也可能是幂等成功（如签到 code=10001）。
+func (c *TencentClient) tencentDo(acct *auth.Auth, o tencentHTTPOpts) ([]byte, int, error) {
+	var rd io.Reader
+	if o.body != nil {
+		rd = bytes.NewReader(o.body)
+	}
+	req, err := http.NewRequest(o.method, o.base+o.path, rd)
+	if err != nil {
+		return nil, 0, err
+	}
+	billingHeaders(req, billingCred(acct))
+	if o.desktopUA {
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("User-Agent", desktopUserAgent)
+		req.Header.Set("X-Request-ID", deriveDeviceID(acct.UserID, "req")+strconv.FormatInt(time.Now().UnixMilli()%1000000, 10))
+	}
+	if o.platform {
+		if plat := os.Getenv("OMNIGATE_ACTIVITY_PLATFORM"); plat != "" {
+			req.Header.Set("X-Client-Platform", plat)
+		}
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return raw, resp.StatusCode, nil
+}
+
+// desktopUserAgent 桌面客户端 UA（SPEC §32.8：服务端按 UA 归因桌面任务的硬门控）。
+const desktopUserAgent = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+
+// billingDo 计费域请求（签到/余额）。
+func (c *TencentClient) billingDo(acct *auth.Auth, method, path string, body []byte) ([]byte, int, error) {
+	return c.tencentDo(acct, tencentHTTPOpts{base: c.billingBaseFor(acct.Domain), method: method, path: path, body: body})
+}
+
+// activityDo 活动域请求（宠物/任务/市场）。
+func (c *TencentClient) activityDo(acct *auth.Auth, method, path string, body []byte) ([]byte, int, error) {
+	return c.tencentDo(acct, tencentHTTPOpts{base: c.activityBaseFor(acct.Domain), method: method, path: path, body: body, platform: true})
+}
+
+// chatDo chat 域请求（market 列表/埋点上报；desktop=true 走桌面 UA 形态）。
+func (c *TencentClient) chatDo(acct *auth.Auth, method, path string, body []byte, desktop bool) ([]byte, int, error) {
+	base, _ := c.resolve(acct.Domain)
+	return c.tencentDo(acct, tencentHTTPOpts{base: base, method: method, path: path, body: body, desktopUA: desktop})
 }
 
 // tencentRegion 按凭证 domain 后缀判定区域：.workbuddy.ai → global 域，

@@ -3,10 +3,8 @@
 package upstream
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -179,23 +177,15 @@ type MarketSkill struct {
 	Version string `json:"version"`
 }
 
-// marketPost 市场域 POST（chat 域同源，Bearer + X-User-Id）。
+// marketPost 市场域 POST（chat 域；统一机制·SPEC §32）。
 func (c *TencentClient) marketPost(acct *auth.Auth, path string, body any) ([]byte, error) {
 	raw, _ := json.Marshal(body)
-	base, _ := c.resolve(acct.Domain)
-	req, err := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(raw))
+	out, status, err := c.chatDo(acct, http.MethodPost, path, raw, false)
 	if err != nil {
 		return nil, err
 	}
-	billingHeaders(req, billingCred(acct))
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("market %s http=%d: %s", path, resp.StatusCode, truncateStr(string(out), 160))
+	if status >= 400 {
+		return nil, fmt.Errorf("market %s http=%d: %s", path, status, truncateStr(string(out), 160))
 	}
 	return out, nil
 }

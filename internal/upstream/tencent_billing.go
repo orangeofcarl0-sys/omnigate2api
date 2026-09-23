@@ -177,21 +177,9 @@ func (c *TencentClient) DailyCheckin(acct *auth.Auth) (*CheckinResult, error) {
 	return &CheckinResult{Credit: credit, StreakDays: env.Data.StreakDays}, nil
 }
 
-// billingPost 计费域 POST：返回（原始体, HTTP 状态, 传输错误）——业务码判定
-// 归调用方（HTTP 4xx 也可能是幂等成功，如签到 10001）。
+// billingPost 计费域 POST（统一机制·SPEC §32）。
 func (c *TencentClient) billingPost(acct *auth.Auth, path string, body []byte) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPost, c.billingBaseFor(acct.Domain)+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, 0, err
-	}
-	billingHeaders(req, billingCred(acct))
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return raw, resp.StatusCode, nil
+	return c.billingDo(acct, http.MethodPost, path, body)
 }
 
 // CheckinStatus 查询签到活动状态（SPEC §32.2）。

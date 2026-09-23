@@ -3,13 +3,10 @@
 package upstream
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"omnigate2api/internal/auth"
@@ -44,31 +41,9 @@ var ErrPetNoUnclaimed = errors.New("pet: no unclaimed reward")
 // 成长中心宠物探险（SPEC §32.2 拍板：四端点状态机，只走 API 直连）
 // ---------------------------------------------------------------------------
 
-// petRequest 活动域请求（Bearer + X-User-Id，参数与 billingHeaders 同源）。
+// petRequest 活动域请求（统一机制·SPEC §32）。
 func (c *TencentClient) petRequest(acct *auth.Auth, method, path string, body []byte) ([]byte, int, error) {
-	var rd io.Reader
-	if len(body) > 0 {
-		rd = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, c.activityBaseFor(acct.Domain)+path, rd)
-	if err != nil {
-		return nil, 0, err
-	}
-	billingHeaders(req, billingCred(acct))
-	if len(body) == 0 {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	// 客户端平台标识（实证：服务端按此下发不同任务域；缺省不设保持现状）
-	if plat := os.Getenv("OMNIGATE_ACTIVITY_PLATFORM"); plat != "" {
-		req.Header.Set("X-Client-Platform", plat)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return raw, resp.StatusCode, nil
+	return c.activityDo(acct, method, path, body)
 }
 
 // PetTravelStatus 查询宠物探险状态。
