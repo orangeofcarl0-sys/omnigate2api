@@ -25,6 +25,9 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	html = strings.ReplaceAll(html, ">签到<", ">保活<")
 	html = strings.ReplaceAll(html, ">积分<", ">状态<")
 	html = strings.ReplaceAll(html, "积分合计", "账号健康")
+	// 注意（SPEC §32 观测面）：以上 >积分< / >签到< 为**全局**替换（早前语义对齐
+	// 遗留），会改写任何逐字包含它们的文案——新增面板文案时避开（如「可用积分」
+	// 「每日签到」），或在移除替换时同步核对既有按钮语义。
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
