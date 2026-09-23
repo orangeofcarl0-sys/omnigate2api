@@ -260,8 +260,8 @@ type ChatMessage struct {
 
 // ChatContentPart content 分片（roles 多模态透传，SPEC §30.5）。
 type ChatContentPart struct {
-	Type     string       `json:"type"` // "text" | "image_url"
-	Text     string       `json:"text,omitempty"`
+	Type     string        `json:"type"` // "text" | "image_url"
+	Text     string        `json:"text,omitempty"`
 	ImageURL *ChatImageURL `json:"image_url,omitempty"`
 }
 
@@ -291,10 +291,10 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	}
 	if len(m.ContentParts) == 0 {
 		return json.Marshal(struct {
-			Role       string         `json:"role"`
-			Content    string         `json:"content"`
+			Role       string           `json:"role"`
+			Content    string           `json:"content"`
 			ToolCalls  []map[string]any `json:"tool_calls,omitempty"`
-			ToolCallID string         `json:"tool_call_id,omitempty"`
+			ToolCallID string           `json:"tool_call_id,omitempty"`
 		}{role, m.Content, calls, m.ToolCallID})
 	}
 	parts := make([]ChatContentPart, 0, len(m.ContentParts)+1)
