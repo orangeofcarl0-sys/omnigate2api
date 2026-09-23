@@ -99,11 +99,7 @@ func main() {
 		if mode2 := os.Getenv("OMNIGATE_PROBE_METHOD"); mode2 == "POST" {
 			raw, st, err := tc.DebugPostBody(wb, path, os.Getenv("OMNIGATE_PROBE_BODY"))
 			fmt.Println("POST", path, "http=", st, "err=", err)
-			if len(raw) > 2000 {
-				fmt.Println(string(raw[:2000]), "...")
-			} else {
-				fmt.Println(string(raw))
-			}
+			fmt.Println(string(raw)) // 完整响应（截断交给调用方按需处理）
 			return
 		}
 		raw, st, err := tc.DebugGet(wb, path)

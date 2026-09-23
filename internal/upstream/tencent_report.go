@@ -138,14 +138,24 @@ func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 
 // taskEventCtx 事件包上下文（一次上报的共享输入：账号/时间/市场对象）。
 type taskEventCtx struct {
-	acct    *auth.Auth
-	now     int64
-	uid     string
-	cid     string // run 级会话 id（canvas/automation/skill 复用）
-	experts []MarketExpert
-	skills  []MarketSkill
-	buddies []BuddyInstance
+	acct       *auth.Auth
+	now        int64
+	uid        string
+	cid        string // run 级会话 id（canvas/automation/skill 复用）
+	experts    []MarketExpert
+	skills     []MarketSkill
+	buddies    []BuddyInstance
+	lighthouse []MarketExpert    // Expert_lighthouse（关键词检索结果）
+	scenes     []Scene           // template_5
+	themes     []AppearanceTheme // Hp_Appearance
 }
+
+// buddyAppID / buddyAppName buddy5 事件承载应用（社区实测：企鹅教师助手，
+// 同一组事件同时满足 Buddy_App 与 Buddy_App_QQ）。
+const (
+	buddyAppID   = "cb_y5Dy46tPQGGWtueMxXbe"
+	buddyAppName = "企鹅教师助手"
+)
 
 // chatEvent 构造一条 chat_request_send（chat_5 / Model_chat_GLM5.2 / black_cat 共用）。
 func (x *taskEventCtx) chatEvent(idx int, modelID, modelName, mode string) map[string]any {
@@ -222,33 +232,66 @@ var taskEventSpecs = []taskEventSpec{
 	}},
 	{"expert_5", func(x *taskEventCtx) []any {
 		var out []any
-		for _, ex := range x.experts {
+		for i, ex := range x.experts {
 			if len(out) >= 5 {
 				break
 			}
-			if ex.ID != "" {
-				out = append(out, expertUseEvent(x.uid, ex, "agent", nil))
-			}
+			out = append(out, expertUseEvent(x.uid, 200+i, ex, "agent", nil))
 		}
 		return out
 	}},
 	{"Expert_lighthouse", func(x *taskEventCtx) []any {
-		for _, ex := range x.experts {
-			if strings.Contains(ex.Name, "轻量云") {
-				return []any{expertUseEvent(x.uid, ex, "agent", nil)}
+		// 关键词检索优先（lighthouse / 轻量云）；失败回落内置轻量云专家 id
+		for _, kw := range []string{"lighthouse", "轻量云"} {
+			for _, ex := range x.lighthouse {
+				if strings.Contains(kw, "lighthouse") || strings.Contains(ex.Name, "轻量云") {
+					return []any{expertUseEvent(x.uid, 300, ex, "agent", nil)}
+				}
 			}
 		}
-		return nil
+		if len(x.lighthouse) > 0 {
+			return []any{expertUseEvent(x.uid, 300, x.lighthouse[0], "agent", nil)}
+		}
+		return []any{expertUseEvent(x.uid, 300, MarketExpert{ID: "ex_2cvvUZQhDyeJ", Name: "腾讯轻量云专家", Type: "agent"}, "agent", nil)}
 	}},
 	{"Expert_team_use_3", func(x *taskEventCtx) []any {
 		var out []any
-		for _, ex := range x.experts {
+		for i, ex := range x.experts {
 			if len(out) >= 3 {
 				break
 			}
-			if ex.Type == "team" || strings.Contains(ex.Name, "专家团") {
-				out = append(out, expertUseEvent(x.uid, ex, "team", nil))
+			if ex.Type == "team" {
+				out = append(out, expertUseEvent(x.uid, 400+i, ex, "team", nil))
 			}
+		}
+		return out
+	}},
+	{"template_5", func(x *taskEventCtx) []any {
+		// 场景 id 来自 /console/as/support/scenes（失败回落内置表）
+		var out []any
+		for i, sc := range x.scenes {
+			if len(out) >= 5 {
+				break
+			}
+			cid := fmt.Sprintf("wb-tpl-%d-%d", x.now, i)
+			out = append(out, map[string]any{
+				"eventCode": "agent_task_created_with_template", "timestamp": x.now,
+				"reportDelay": 0, "isCustomModel": true, "id": sc.ID, "name": sc.Name,
+				"requestId": cid, "conversationId": cid, "userId": x.uid,
+			})
+		}
+		return out
+	}},
+	{"Hp_Appearance", func(x *taskEventCtx) []any {
+		var out []any
+		for _, th := range x.themes {
+			out = append(out, map[string]any{
+				"eventCode": "appearance_skin_apply", "timestamp": x.now, "reportDelay": 0,
+				"action": "apply", "source": "settings_close", "id": th.ID,
+				"vipLevel": th.VipLevel, "series": th.Series, "type": "unknown",
+				"name": th.Name, "userId": x.uid,
+			})
+			break // 一个主题即可
 		}
 		return out
 	}},
@@ -266,17 +309,11 @@ var taskEventSpecs = []taskEventSpec{
 		return nil
 	}},
 	{"Buddy_App", func(x *taskEventCtx) []any {
-		if bid, name, ok := x.currentBuddy(); ok {
-			return buddy5Events(x.uid, bid, name, nil)
-		}
-		return nil
+		return buddy5Events(x.uid, buddyAppID, buddyAppName, nil)
 	}},
 	{"Buddy_App_QQ", func(x *taskEventCtx) []any {
-		// 同一 buddy 的五连（服务端按事件组点亮，_QQ 与 _App 共用形状）
-		if bid, name, ok := x.currentBuddy(); ok {
-			return buddy5Events(x.uid, bid, name, nil)
-		}
-		return nil
+		// 同一组五连事件同时满足 Buddy_App 与 Buddy_App_QQ（社区两账号实测）
+		return buddy5Events(x.uid, buddyAppID, buddyAppName, nil)
 	}},
 }
 
@@ -302,8 +339,13 @@ func (c *TencentClient) ReportTaskEvents(acct *auth.Auth) error {
 	}
 	x := &taskEventCtx{acct: acct, now: time.Now().UnixMilli(), uid: acct.UserID}
 	x.cid = fmt.Sprintf("wb-run-%d", x.now)
-	if experts, err := c.GrowthExperts(acct, 50); err == nil {
-		x.experts = experts
+	x.experts = c.GrowthExpertsPaged(acct, 3, "")
+	x.scenes = c.GrowthScenes(acct)
+	x.themes = c.GrowthThemes(acct)
+	for _, kw := range []string{"lighthouse", "轻量云"} {
+		if got := c.GrowthExpertsPaged(acct, 2, kw); len(got) > 0 {
+			x.lighthouse = append(x.lighthouse, got...)
+		}
 	}
 	if skills, err := c.GrowthSkills(acct, 3); err == nil {
 		x.skills = skills

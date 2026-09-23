@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"omnigate2api/internal/auth"
@@ -190,13 +191,30 @@ func (c *TencentClient) marketPost(acct *auth.Auth, path string, body any) ([]by
 	return out, nil
 }
 
-// GrowthExperts 拉取专家市场（pageSize 上限由调用方控制）。
-func (c *TencentClient) GrowthExperts(acct *auth.Auth, pageSize int) ([]MarketExpert, error) {
+// MarketQuery 专家市场查询参数（SPEC §32.8：字段名 page_size 为下划线形态，
+// 此前误用 pageSize 导致每页仅返回默认 20 条）。
+type MarketQuery struct {
+	Page     int
+	PageSize int
+	Keyword  string // 空 = 不过滤
+}
+
+// GrowthExperts 拉取专家市场一页。
+func (c *TencentClient) GrowthExperts(acct *auth.Auth, q MarketQuery) ([]MarketExpert, error) {
 	if acct == nil {
 		return nil, fmt.Errorf("account required")
 	}
-	raw, err := c.marketPost(acct, "/v2/operation-platform/market/expert/list",
-		map[string]any{"page": 1, "pageSize": pageSize})
+	if q.Page <= 0 {
+		q.Page = 1
+	}
+	if q.PageSize <= 0 {
+		q.PageSize = 50
+	}
+	body := map[string]any{"page": q.Page, "page_size": q.PageSize}
+	if q.Keyword != "" {
+		body["keyword"] = q.Keyword
+	}
+	raw, err := c.marketPost(acct, "/v2/operation-platform/market/expert/list", body)
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +227,99 @@ func (c *TencentClient) GrowthExperts(acct *auth.Auth, pageSize int) ([]MarketEx
 		return nil, fmt.Errorf("experts parse: %w", uerr)
 	}
 	return env.Data.Experts, nil
+}
+
+// GrowthExpertsPaged 按页抓取（去重），最多 maxPages 页。
+func (c *TencentClient) GrowthExpertsPaged(acct *auth.Auth, maxPages int, keyword string) []MarketExpert {
+	var out []MarketExpert
+	seen := map[string]bool{}
+	for page := 1; page <= maxPages; page++ {
+		ex, err := c.GrowthExperts(acct, MarketQuery{Page: page, PageSize: 50, Keyword: keyword})
+		if err != nil || len(ex) == 0 {
+			break
+		}
+		for _, e := range ex {
+			if e.ID == "" || seen[e.ID] {
+				continue
+			}
+			seen[e.ID] = true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Scene 模板场景（template_5 的对象 id 来源）。
+type Scene struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// GrowthScenes 拉取场景清单（失败回落内置表，社区 DEFAULT_SCENES 同源）。
+func (c *TencentClient) GrowthScenes(acct *auth.Auth) []Scene {
+	fallback := []Scene{{"0", "幻灯片"}, {"2", "视频生成"}, {"4", "深度研究"}, {"6", "文档处理"},
+		{"8", "数据分析"}, {"10", "可视化"}, {"12", "金融服务"}, {"14", "产品管理"}}
+	if acct == nil {
+		return fallback
+	}
+	raw, status, err := c.chatDo(acct, http.MethodGet, "/console/as/support/scenes?locale=zh-CN", nil, false)
+	if err != nil || status >= 400 {
+		return fallback
+	}
+	var env struct {
+		Data struct {
+			Scenes []struct {
+				ID   json.Number `json:"id"`
+				Name string      `json:"name"`
+			} `json:"scenes"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil || len(env.Data.Scenes) == 0 {
+		return fallback
+	}
+	out := make([]Scene, 0, len(env.Data.Scenes))
+	for _, s := range env.Data.Scenes {
+		out = append(out, Scene{ID: s.ID.String(), Name: s.Name})
+	}
+	return out
+}
+
+// AppearanceTheme 外观主题（Hp_Appearance 的 resourceKey 来源）。
+type AppearanceTheme struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	VipLevel string `json:"vip_level"`
+	Series   string `json:"series"`
+}
+
+// GrowthThemes 拉取主题目录（失败回落内置和平精英主题，社区 PE_THEME 同源）。
+func (c *TencentClient) GrowthThemes(acct *auth.Auth) []AppearanceTheme {
+	if acct == nil {
+		return []AppearanceTheme{{"theme-tkmw7j", "和平精英激战金秋", "free", "craft"}}
+	}
+	body, _ := json.Marshal(map[string]any{"platform": "client", "kind": "theme", "version": "2.137.1", "lang": "zh-CN"})
+	raw, status, err := c.billingDo(acct, http.MethodPost, "/v2/operation-platform/appearance/resources", body)
+	if err != nil || status >= 400 {
+		return []AppearanceTheme{{"theme-tkmw7j", "和平精英激战金秋", "free", "craft"}}
+	}
+	var env struct {
+		Data struct {
+			Resources []AppearanceTheme `json:"resources"`
+		} `json:"data"`
+	}
+	if uerr := json.Unmarshal(raw, &env); uerr != nil {
+		return []AppearanceTheme{{"theme-tkmw7j", "和平精英激战金秋", "free", "craft"}}
+	}
+	out := make([]AppearanceTheme, 0, 4)
+	for _, t := range env.Data.Resources {
+		if strings.Contains(t.Name, "和平精英") || strings.Contains(strings.ToLower(t.Name), "pubg") {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, AppearanceTheme{"theme-tkmw7j", "和平精英激战金秋", "free", "craft"})
+	}
+	return out
 }
 
 // GrowthSkills 拉取技能市场。
@@ -233,9 +344,11 @@ func (c *TencentClient) GrowthSkills(acct *auth.Auth, pageSize int) ([]MarketSki
 }
 
 // expertUseEvent 专家使用事件（expert_5 / Expert_team_use_3 / Expert_lighthouse 共用）。
-func expertUseEvent(uid string, ex MarketExpert, expertType string, base map[string]any) map[string]any {
+// idx 参与会话/请求 id——**每个事件必须唯一**，否则服务端按会话去重只计 1 次
+// （实测：5 个专家事件共用同一 cid 时 expert_5 只累计 1/5）。
+func expertUseEvent(uid string, idx int, ex MarketExpert, expertType string, base map[string]any) map[string]any {
 	now := time.Now().UnixMilli()
-	cid := fmt.Sprintf("wb-ex-%d", now)
+	cid := fmt.Sprintf("wb-ex-%d-%d", now, idx)
 	rid := cid + "-1"
 	e := map[string]any{
 		"eventCode": "expert_actual_use", "timestamp": now, "reportDelay": 0,
