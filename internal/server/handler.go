@@ -173,8 +173,10 @@ type Config struct {
 	RoutesFile string
 }
 
-// maxBodyBytes 请求体上限（SPEC §30.7：64MB，容纳 base64 图片负载）。
-const maxBodyBytes = 64 << 20
+// maxBodyBytes 请求体上限（SPEC §30.7）：32MB——上游图片实测上限 ~1MB/张、
+// 单图 base64 上限 10MB，32MB 足以容纳多图 base64 且把每请求内存尖峰减半
+// （io.ReadAll 会一次性载入；并发 5 × 32MB 为最坏情况上界）。
+const maxBodyBytes = 32 << 20
 
 // Handler 主路由。
 type Handler struct {

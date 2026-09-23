@@ -12,6 +12,10 @@ services:
       OMNIGATE_API_KEY: ${OMNIGATE_API_KEY:-}
       TZ: Asia/Shanghai
       OMNIGATE_DEBUG_PROMPTS: /app/data/prompts
+      # 内存边界（运维）：Go 堆软上限 + 更积极的 GC 触发，抑制大请求体/长会话尖峰。
+      # 软上限不会 OOM（超限时 GC 更频繁），仅约束增长曲线。
+      GOMEMLIMIT: 192MiB
+      GOGC: "75"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
