@@ -104,3 +104,18 @@ Body：
 ## 7. 脱敏
 
 本仓库不包含任何真实 token。`auths/`、`data/`、`config.json`、`.env` 均 gitignore。
+
+## 附：登录续期排查（2026-09-24）
+
+**问题**：华为 STS 令牌寿命约 24h，凭证无 refresh_token → 无法自动续期，账号每日左右需重登。
+
+**排查结论（两轮真实登录实证）**：
+
+| 通道 | 端点 | 实测结果 |
+|---|---|---|
+| ticket 轮询 | `GET {snap-manager}/v1/login/ticket?ticket_id&secret` | ✅ 登录成功；**响应不含 refresh_token**（落盘凭证 `refresh_token` 长度 0；代码侧已确认 `TokenResponse.RefreshToken` 会被 `saveLoginResult` 写入 → 是服务端未下发） |
+| code 回调 | 门户 → `http://127.0.0.1:{port}/oauth/callback?code=…` → `POST {sts}/v1/oauth2/tokens`（authorization_code） | ❌ **未触发**：门户只回第一阶段回调（`code_bytes=0 secret_bytes=64 redirect_len=278`），网关 307 把浏览器送回门户后，门户**不再回带 code**（浏览器显示「登录失败」）；两轮均如此 |
+
+**推断（待验证）**：authorize URL 携带 `uri_scheme=codearts`，门户的授权确认可能依赖**自定义协议回传**（官方客户端注册了 `codearts://`，纯浏览器无该处理器故停在失败页）。若成立，可行的根治路径是：在 Windows 注册 `codearts://` 协议 → 指向本地小工具 → 由它拿 code 走 `authorization_code` 换取（该响应按老记录含 `refresh_token`）→ 接入现有 `RefreshToken` 自动续期。
+
+**已落地的可诊断性改进**：`OMNIGATE_LOGIN_DEBUG=1`（compose 透传）打印 ticket 响应是否含 refresh_token；首次回调日志记录 `redirect_to={host}{path}`（去查询串，防 secret 泄露），用于判断门户把浏览器引向何处。
