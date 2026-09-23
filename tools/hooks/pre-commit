@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# 提交前守卫（脱敏）：拦住会把**账号标识/凭证/本机信息**写进公开仓库的内容。
+#
+# 为什么需要它：本仓库是公开的，而日常排查会产出大量探测输出（含账号 uid、域名、
+# 上游原始响应）。历史上 .ts2.txt / .ex_full.txt 这类临时文件被误提交并推送，
+# 里面就带着真实 uid；提交信息里也出现过。靠"记得别提交"是靠不住的，靠规则拦。
+#
+# 启用：tools/install-git-hooks.sh（等价于 git config core.hooksPath tools/hooks）
+# 绕过：git commit --no-verify（仅在确认内容确无敏感信息时）
+set -u
+
+# 扫描暂存差异，但排除守卫自身——它的模式字面量会（正确地）命中自己。
+diff="$(git diff --cached --no-color -U0 -- . ':(exclude)tools/hooks/pre-commit' 2>/dev/null || true)"
+msg=""
+[ -f .git/COMMIT_EDITMSG ] && msg="$(cat .git/COMMIT_EDITMSG 2>/dev/null || true)"
+haystack="$diff
+$msg"
+
+# 只检查新增行（+ 开头），避免历史上下文误报
+added="$(printf '%s\n' "$diff" | grep -E '^\+' || true)"
+
+fail=0
+report() { printf '  ✗ %s\n' "$1"; fail=1; }
+scan() { # scan <说明> <正则> <待查文本>
+  local desc="$1" re="$2" text="$3" hits
+  hits="$(printf '%s\n' "$text" | grep -nE "$re" | head -3 || true)"
+  [ -n "$hits" ] && { report "$desc"; printf '%s\n' "$hits" | sed 's/^/      /'; }
+}
+
+scan "账号 uid（探测输出形态 uid=…）"        'uid[=:][[:space:]]*[0-9a-fA-F]{16,}'            "$added"
+scan "账号 uid（32 位十六进制）"             '["=:[:space:]][0-9a-f]{32}(["[:space:]]|$)'      "$added"
+scan "账号 uid（UUID 形态，排除明显占位）"    '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$added"
+scan "个人邮箱"                              '[A-Za-z0-9._%+-]+@(gmail|qq|163|126|outlook|hotmail|foxmail)\.[A-Za-z]+' "$added"
+scan "本机路径/用户名"                        '([Cc]:\\Users\\|/c/Users/|/home/[a-z]+/)'   "$added"
+scan "凭证字段被赋实值"                       '"(cloud_dragon_token|refresh_token|access_key_id|secret_access_key|security_token)"[[:space:]]*:[[:space:]]*"[A-Za-z0-9+/=_-]{8,}"' "$added"
+scan "JWT / 长令牌"                          '(eyJ[A-Za-z0-9_-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' "$added"
+scan "提交信息里含账号标识"                    'uid[=:][[:space:]]*[0-9a-fA-F-]{16,}|[A-Za-z0-9._%+-]+@(gmail|qq|163|outlook)\.' "$msg"
+
+if [ "$fail" -ne 0 ]; then
+  cat <<'TIP'
+
+提交被拦下：上面这些内容看起来是账号标识 / 凭证 / 本机信息，本仓库是公开的。
+  · 临时探测输出请放到仓库根的**点前缀**文件（已整体 gitignore，如 .probe.txt）或 /tmp；
+  · 确需入库的内容请先替换为占位（如 <uid>、<account-A>）；
+  · 确认无误要强行提交：git commit --no-verify
+TIP
+  exit 1
+fi
+exit 0

@@ -13,17 +13,11 @@ config.json
 *.log
 # 本地交接文档（含运维上下文，禁止入库/推送公开仓库）
 HANDOFF.md
-.gh_tmp.json
-.t.json
-.ref_*.py
-.img_req.json
-.probe_pkgs/
-._wb_main.js
-.h5*
-.h5c_*
-.h5_*
-.tasks_*
-.t__*
-.ref_*
-.ep_*
-._wb*
+
+# 仓库根的临时探测/产物文件（点前缀）：整体忽略，只白名单必须入库的三个。
+# 历史教训：.ts2.txt / .ex_full.txt 这类探测输出曾被误提交并推送（内容含账号 uid），
+# 逐个补名字永远追不上新名字——改为按前缀整体忽略（HANDOFF §14 第 14 条）。
+/.*
+!/.gitignore
+!/.dockerignore
+!/.env.example
