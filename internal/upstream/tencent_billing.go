@@ -81,6 +81,7 @@ type CheckinStatus struct {
 	TodayCheckedIn bool   `json:"today_checked_in"`
 	StreakDays     int64  `json:"streak_days"`
 	TodayCredit    int64  `json:"today_credit"`
+	DailyCredit    int64  `json:"daily_credit"`
 	TotalCredits   int64  `json:"total_credits"`
 	StartTime      string `json:"start_time"`
 	EndTime        string `json:"end_time"`

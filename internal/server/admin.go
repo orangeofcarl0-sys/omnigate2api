@@ -346,3 +346,80 @@ func (h *Handler) adminModelsGet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": h.unifiedModelList()})
 }
+
+// adminGrowth 腾讯成长中心状态（SPEC §32 观测面）：按账号拉取积分/能量/签到/任务/宠物。
+// 只读调用，失败按字段暴露（活动面故障不得影响面板可用性）。
+// 查询参数 uid 可只刷新单账号（面板行内刷新用）。
+func (h *Handler) adminGrowth(w http.ResponseWriter, r *http.Request) {
+	uid := r.URL.Query().Get("uid")
+	rows := make([]map[string]any, 0, 4)
+	for _, acct := range h.cfg.Pool.Accounts() {
+		if acct.ProfileID != "workbuddy" {
+			continue
+		}
+		if uid != "" && acct.UID != uid {
+			continue
+		}
+		api, ok := acct.Client.(upstream.BillingAPI)
+		if !ok {
+			continue
+		}
+		row := map[string]any{
+			"uid":    acct.UID,
+			"nick":   acct.UserName,
+			"domain": acct.Auth.Domain,
+		}
+		if st, err := api.CheckinStatus(acct.Auth); err == nil && st != nil {
+			row["checkin"] = map[string]any{
+				"theme":            st.ThemeName,
+				"active":           st.Active,
+				"today_checked_in": st.TodayCheckedIn,
+				"streak_days":      st.StreakDays,
+				"total_credits":    st.TotalCredits,
+				"daily_credit":     st.DailyCredit,
+			}
+		} else if err != nil {
+			row["checkin_error"] = truncateText(err.Error(), 120)
+		}
+		if credits, err := api.UserResource(acct.Auth); err == nil {
+			row["credits"] = credits
+		} else {
+			row["credits_error"] = truncateText(err.Error(), 120)
+		}
+		if q, err := api.PetQuota(acct.Auth); err == nil && q != nil {
+			row["energy"] = q.Balance
+		}
+		if tasks, err := api.GrowthTasks(acct.Auth); err == nil {
+			var total, claimed, completed, accepted int
+			for _, t := range tasks {
+				total++
+				switch {
+				case t.TaskStatus() == "claimed":
+					claimed++
+				case t.Completed():
+					completed++
+				default:
+					accepted++
+				}
+			}
+			row["tasks"] = map[string]any{
+				"total": total, "claimed": claimed, "completed": completed, "accepted": accepted,
+			}
+		}
+		if pet, err := api.PetTravelStatus(acct.Auth); err == nil && pet != nil {
+			eta := pet.ArriveAt - pet.ServerNow
+			if eta < 0 {
+				eta = 0
+			}
+			state := pet.State
+			if state == "" {
+				state = "none" // 无宠物（全球版空 data 形态）
+			}
+			row["pet"] = map[string]any{
+				"state": state, "location": pet.Location.Name, "arrive_in_min": eta / 60,
+			}
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
+}

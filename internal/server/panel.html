@@ -215,6 +215,31 @@ select option{ background:#fff; color:var(--text); }
   </div>
 
   <div class="card">
+  <div class="card">
+    <div class="card-h">
+      <h2>腾讯成长中心</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="muted" style="font-size:12px">积分 / 能量 / 签到 / 任务 / 宠物（SPEC §32，实测拉取）</span>
+        <button class="btn" id="btnGrowth" style="padding:6px 10px">刷新成长数据</button>
+      </div>
+    </div>
+    <div class="card-b" style="padding:0;overflow-x:auto">
+      <table class="table" id="growthTable">
+        <thead>
+          <tr>
+            <th>账号</th>
+            <th>积分</th>
+            <th>能量</th>
+            <th>签到</th>
+            <th>任务</th>
+            <th>宠物</th>
+          </tr>
+        </thead>
+        <tbody id="growthBody"><tr><td colspan="6" class="empty">点击「刷新成长数据」拉取（每账号约 5 次上游调用）</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
     <div class="card-h"><h2>模型</h2><span class="muted" id="modelCount"></span></div>
     <div class="card-b"><div class="chips" id="modelChips"></div></div>
   </div>
@@ -428,6 +453,38 @@ function escapeHtml(s){
 }
 function escapeAttr(s){ return escapeHtml(s).replace(/`/g,""); }
 
+
+async function loadGrowth(){
+  const body = $("growthBody");
+  if (!body) return;
+  body.innerHTML = `<tr><td colspan="6" class="empty">拉取中…</td></tr>`;
+  let data;
+  try { data = await api("/admin/api/growth"); }
+  catch (e){ body.innerHTML = `<tr><td colspan="6" class="empty">拉取失败：${escapeHtml(e.message)}</td></tr>`; return; }
+  const rows = (data && data.accounts) || [];
+  if (!rows.length){ body.innerHTML = `<tr><td colspan="6" class="empty">无腾讯账号</td></tr>`; return; }
+  body.innerHTML = rows.map(a => {
+    const ck = a.checkin || {};
+    const active = ck.active === false ? '<span class="badge warn">未开启</span>' : '<span class="badge ok">进行中</span>';
+    const today = ck.today_checked_in ? '<span class="badge ok">已签</span>' : '<span class="badge info">未签</span>';
+    const tk = a.tasks || {};
+    const pet = a.pet || {};
+    const petLabel = { traveling: "探险中", idle: "空闲", arrived: "已归来", none: "无宠物" }[pet.state] || (pet.state || "—");
+    const eta = pet.arrive_in_min ? ` · ${pet.arrive_in_min}m` : "";
+    const realm = (a.domain || "").includes("workbuddy.ai") ? "全球" : "CN";
+    return `<tr>
+      <td><strong>${escapeHtml(a.nick || "未命名")}</strong>
+        <span class="badge" data-fam="workbuddy">${realm}</span>
+        <div class="mono muted" style="font-size:11px" title="${escapeHtml(a.uid||"")}">${escapeHtml(shortUID(a.uid))}</div></td>
+      <td><strong>${Number(a.credits||0).toLocaleString()}</strong>${a.credits_error?`<div class="muted" style="font-size:11px">${escapeHtml(a.credits_error)}</div>`:""}</td>
+      <td>${a.energy!==undefined?`<strong>${a.energy}</strong>`:"—"}</td>
+      <td>${active} ${today}<div class="muted" style="font-size:11px">连续 ${ck.streak_days||0} 天 · 累计 ${Number(ck.total_credits||0).toLocaleString()}</div></td>
+      <td>${tk.total?`<strong>${tk.claimed||0}</strong> 已领 / ${tk.completed||0} 待领 / ${tk.total} 个`: (a.tasks?"—":"—")}</td>
+      <td><span class="badge ${pet.state==="traveling"?"info":pet.state==="none"?"warn":"ok"}">${petLabel}</span>${escapeHtml(eta)}</td>
+    </tr>`;
+  }).join("");
+}
+
 async function loadOverview(){
   const data = await api("/admin/api/overview");
   render(data);
@@ -461,6 +518,7 @@ $("loginBtn").onclick = async () => {
 $("keyInput").addEventListener("keydown", e => { if (e.key === "Enter") $("loginBtn").click(); });
 $("btnLogout").onclick = () => { clearKey(); showLogin(); toast("已退出"); };
 $("btnRefresh").onclick = async () => {
+  loadGrowth().catch(()=>{}); // 成长数据随刷新异步拉取（失败静默，按钮可手动重试）
   try { await loadOverview(); toast("已刷新"); } catch(e){ toast(e.message,false); }
 };
 
@@ -477,6 +535,7 @@ async function runAction(path, body){
 }
 
 $("btnCredits").onclick = () => runAction("/admin/api/credits", {});
+$("btnGrowth").onclick = () => loadGrowth().catch(e => toast(e.message));
 $("btnCheckin").onclick = () => runAction("/admin/api/checkin", {});
 $("btnKeepalive").onclick = () => runAction("/admin/api/keepalive", {});
 $("btnReload").onclick = () => runAction("/admin/api/reload", {});

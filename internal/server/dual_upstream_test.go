@@ -115,3 +115,57 @@ func TestIntegrationPoolPickByProfile(t *testing.T) {
 		t.Fatalf("tencent upstream must be used: %d", len(tencentSizes))
 	}
 }
+
+// TestAdminGrowth SPEC §32 观测面：成长中心状态接口（积分/能量/签到/任务/宠物）。
+func TestAdminGrowth(t *testing.T) {
+	billing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "checkin-activity-status"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"theme_name":"Buddy加油站","today_checked_in":true,"streak_days":4,"daily_credit":100,"total_credits":400,"active":true}}`))
+		case strings.Contains(r.URL.Path, "get-user-resource"):
+			_, _ = w.Write([]byte(`{"Response":{"Data":{"Accounts":[{"CapacityRemain":888}]}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0}`))
+		}
+	}))
+	defer billing.Close()
+	activity := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/buddy/quota"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"affordable":0,"balance":43,"cost_per_open":10,"max_open_count":5}}`))
+		case strings.HasSuffix(r.URL.Path, "/tasks"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"tasks":[{"task_code":"a","accept_status":"claimed"},{"task_code":"b","accept_status":"completed"},{"task_code":"c","accept_status":"accepted"}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/travel/status"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"state":"traveling","location":{"name":"咖啡馆"},"arrive_at":200,"server_now":100}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0}`))
+		}
+	}))
+	defer activity.Close()
+	t.Setenv("OMNIGATE_BILLING_BASE", billing.URL)
+	t.Setenv("OMNIGATE_ACTIVITY_BASE", activity.URL)
+	t.Setenv("OMNIGATE_TENCENT_BASE", billing.URL)
+
+	huawei := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	srv, _, _, h := buildTestServer(t, huawei.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+
+	req, _ := http.NewRequest("GET", srv.URL+"/admin/api/growth", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+	}
+	for _, want := range []string{`"credits":888`, `"energy":43`, `"streak_days":4`, `"claimed":1`, `"completed":1`, `"traveling"`, "咖啡馆"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("growth must expose %s: %s", want, raw)
+		}
+	}
+}
