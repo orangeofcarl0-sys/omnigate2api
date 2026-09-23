@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -797,7 +798,9 @@ func (c *TencentClient) ReportDesktopChat(acct *auth.Auth) error {
 	}
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", TencentClientUA)
+	// 桌面 UA 对齐官方客户端（SPEC §32.8：服务端按 UA/extName 关联桌面任务，通用 UA 事件被丢弃）
+	req.Header.Set("User-Agent", "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1")
+	req.Header.Set("X-Request-ID", deriveDeviceID(acct.UserID, "req")+strconv.FormatInt(now%1000000, 10))
 	if acct.CloudDragonTok != "" {
 		req.Header.Set("Authorization", "Bearer "+acct.CloudDragonTok)
 	}
