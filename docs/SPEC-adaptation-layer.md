@@ -1154,6 +1154,10 @@ sequenceDiagram
 ### 30.8 可观测性
 
 - `chat fold` 日志行扩展 `images=N`（折叠输入图片数，两通道通用）；
+- **面板「腾讯成长中心」卡 + `GET /admin/api/growth`**（SPEC §32 观测面）：按账号实时拉取
+  可用积分/活动累计/能量/签到（连续·累计·活动态）/任务进度（已领·待领·总数）/宠物（状态·ETA），
+  失败按字段暴露；注意 `panel.go` 的 `>积分<`/`>签到<` 为全局遗留替换，新增面板文案须避开
+  （用「可用积分」「每日签到」等）；
 - 转换层成功日志 `media fetch host=… bytes=… ms=…`；降级日志 `media placeholder reason=…`；
 - 图片验证路径 = `OMNIGATE_MEDIA=passthrough` + 任意 OpenAI 客户端（curl/dsh/ZCode），
   不新增面板测试卡（当前面板无对话测试卡，README 对话测试描述已过时，随 README
