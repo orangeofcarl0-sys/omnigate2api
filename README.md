@@ -317,6 +317,10 @@ go test -race ./...  # 竞争检测（需 CGO）
 - **密钥纪律**：`auths/`（凭证）、`data/`、`config.json`、`.env` 一律 git 忽略且不入库；凭证文件写盘权限 0600、目录 0700；日志与标准输出不含任何凭证值（oauth 回调仅记字节长度）。
 - **暴露面**：compose 默认绑定 `127.0.0.1:7866` 且 **`OMNIGATE_API_KEY` 默认为空 = 免密**（本地单用户：API Key 与面板密钥均无需填写，`change-me` 同样视为未配置）；局域网/远程共享请改回 `7866:7866` 并**必须**设置真实 `OMNIGATE_API_KEY`（此时 Bearer 与面板 localStorage 密码即防线）；公网部署请置于受控网络或前置反代鉴权。
 - **面板密钥**：浏览器输入的 API key 仅存于本机 localStorage（panel.html 内有明示），共享机器慎用。
+- **脱敏**：本仓库公开，**不含任何真实凭证与账号标识**。提交前守卫 `tools/hooks/pre-commit`
+  （`tools/install-git-hooks.sh` 启用）会拦下含账号 uid / 个人邮箱 / 本机路径 / 凭证字段实值 /
+  JWT 的暂存内容与提交信息；探测输出请写进仓库根的点前缀文件（已整体 gitignore）或 `/tmp`。
+  规则细节与历史重写记录见 `docs/reverse-engineering.md` §7。
 
 ## 参考项目
 

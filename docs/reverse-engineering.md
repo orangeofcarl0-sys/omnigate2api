@@ -103,7 +103,51 @@ Body：
 
 ## 7. 脱敏
 
-本仓库不包含任何真实 token。`auths/`、`data/`、`config.json`、`.env` 均 gitignore。
+本仓库是**公开**仓库，所有记录（含本文档的端点/错误码/字段名实证）都会被检索到。脱敏口径如下。
+
+### 7.1 敏感面：账号标识与凭证（必须处理）
+
+- 本仓库**不包含任何真实凭证**：`auths/`、`data/`、`config.json`、`.env`、`*.key`、`*.pem`
+  一律 gitignore；`HANDOFF.md`（本地交接文档，含运维上下文与账号清单）同样 gitignore。
+- 写文档/提交信息时，账号一律用占位符：uid → `<uid>` / `<account-A>`，昵称与邮箱不落盘。
+- **探测输出必须写进仓库根的点前缀文件**（`.xxx.txt` / `.xxx.json`）或 `/tmp`：根目录点文件
+  已**整体忽略**（`.gitignore` 里 `/.*` + 三个白名单 `.gitignore`/`.dockerignore`/`.env.example`）。
+  之所以改成按前缀整体忽略：历史上 `.ts2.txt`、`.ex_full.txt` 这类探测导出被误提交并推送，
+  内容里带着真实 uid；逐个往 .gitignore 补名字永远追不上新名字。
+
+### 7.2 提交前守卫
+
+`tools/hooks/pre-commit` 扫描**暂存新增行**与**提交信息**，命中即拦下并列出具体行号：
+
+| 拦截项 | 形态 |
+|---|---|
+| 账号 uid | `uid=<20+ 位>`、32 位十六进制、UUID |
+| 个人邮箱 | gmail/qq/163/126/outlook/hotmail/foxmail |
+| 本机路径 | 系统用户目录（Windows 的 Users 路径、类 Unix 的 home 目录） |
+| 凭证字段被赋实值 | `refresh_token`/`access_key_id`/`secret_access_key`/… 带值 |
+| JWT / 私钥 | `eyJ…`、`PRIVATE KEY` 块 |
+
+启用（幂等，一次即可）：`tools/install-git-hooks.sh`（等价于 `git config core.hooksPath tools/hooks`）。
+确需提交时用 `git commit --no-verify` 绕过。守卫自身文件已从扫描中排除（其模式字面量会命中自己）。
+
+### 7.3 边界：上游协议细节不作为敏感信息
+
+端点路径、请求头（含官方 CLI/桌面 UA）、业务码（6004/11128/14018/12153…）、字段名
+（`modelPromotions`、`CapacityRemain`…）**必须存在于代码中**否则无法工作，只脱敏文档属安全
+表演；且生态内同类公开项目（见 README「参考项目」）已记录同样的端点与错误码。因此本仓库
+对这类内容不作屏蔽，仅对**账号标识、凭证、本机路径**脱敏。
+
+### 7.4 历史重写记录（2026-09-24）
+
+排查发现有 uid 通过两个误提交的探测文件（`.ts2.txt`、`.ex_full.txt`，均已从工作树删除）留在
+**历史对象**里——工作树干净 ≠ 没泄漏。已用 `git filter-repo` 重写全部历史（`--invert-paths`
+移除这两个文件 + `--replace-text` 兜底替换），并强推。
+
+- 结果：全历史与对象库（含不可达对象）中账号标识 **0 命中**，`git fsck` 无损坏；
+- 代价：**所有提交 SHA 改变**（远端 `main` 由 `a5fcab3` → `e9d94d9`），标签内容未受影响；
+- 其它机器上的克隆需重新克隆或 `git fetch --force && git reset --hard origin/main`；
+- 动手前的镜像备份留在仓库**外部**（`../omnigate2api-backup-<ts>.git`），需要彻底清除时删除它；
+- 注意 GitHub 侧的对象缓存/已 fork 副本可能短期保留旧数据，这一层本地无法控制。
 
 ## 附：登录续期排查（2026-09-24）
 
