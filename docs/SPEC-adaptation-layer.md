@@ -1803,3 +1803,52 @@ prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`
 - `Expert_Philanthropy`（体验公益专家）＝ 需**真实捐款动作**，不做；
 - `wb_wechat_oa_subscribe_task`（关注官方公众号）＝ 需**真实关注动作**，不做；
 - `black_cat`（夜猫子）＝ 时段窗口限制，**每夜最多计 1 次** → 3 夜自然完成（当前 2/3）。
+
+### 32.10 全球领分路径审计（2026-09-25，用户立项；**结论：当前不可从网关侧打通**）
+
+**目标**：让 workbuddy.ai（全球域）账号也能持续获得积分。
+
+**结论**：被服务端**任务完成门**挡住，而全球域不跑该任务体系——不是我们发送侧缺了可修的细节。
+
+判据链（本次逐条复核）：
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | 领养门 = **任务完成门** | `POST /activity/growth/buddy/first` → 400 `first_buddy task not completed yet (need at least one conversation)`；同一条路径在 CN 上，我们的事件链上报后即成功（`+300c +8e`） |
+| 2 | 全球域**没有当季任务体系** | 全球 `GET /v2/activity/growth/tasks` 只回 **5 条遗留 stub**（`skill_installed`/`wechat_linked`/`expert_summoned`/`template_used`/`first_chat`），accept 一律 `task not found`（当日日志每条 14 次）；CN 为 19 条当季任务且 accept/claim 全通。`first_buddy` **不在全球清单里** → 门没有可满足的输入 |
+| 3 | 不是"缺一次对话" | 全球账号**确实在服务真实对话**（面板可见某全球账号有 `deepseek-v4.1-flash` 的 `model_cooling` 记录、`data/prompts` 有当日请求体），每日事件包上报返回 ok；但全球任务进度恒 0 → 门认的是**任务引擎认可的事件**，不是泛泛的对话 |
+| 4 | 配置面**没有任何活动开关/入口** | 新增 `OMNIGATE_DEBUG_CONFIG` 转储两域 `/v3/config` 全量键路径（CN 178 / 全球 120 条）：无 growth/activity/buddy/pet 相关字段或 URL；`productFeatures` CN 49 / 全球 33（全球为精简变体，另缺 `productFeatureExperiment`/`telemetry`/`modelTiers`/`completion`，`modelPromotions` 仅 3 条） |
+| 5 | 积分入口只有"买"与"一次性" | `config.creditPurchaseActions` = {`14018` 获取 Credits、`6004`/`6005` 升级专业版} → `codebuddy.ai/profile/plan`（纯购买页）；trial 加油包已领（`14051 has applied trial`） |
+| 6 | 与社区一致（**含同时支持双区域的项目**） | ① 本地两份社区参考实现（`_research/codebuddy2api`、`_research/workbuddy2api`）均无全球领养/领分实现；② **`ardeyouxipianyi_workbuddy2api-hub`（明确把国际版当一等公民的多区域网关）在代码里硬编码了同一条结论**——`wb_tasks.py:429` `if account.realm != "cn": return {"ok": False, "msg": "国际版不适用国内成长任务中心"}`；`wb_accounts.py:452` `if self.realm != "cn": return {"ok": False, "error": "checkin is only available for CN realm accounts"}`（另有 `canCheckin = self.realm == "cn"`）；`wb_scheduler.py:146` 注释即 `# 2. 如果是国内版账号，检查每日签到与猫猫旅行`；其 README 明写"国际版动态自适应：切换至国际版视图时，调度器自动隐藏签到/猫猫逻辑，专职执行 Token 自动保活与凭证常驻" |
+
+**配置审计顺带得到的新事实**（与活动面无关，但值得记）：
+
+- `productFeaturesConfig.ModelRateLimitCap` 给出"免费→付费"切换对：CN `hy3 → hy3-x`，全球
+  `deepseek-v4.1-flash → deepseek-v4.1-flash-sg`（后者是全球付费变体，**不在目录里**，按"不补模型"拍板不动）。
+- 全球 `modelPromotions` 仅 3 条且 factor 全为 0：`hy3`、`hy4-preview-f`、`deepseek-v4.1-flash`；
+  其中 **`hy4-preview-f` 全球免费但我们目录没有**（同上，按拍板不动）。
+- `productFeaturesConfig.ModelTrialBanner`：`hy4-preview-f` 14 天试用（`firstUseTimeKey` 计首次使用）——
+  是**用量赠送**，不是积分。
+- 全球专属开关是 IM/生成类（ChannelDiscord/Slack/Telegram、ComputerUse、ImageGen、VideoGen、Claw），
+  CN 专属是 HomePlaybooks/Inspiration/Space/Codebase/EnableAppearance 等：两域产品面差异明确，但都不含活动面。
+- **观察项（未改，仅记录）**：`ardeyouxipianyi_workbuddy2api-hub` 的 token 刷新头按区域分流——
+  `"X-Auth-Refresh-Source": "workbuddy" if realm == "cn" else "plugin"`（`wb_accounts.py:414`），
+  而我们对两域都发 `workbuddy`（`tencent_client.go:249`）。当前全球账号刷新正常（`token ... ok`），
+  且改这个头属于"无实证动发送形态"，故不动；若将来全球刷新出现异常再回头核这一项。
+- **社区克隆位置**：`%LOCALAPPDATA%\Temp\wb\`（6 个项目，2026-09-24 拉取；Temp 可能被清理，
+  故本节的引用与结论按"已抄录"对待，不依赖该目录长期存在）。
+
+**要继续推进只有两条路（均需用户决策/动作）**：
+
+- **(a) 真实全球客户端抓包**：本机**没有安装**全球桌面客户端（`AppData\Roaming\CodeBuddy CN` 只剩 CN 残留数据），
+  且成长中心是远端 H5。做法：在装有全球客户端的机器上用某个全球账号打开成长中心 → 对话一次 → 尝试领养，
+  然后扩 `tools/extract-client-request.py` 从该客户端日志抽 growth/buddy 请求形状，按"发送形态=指纹"纪律复刻**合法触发**。
+- **(b) H5 活动契约逆向**：§32.7 曾把"远程 H5 活动契约的逆向"列为明确不做（风控敏感、超范围，注明"如后续需要按活动单独立项"）。
+  本次已由用户指令立项，但**缺 H5 地址**：两域 `/v3/config` 都不含该 URL，本机也无客户端 bundle 可静态检索——
+  要先拿到地址就得探测，属该类风控敏感动作，需用户明确授权后再做。
+
+**当前姿态**：全球账号仍定位为"聊天额度/模型能力"入口；自动认领链路已就绪，
+**腾讯一旦开启全球签到/任务，无需改代码即自动领取**（§32.6 的活动态预检设计即为此）。
+
+**新增审计工具（本版）**：`OMNIGATE_DEBUG_CONFIG=<目录>`（空=关）把 `/v3/config` 原始响应按区域落盘
+（目录 0700 / 文件 0600），补上 §33.3 六步里的第 1 步"列全部键路径"——本次正是靠它拿到 CN/全球 178/120 条键路径才敢下结论。

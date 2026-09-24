@@ -6,8 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"omnigate2api/internal/auth"
 )
 
 func cfgWith(t *testing.T, raw string) *ModelConfig {
@@ -182,5 +187,52 @@ func TestFetchConfigBizError(t *testing.T) {
 	c.base = srv.URL
 	if _, err := c.FetchConfig(billingAuth()); err == nil {
 		t.Fatal("business error must surface")
+	}
+}
+
+// 配置审计转储（OMNIGATE_DEBUG_CONFIG，SPEC §33.3"改解析前先列全部键路径"）：
+// 按区域落盘原始响应、0600 权限、开关关闭时零副作用（不建目录、不落文件）。
+func TestDumpRawConfig(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"OK","data":` + promoIntl + `}`))
+	}))
+	defer srv.Close()
+	c := NewTencent(5 * time.Second)
+	c.base = srv.URL
+
+	t.Setenv("OMNIGATE_DEBUG_CONFIG", dir)
+	if _, err := c.FetchConfig(&auth.Auth{Domain: "www.workbuddy.ai"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.FetchConfig(billingAuth()); err != nil { // Domain=www.codebuddy.cn
+		t.Fatal(err)
+	}
+	global, _ := filepath.Glob(filepath.Join(dir, "v3config-global-*.json"))
+	cn, _ := filepath.Glob(filepath.Join(dir, "v3config-cn-*.json"))
+	if len(global) != 1 || len(cn) != 1 {
+		t.Fatalf("want one dump per realm, got global=%v cn=%v", global, cn)
+	}
+	body, err := os.ReadFile(global[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 必须是**原始响应**（未解析、未裁剪），否则"列全部键路径"就失去意义。
+	if !strings.Contains(string(body), "modelPromotions") || !strings.Contains(string(body), `"code":0`) {
+		t.Fatalf("dump must be the raw upstream body, got: %s", string(body)[:min(120, len(body))])
+	}
+	if fi, err := os.Stat(global[0]); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("dump file must be 0600, got %v (err=%v)", fi.Mode().Perm(), err)
+	}
+
+	// 开关关闭：不再新增文件（目录保持原样）
+	t.Setenv("OMNIGATE_DEBUG_CONFIG", "")
+	if _, err := c.FetchConfig(billingAuth()); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	if len(after) != 2 {
+		t.Fatalf("switch off must not dump, files=%v", after)
 	}
 }

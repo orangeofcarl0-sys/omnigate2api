@@ -20,6 +20,9 @@ services:
       # 软上限不会 OOM（超限时 GC 更频繁），仅约束增长曲线。
       # 登录排查开关（OMNIGATE_LOGIN_DEBUG=1 时打印 token 响应字段名/是否含 refresh_token）
       OMNIGATE_LOGIN_DEBUG: ${OMNIGATE_LOGIN_DEBUG:-}
+      # 配置审计转储（OMNIGATE_DEBUG_CONFIG=<目录>，空=关闭）：把 /v3/config 原始响应
+      # 按区域落盘，用于"改上游解析前先列全部键路径"（SPEC §33.3）。
+      OMNIGATE_DEBUG_CONFIG: ${OMNIGATE_DEBUG_CONFIG:-}
       GOMEMLIMIT: 192MiB
       GOGC: "75"
     volumes:

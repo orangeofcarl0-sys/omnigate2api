@@ -21,13 +21,40 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"omnigate2api/internal/auth"
 )
+
+// dumpRawConfig 配置审计转储（OMNIGATE_DEBUG_CONFIG=<目录>，空=关闭）：把上游
+// /v3/config 原始响应按区域落盘，供"改解析前先列全部键路径"用（SPEC §33.3 六步第 1 步）。
+// 配置是模型/促销元数据（不含凭证），文件仍按 0600 落盘、目录 0700。
+func dumpRawConfig(acct *auth.Auth, raw []byte) {
+	dir := os.Getenv("OMNIGATE_DEBUG_CONFIG")
+	if dir == "" || len(raw) == 0 {
+		return
+	}
+	realm := "cn"
+	if tencentRegion(acct.Domain) {
+		realm = "global"
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("debug config dump: mkdir %s: %v", dir, err)
+		return
+	}
+	name := filepath.Join(dir, fmt.Sprintf("v3config-%s-%d.json", realm, time.Now().UnixNano()))
+	if err := os.WriteFile(name, raw, 0o600); err != nil {
+		log.Printf("debug config dump: write %s: %v", name, err)
+		return
+	}
+	log.Printf("debug config dump: %s (%d bytes)", name, len(raw))
+}
 
 // ConfigAPI 模型配置接口（腾讯客户端实现；华为无此端点）。
 type ConfigAPI interface {
@@ -109,6 +136,7 @@ func (c *TencentClient) FetchConfig(acct *auth.Auth) (*ModelConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	dumpRawConfig(acct, raw)
 	var env struct {
 		Code int64           `json:"code"`
 		Msg  string          `json:"msg"`
