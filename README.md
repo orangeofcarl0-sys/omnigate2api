@@ -1,10 +1,18 @@
 # OmniGate2API
 
-**v1.3.0** · MIT · [release notes](#特性总览) · 华为云 CodeArts Agent 的 OpenAI 兼容代理**增强版**
+**v1.4.0** · MIT · [release notes](RELEASE.md) · 华为云 CodeArts 与腾讯 WorkBuddy/CodeBuddy 的 OpenAI / Anthropic / Responses 兼容代理**增强版**
 
 ![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/orangeofcarl0-sys/omnigate2api?label=latest%20tag)
 
-> 无需运行 CodeArts Agent 客户端，纯 Go 直连华为云 API。在开源基线之上新增了对**活动（福利）模型**、**每日自动领取**、**真流式工具调用**、**长会话指纹续接**、**三协议入站（Anthropic / Responses）**、**工具层（投影/反监控）**与**限流治理**的完整支持，并附有离线集成测试与契约测试。核心卖点：**结构化的通用协议适配层**——上游差异全部声明化，内核与协议无关。
+> 无需运行任何官方客户端，纯 Go 直连**华为云 CodeArts** 与**腾讯 WorkBuddy/CodeBuddy**（国内 + 国际双域）两家上游。在开源基线之上新增了**双上游多账号池**、**活动（福利）模型与每日自动领取**、**真流式工具调用**、**长会话指纹续接**、**三协议入站（Anthropic / Responses）**、**腾讯积分全自动（签到/任务/宠物，国内域）**、**裸模型名路由**、**工具层（投影/反监控）**与**限流治理**，并附有离线集成测试与契约测试。核心卖点：**结构化的通用协议适配层**——上游差异全部声明化，内核与协议无关。
+
+## 最快上手
+
+```bash
+bash start.sh          # Linux/macOS；Windows 直接双击 start.cmd
+```
+
+就绪后打开面板 **http://127.0.0.1:7866/** 导入账号（华为 `./login.sh`；腾讯走面板「授权登录」或设备流，见[快速开始](#快速开始)），客户端 BaseURL = `http://127.0.0.1:7866/v1`（Anthropic 不带 `/v1`）。首次运行会自动从 `config.example.json` 生成 `config.json`；默认本地免密。
 
 ## 特性总览
 
@@ -109,11 +117,14 @@ flowchart TB
   积分+能量主来源）、宠物探险状态机（status/config/depart/claim，归来自动领分）
   与宠物激活（**免费领养优先**：桌面事件链→协议→`buddy/first`，实证 +300 积分 +8 能量；
   能量开盲盒兜底）；**成长中心任务全自动（SPEC §32.8/§32.9）**：当前赛季 **19 个任务中
-  16 个自动完成并领奖**（其余 3 个需真实捐款/关注动作或受夜猫时段限制），涵盖任务接单、
+  17 个自动完成并领奖**（余 2 个需真实捐款/关注动作），涵盖任务接单、
   每日桌面六连事件链与任务事件包（桌面 UA 门控）、专家/技能/主题/场景对象解析、web 域
   资料库事件；宠物探险循环实跑（派出→归来领分→再派）。活动面故障只记日志、
-  不影响聊天账号健康。**全球版（www.workbuddy.ai）实证无当前赛季活动**（仅遗留 stub 任务、
-  签到活动未开启、trial 已领），其价值定位为聊天额度（新注册账号 350 积分）。
+  不影响聊天账号健康。**全球版（www.workbuddy.ai）无积分活动体系，且从网关侧打不通
+  （SPEC §32.10）**：签到活动未开启、任务仅 5 条遗留 stub（accept 必 `task not found`）、
+  领养被 `first_buddy` 任务门挡住（该任务不在全球任务清单里）、trial 一次性已领；
+  两域 `/v3/config` 全量键路径审计亦无任何活动开关或入口，同时支持双区域的社区实现
+  也把成长任务/签到硬编码为 CN 专属——其价值定位为聊天额度（新注册账号 350 积分 + 免费促销模型）。
 - **全球域聊天契约（SPEC §28.4 G3）**：全球域要求**首条消息必须是 system prompt**，否则
   `400 + code=11128`（安全策略拦截）；网关在全球域账号上自动前置一条中性 system，
   国内域不注入。缺失该前置时全球账号会「看着健康却从不服务」——每次被轮询到都 400，
@@ -201,7 +212,8 @@ flowchart TB
 
 ### 稳定性与治理
 - **客户端取消豁免**：`context.Canceled/DeadlineExceeded` 不计账号错误、不触发冷却。
-- **MaaS 限流软冷却**：429/MaaS 错误 → 45 秒软冷却退避，SSE 错误负载携带
+- **MaaS 限流软冷却**：429/MaaS 限流错误 → 45 秒软冷却退避；额度类（quota/`14018`）→
+  60 秒软冷却**不累计**（华为福利额度为分钟级限流/次日重置，可自恢复）。SSE 错误负载携带
   `rate_limit_error`/`retryable` 提示。
 - 首字节超时 300s（冷启动/大会话不误杀）；上游不发显式终止帧直接 EOF 时
   合成 `finish_reason`。
@@ -209,9 +221,41 @@ flowchart TB
 ### 可观测性
 - 每轮折叠尺寸日志（`chat fold ... continue=true/false`）；
 - `TRANSCRIPT_ECHO` 漂移检测：模型输出中出现转录标记复述/编造时记录并落盘样本；
-- `OMNIGATE_DEBUG_PROMPTS` 开启折叠提示词全文落盘（`data/prompts/`）。
+- `OMNIGATE_DEBUG_PROMPTS` 开启折叠提示词全文落盘（`data/prompts/`）；
+- `OMNIGATE_DEBUG_CONFIG` 把上游 `/v3/config` 原始响应按区域落盘（上游审计：改解析前先列全部键路径，SPEC §33.3）。
 
 ## 快速开始
+
+### 一键启动（推荐：Docker）
+
+```bash
+bash start.sh          # 引擎没起就先起 Docker Desktop → 按需重建镜像 → 起容器 → 等 /healthz → 打印状态
+```
+
+把 `docker compose up -d --build` 收成一条，按顺序做四件事，任一步失败都能直接看懂原因：
+
+1. **引擎**：`docker info` 不通就 `docker desktop start` 并等就绪（默认上限 240s；Docker Desktop 未装则明确报错）；
+2. **要不要重建**：按**源码内容指纹**判断（`cmd/ internal/` + `Dockerfile go.mod go.sum`，指纹记在 `data/.build-fingerprint`）。
+   改过代码才重建（约 10s，走构建缓存），没改就直接起容器——日常一键不会白等一次编译；`--rebuild` 可强制；
+3. **起容器**：`docker compose up -d`（已在跑则不动它；首次运行会自动从 `config.example.json` 生成 `config.json`）；
+4. **等就绪**：轮询 `/healthz`（默认上限 120s）；失败时打印容器状态，并把日志里筛出的可疑行
+   （error/panic/端口相关，已滤掉例行 `account=` 调度行）单独列出来——比如容器其实监听在别的端口，
+   那条 `listening on :7866` 会直接指给你看。成功后打印账号数、模型目录数与面板地址。
+
+- **Windows 双击 `start.cmd`** 即可（自动找 Git Bash；跑完停在窗口里，按任意键关闭）。
+- **面板快捷入口**：双击 `panel.cmd`（等价于 `bash start.sh panel`）——网关没起就先起，
+  就绪后用默认浏览器打开面板；已在跑时约 4 秒直接开。**成功不留窗口**（浏览器接管），
+  失败才停在窗口里给原因（比如 Docker Desktop 起不来）。
+- 想要桌面图标：`powershell -NoProfile -ExecutionPolicy Bypass -File tools/create-shortcuts.ps1`
+  （`-StartMenu` 同时建到开始菜单，`-Remove` 删除）。快捷方式指向 `panel.cmd`。
+- 其余子命令：`status` / `restart` / `stop` / `down` / `logs`，另有 `--open`（启动后顺带开面板）、`--timeout`、`--ready-timeout`、`--help`。
+- 不碰 `auths/` `data/`：`stop` 只停容器（下次秒起），`down` 才删容器（数据仍在宿主目录）。
+- 鉴权提示会自动读 `OMNIGATE_API_KEY`（无则从 `.env` 读），所以开了鉴权时 `/healthz` 探测与 `/v1/models` 计数依然准。
+- 改过 `start.cmd` 请跑 `python tools/check-cmd-ascii.py`：`.cmd` 必须是纯 ASCII（cmd 的代码页/重定向解析
+  会把中文和 `|` 玩坏，详见 HANDOFF §14 第 16 条）；中文说明一律写在 `start.sh` 里。
+
+> Linux 上引擎已在跑时直接用同一条命令；本脚本只在引擎未起时才尝试拉起 Docker Desktop，
+> 所以它不会去动 systemd 的 docker 服务（服务器部署仍走 `deploy/omnigate2api.service`）。
 
 ### 登录（华为云账号）
 
@@ -230,14 +274,30 @@ flowchart TB
 > 监听并自动打开浏览器）。Windows 二进制可在含 Go 的容器中交叉编译，
 > 例如：`GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/omnigate2api-login.exe ./cmd/login`。
 
-### 启动
+### 腾讯渠道（workbuddy）登录与使用
 
 ```bash
-cp config.example.json config.json
-export OMNIGATE_API_KEY=你的随机密钥
-./bin/omnigate2api -config config.json        # Linux
-# Windows: .\bin\omnigate2api.exe -config config.json
+# 登录（设备流）：打印授权链接 → 浏览器完成授权 → poll 取凭证落盘
+docker compose exec omnigate2api omnigate2api-login-tencent url
+docker compose exec omnigate2api omnigate2api-login-tencent poll
 ```
+
+落盘后 `POST /admin/api/reload`（面板「重载 auths」）**热生效，无需重启**
+（`docker compose restart` 会顺带重置当日福利领取去重，仅在需要时用）；也可以直接用面板「授权登录」（v1.3 起内置设备流模态，授权后同样热入池）。
+
+- 凭证落盘 `auths/workbuddy-{uid}.json`（与华为 `codearts-*` 命名空间并存，家族隔离）；
+- **加国际版账号**必须带 `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 发起（区域由 base 决定，
+  不由账号决定；否则拿到的是国内登录页），完整步骤与注意事项见上文「多渠道上游」；
+- 使用：显式渠道用请求头 `X-Provider: workbuddy`；v1.3 起无需渠道头——直接发裸模型名，
+  网关按路由表自动分流（`kimi-k2.7` / `hy3` 等 → 腾讯，`glm-5.2` 等 → 华为），
+  路由表可在 WebUI「模型与路由」里增删改；
+- 腾讯侧功能：每日自动签到（幂等）+ 积分余额查询（`daily-checkin` /
+  `get-user-resource`），随调度器（北京时间）运行；
+- 积分口径（2026-09 修复）：`get-user-resource` 的可花费余额是**多套餐聚合**值，
+  响应为三层包裹 `data.Response.Data.Accounts`（早期漏解外层 `data` → 面板恒显示 0，
+  且业务码未判定，错误响应也被静默当成"余额 0"）。面板两处含义不同：账号列表「余额」
+  与成长中心「可用积分」= 可花费余额；成长中心「签到」列副行 = 活动期内累计签到获得
+  （`checkin-activity-status.total_credits`）。
 
 ### 验证 + WebUI
 
@@ -251,7 +311,7 @@ curl -X POST http://127.0.0.1:7866/v1/chat/completions \
 
 浏览器打开 **http://127.0.0.1:7866/** 即 WebUI：账号/token 状态、额度余额、模型与路由管理、调度状态。
 
-### Docker
+### Docker（手动方式）
 
 ```bash
 export OMNIGATE_API_KEY=你的随机密钥
@@ -260,26 +320,14 @@ cp config.example.json config.json   # 注意：示例须为严格 JSON
 docker compose up -d --build
 ```
 
-### 腾讯渠道（workbuddy）登录与使用
+### 裸二进制（备选）
 
 ```bash
-# 登录（设备流）：打印授权链接 → 浏览器完成授权 → poll 取凭证落盘
-docker compose exec omnigate2api omnigate2api-login-tencent url
-docker compose exec omnigate2api omnigate2api-login-tencent poll
-docker compose restart omnigate2api          # 新账号加载进池
+cp config.example.json config.json
+export OMNIGATE_API_KEY=你的随机密钥
+./bin/omnigate2api -config config.json        # Linux
+# Windows: .\bin\omnigate2api.exe -config config.json
 ```
-
-- 凭证落盘 `auths/workbuddy-{uid}.json`（与华为 `codearts-*` 命名空间并存，家族隔离）；
-- 使用：显式渠道用请求头 `X-Provider: workbuddy`；v1.3 起无需渠道头——直接发裸模型名，
-  网关按路由表自动分流（`kimi-k2.7` / `hy3` 等 → 腾讯，`glm-5.2` 等 → 华为），
-  路由表可在 WebUI「模型与路由」里增删改；
-- 腾讯侧功能：每日自动签到（幂等）+ 积分余额查询（`daily-checkin` /
-  `get-user-resource`），随调度器（北京时间）运行；
-- 积分口径（2026-09 修复）：`get-user-resource` 的可花费余额是**多套餐聚合**值，
-  响应为三层包裹 `data.Response.Data.Accounts`（早期漏解外层 `data` → 面板恒显示 0，
-  且业务码未判定，错误响应也被静默当成"余额 0"）。面板两处含义不同：账号列表「余额」
-  与成长中心「可用积分」= 可花费余额；成长中心「签到」列副行 = 活动期内累计签到获得
-  （`checkin-activity-status.total_credits`）。
 
 ## 环境变量
 
@@ -290,9 +338,19 @@ docker compose restart omnigate2api          # 新账号加载进池
 | `OMNIGATE_AUTH_DIR` | 凭证目录 | `./auths` |
 | `OMNIGATE_STATE_FILE` | 状态文件 | `./data/state.json` |
 | `OMNIGATE_DEFAULT_MODEL` | 默认模型 | `glm-5.2` |
-| `OMNIGATE_WATCH_ENABLED` | 调度器开关（续期/保活/福利领取） | `true` |
+| `OMNIGATE_WATCH_ENABLED` | 调度器开关（续期/保活/福利领取/腾讯签到任务） | `true` |
+| `OMNIGATE_WATCH_POLL_MINUTES` | 调度器轮询周期（分钟） | `30` |
+| `OMNIGATE_WATCH_REFRESH_SKEW` | token 刷新提前量（分钟） | `30` |
+| `OMNIGATE_WATCH_KEEPALIVE_INTERVAL` | 保活心跳间隔（分钟） | `15` |
+| `OMNIGATE_KEEPALIVE_WINDOW` | 保活窗口（窗口内活跃过的账号跳过保活） | `10m` |
+| `OMNIGATE_OAUTH_CALLBACK_HOST` | OAuth 回调主机（服务器无浏览器、需指定回调域名时） | 空=本机回调 |
+| `OMNIGATE_LOGIN_DEBUG` | 登录排查：打印 token 响应字段名/是否含 refresh_token | 关闭 |
+| `OMNIGATE_ACTIVITY_BASE` | 覆盖腾讯活动域 base（签到/任务/宠物；测试/实验） | 按账号区域 |
+| `OMNIGATE_BILLING_BASE` | 覆盖腾讯计费域 base（余额/签到；测试/实验） | 按账号区域 |
+| `OMNIGATE_ACTIVITY_PLATFORM` | 活动域请求 `X-Client-Platform` 头覆盖（实证用，一般不设） | 不发送 |
 | `OMNIGATE_MAX_CONCURRENT` | 单账号最大并发 | `5` |
 | `OMNIGATE_DEBUG_PROMPTS` | 折叠提示词落盘目录（可观测） | 关闭 |
+| `OMNIGATE_DEBUG_CONFIG` | `/v3/config` 原始响应按区域落盘目录（上游审计：改解析前先列全部键路径，SPEC §33.3） | 关闭 |
 | `OMNIGATE_SESSION_MODE` | 会话模式：`native`（默认，全量折叠）/ `incremental`（指纹增量 opt-in） | 空 → Profile 声明 |
 | `OMNIGATE_TOOLCHAIN` | 工具层覆盖：`none` / `project` / `sanitize` / `project,sanitize` | 空 → Profile 声明 |
 | `OMNIGATE_PROFILES_DIR` | 外部 Profile YAML 目录（多上游声明化接入） | 空 |
@@ -304,24 +362,37 @@ docker compose restart omnigate2api          # 新账号加载进池
 
 ## 目录结构（增补要点）
 
+- `cmd/` — 入口：`server`（网关本体）、`login` / `login-tencent`（华为/腾讯登录）、`credit`（积分/余额）、
+  `apply`（批量刷新临期凭证）、`probe`（上游形状实证与原样转储）
 - `internal/adapt/` — **通用协议适配层**：Profile（八组能力声明）、注册表（YAML 外部化/多上游）、
   守卫熔断器；内核与上游无关，接入新上游只写 Profile
-- `internal/upstream/` — 引擎/福利网关客户端、SSE 解析（增量流式化）
+- `internal/upstream/` — 双上游客户端：华为引擎/福利网关；腾讯五域（chat / 计费 / 活动 / 任务 / 埋点报告）、
+  模型配置（`v3/config` 促销判定）、SSE 解析（增量流式化）
 - `internal/server/` — 三协议路由（chat/anthropic/responses）、工具调用模拟层（围栏解析/转录识别/流式过滤器）、
-  协议无关流式管线与出站重建器、会话指纹索引、工具层（sanitize/project）、观测与集成测试
-- `internal/scheduler/` — 看门狗：token 续期、保活、**每日福利领取**
-- `internal/pool/` — 账号池：轮转、并发、冷却、持久化状态
+  协议无关流式管线与出站重建器、会话指纹索引、工具层（sanitize/project）、模型目录与路由面板、观测与集成测试
+- `internal/scheduler/` — 看门狗：token 续期、保活、**每日福利领取**，以及腾讯签到/成长任务/宠物探险/事件包
+- `internal/pool/` — 账号池：轮转、并发、冷却（账号级/模型级）、持久化状态
+- `start.sh` / `start.cmd` / `panel.cmd` — 一键启动与面板快捷入口（见[快速开始](#快速开始)）
+- `tools/` — 运维与守卫：pre-commit 脱敏钩子（`hooks/`）、`.cmd` ASCII 自查、客户端日志取证、快捷方式生成、
+  华为一键重登
+- `deploy/` — systemd unit（Linux 服务器）
+- `docs/` — `SPEC-adaptation-layer.md`（**单一真相源**，按版本累加章节）、`reverse-engineering.md`（脱敏口径与边界）
+- `auths/`、`data/` — 运行态（凭证 / 状态 / 路由表 / 调试转储），git 忽略
 
 ## 测试
 
 ```bash
 go test ./...        # 单元 + 集成（假上游驱动的离线集成测试，无需真实账号）
 go test -race ./...  # 竞争检测（需 CGO）
+
+# 无本机 Go 时，用与构建镜像相同的工具链：
+docker run --rm -v "$PWD":/src -v omni-gocache:/go -w /src \
+  -e GOPROXY=https://goproxy.cn,direct golang:1.24-alpine go test ./...
 ```
 
 ## 已知边界
 
-- 活动模型走 MaaS 网关，存在按分钟的 token 限流（429），已配 45s 软冷却；
+- 活动模型走 MaaS 网关，存在按分钟的 token 限流（429），已配 45s 软冷却（额度类 60s 不累计）；
   日常长会话建议主力模型用 `glm-5.2`（常规引擎，无 MaaS 限额）。
 - "叙述/编造"类输出是模型遵循度问题：代理侧做了结构抑制与检测，不保证 100% 根除；
   长会话下 flash 系模型漂移概率更高。

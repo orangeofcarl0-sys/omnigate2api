@@ -2,20 +2,20 @@
   "listen": ":7866",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
-  "default_model": "snap-chat",
+  "default_model": "glm-5.2",
   "oauth_callback_host": "",
   "cooldown": {
     "soft_rate": "60s",
     "err_threshold": 3,
     "err_cooldown": "10m"
   },
-  "max_concurrent": 5,           
-  "keepalive_window": "10m",     
+  "max_concurrent": 5,
+  "keepalive_window": "10m",
   "watch": {
     "enabled": true,
     "poll_minutes": 30,
     "refresh_skew_minutes": 30,
-    "keepalive_interval_minutes": 15  
+    "keepalive_interval_minutes": 15
   },
   "upstream": {
     "timeout_seconds": 120
