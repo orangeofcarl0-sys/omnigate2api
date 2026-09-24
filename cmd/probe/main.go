@@ -191,6 +191,14 @@ func main() {
 		panic(err)
 	}
 	defer rc.Close()
+	// rawdump：上游响应**原样**转储（SPEC §33.1 检查单第 1 步"抓真实响应、列全部键路径"）。
+	// 不做任何解析——派生的解析结果只会让我们看到"自己以为的形状"。
+	if mode == "rawdump" {
+		if _, err := io.Copy(os.Stdout, rc); err != nil {
+			panic(err)
+		}
+		return
+	}
 	br := bufio.NewReaderSize(rc, 64*1024)
 	n := 0
 	var lastText string

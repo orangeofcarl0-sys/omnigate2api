@@ -1532,13 +1532,30 @@ sequenceDiagram
 | `usage.*_tokens_details` 的 `accepted_prediction/audio/rejected_prediction_tokens` | 上游恒 0（实测），无信息量 |
 | `completion_thinking_tokens` | 与 `completion_tokens_details.reasoning_tokens` **实测一致**（515=515），取后者即可 |
 
+**C 级：华为家族原始帧枚举（44 帧，`cmd/probe … rawdump` 实测）**
+
+键路径：`choices[].delta.{role,content,reasoning_content}`、`choices[].{index,finish_reason}`、
+`id`/`model`/`object`/`created`、`usage.{prompt_tokens,completion_tokens,total_tokens,
+prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`，
+另有 `service_tier` 与 `first_token_return_time`（首字延迟）。
+
+| 项 | 判定 |
+|---|---|
+| `usage` 全部字段 | **已消费**（`cached_tokens`/`reasoning_tokens` 与腾讯同样取用） |
+| `service_tier` | 有意忽略：OpenAI 系字段，但当前无客户端展示需求、也不参与路由；要展示随时可加 |
+| `first_token_return_time` | 有意忽略：首字延迟，TTFT 类观测。**已知取舍**——加日志会变成每请求一行噪音，暂不采集 |
+| 华为 usage **无** `credit` / `cache_read_input_tokens` | 上游本就不下发（腾讯侧才有）；类型化 `Usage` 缺字段为零值，不会误报 |
+| **华为无前缀缓存** | 实测 3 轮同长前缀 `prompt_tokens_details.cached_tokens` 恒缺 → 前缀缓存是**腾讯侧特性**；"缓存命中"的讨论只涉腾讯家族 |
+
 ### 33.3 检查单（改动上游解析时逐条过）
 
 1. 抓真实响应，**列全部键路径**再改代码——不要按需解析；
 2. 流式与非流式**是两条解析路径**（`StreamDeltasWithTools` / `AggregateRaw`），改一条必须改另一条；
 3. 响应头也要看（对账标识、缓存状态）；
 4. 新增字段先问三个问题：客户端要用吗（可见性）？影响成本吗（用量/缓存/积分）？失败时排障要用吗（trace）；
-5. 每个"不消费"的字段都要写下理由，否则它下个月就会变成一次遗漏。
+5. 每个"不消费"的字段都要写下理由，否则它下个月就会变成一次遗漏；
+6. 工具就位：`cmd/probe "<prompt>" rawdump <model>` 原样转储上游响应（勿用派生结果做审计——
+   那只会让你看到"自己以为的形状"）。
 
 *文档状态：Draft v0.13。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
