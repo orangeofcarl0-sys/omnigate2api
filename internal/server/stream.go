@@ -86,6 +86,13 @@ func newSink(proto streamProtocol, w http.ResponseWriter, model string, isRateLi
 // 帧序契约：正文/调用增量全部发出后才允许终止帧）。
 func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, profile *adapt.UpstreamProfile, matchedKey string, rc io.ReadCloser) bool {
 	flt := newToolStreamFilter(sink)
+	// 围栏模拟是 **Profile 声明的能力**（Tool.FenceOpen，如华为 codearts）；原生 tools
+	// 上游（腾讯 roles）的正文**不得**经过围栏过滤器：
+	//   过滤器为了识别围栏前缀必须保留尾部未完成行（≤fenceRetainBytes），而原生
+	//   tool_calls 是绕过过滤器直发的 → "工具调用之前那行没有换行结尾的正文"被推迟到
+	//   流尾才随 flt.Close() 释放，客户端收到「工具调用 → 正文」——帧序颠倒。
+	//   实测（ZCode）：工具卡片跑到说明文字前面，且模型越常先说一句再调工具越容易发生。
+	fenceMode := profile != nil && profile.Tool.FenceOpen != ""
 	terminal := false
 	finishSeen := ""
 	var lastUpErr string
@@ -105,8 +112,12 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 			}
 		}
 		if content != "" {
-			if err := flt.FeedContent(content); err != nil {
-				return err
+			if fenceMode {
+				if err := flt.FeedContent(content); err != nil {
+					return err
+				}
+			} else if err := sink.Text(content); err != nil {
+				return err // 原生路径：正文按到达顺序直发（保持与 tool_calls 的相对次序）
 			}
 		}
 		if finish != "" {

@@ -561,6 +561,11 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 	finishSent := false
 	stitch := map[int]*ToolCall{}
 	flushed := false
+	// deferred 工具调用出现之后才到达的正文：原生 tool_calls 是在 flushTools()（终止
+	// 处）一次性发出的，若后面的正文即时透传就会跑在工具调用前面 —— 与上游帧序相反。
+	// 故先攒着，等工具调用发完再连同终止帧一起发出，保证「正文在调用前 / 正文在调用后」
+	// 两种相对次序都不被打乱。
+	var deferred strings.Builder
 	flushTools := func() {
 		if flushed || onTool == nil {
 			flushed = true
@@ -605,10 +610,18 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 			case l < beforeReason:
 				rd = reason.String()
 			}
+			if len(stitch) > 0 && cd != "" {
+				deferred.WriteString(cd) // 已出现工具调用增量：正文延后到调用之后
+				cd = ""
+			}
 			isFinish := strings.EqualFold(ev, "done") || strings.EqualFold(ev, "end") || strings.EqualFold(ev, "finish")
 			if isFinish {
 				finishSent = true
 				flushTools() // 工具调用须先于终止帧（帧序契约，§28.4 决策 D）
+				if deferred.Len() > 0 {
+					cd = deferred.String() + cd // 延后正文排在工具调用之后
+					deferred.Reset()
+				}
 			}
 			if cd != "" || rd != "" || isFinish {
 				finArg := ""
@@ -630,10 +643,11 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 	// isFinish），在此补发工具调用与终止回调——否则客户端收不到 finish chunk。
 	if !finishSent && streamErr == nil {
 		flushTools()
-		if finish != "" {
-			if e := onDelta("", "", finish, nil); e != nil {
+		if finish != "" || deferred.Len() > 0 {
+			if e := onDelta(deferred.String(), "", finish, nil); e != nil {
 				streamErr = e
 			}
+			deferred.Reset()
 		}
 	}
 	return &RawCompletion{Content: content.String(), Reasoning: reason.String(),

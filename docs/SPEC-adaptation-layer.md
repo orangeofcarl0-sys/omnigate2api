@@ -968,6 +968,20 @@ sequenceDiagram
 - 通道：`StreamDeltas` 增可选回调（可变参风格，既有调用零改动），中间流 →
   flt → sink.ToolCall 既有链路复用。
 - 回归面：codearts 折叠路径帧无 `delta.tool_calls`，行为不变。
+- **帧序不变量（v0.9 修，ZCode 实测）**：正文与 tool_calls 的相对次序必须与上游一致，
+  两侧都要成立——
+  ① **正文在调用之前**：原生 tools 路径（腾讯 roles）的正文**不得**经过围栏过滤器。
+     过滤器为识别 ```tool_call 前缀会保留尾部未完成行（≤`fenceRetainBytes`），而原生
+     tool_calls 绕过过滤器直发 → "调用前那行没有换行结尾的正文"被推迟到 `flt.Close()`
+     （流尾）才释放，客户端收到「工具调用 → 正文」。**实测症状**：ZCode 里工具卡片跑到
+     说明文字前面；模型越常"先说一句再调工具"越频繁。修法 = 按 Profile 声明的能力分流：
+     `Tool.FenceOpen != ""` 才走过滤器（华为 codearts），其余（腾讯 roles）正文经
+     `sink.Text` 直发。副作用：原生路径不再做围栏/括号叙述转换——这本就是为"上游无法
+     原生工具调用"设计的模拟层，而 handler 也**只对 FenceOpen 家族注入围栏指引**
+     （§31：对原生家族注入会误导模型弃用原生调用），故原生家族不会产生围栏标记。
+  ② **正文在调用之后**：`StreamDeltasWithTools` 在终止处才 `flushTools()` 一次性发调用，
+     若其后的正文即时透传就会跑到调用前面 → 已出现工具调用增量后到达的正文改为**延后**，
+     随终止帧一起补发（延后正文不得丢失，回归用例断言其仍下发）。
 
 **G2 refresh envelope**（severity: 高）
 - 解析先取 `{code, msg, data:{...}}`：`code==0` 成功、否则错误
