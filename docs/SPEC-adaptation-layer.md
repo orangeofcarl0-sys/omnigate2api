@@ -31,6 +31,10 @@
 > v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
 > `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
 > 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.12 变更：usage 增加**缓存命中与本次积分**（§16.4）——上游的
+> `prompt_cache_hit/miss/write_tokens`、`cache_read/creation_input_tokens`、`cached_tokens`
+> 与 `credit` 不再被丢弃，按协议落到标准位；并实测确认本项目**不打乱提示词前缀**、
+> 前缀缓存在网关后仍稳定命中（第 1 轮起 hit=1536、积分降至约 40%）。
 > v0.11 变更：出站 usage 改为**真实用量**（§16.4）——上游终帧的 `usage` 不再被丢弃，
 > 非流式取真实值、chat 流式按 `stream_options.include_usage` 补 usage chunk、
 > Anthropic 落在 `message_delta.usage`、Responses 落在 `response.completed.usage`。
@@ -594,6 +598,35 @@ writer 从同一数据源重建事件序列。守卫检测（transcriptEcho / no
 | anthropic 流式 | `message_delta.usage`（`input_tokens`/`output_tokens`） | Anthropic 承载**回合用量**的位置。`message_start.usage` 仍为 0：上游此时尚未给出用量，不臆造数字 |
 | anthropic 非流式 | `message.usage` | 同 chat 口径 |
 | responses 流式 | `response.completed.response.usage`（含 `total_tokens`） | 同上 |
+
+**缓存命中与积分（v0.12 起一并透传）**：上游 usage 里除标准三项外还有整套缓存与计费字段——
+`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` / `prompt_cache_write_tokens`、
+`cache_read_input_tokens` / `cache_creation_input_tokens`、`prompt_tokens_details.cached_tokens`、
+`completion_tokens_details.reasoning_tokens`，以及**本次积分 `credit`**。落点：
+
+| 协议 | 缓存位 | 积分位 |
+|---|---|---|
+| chat | `usage.prompt_tokens_details.cached_tokens`（OpenAI 标准位）+ `usage.cache_hit_tokens`/`cache_miss_tokens`/`cache_write_tokens`（上游扩展明细） | `usage.credit` |
+| anthropic | `usage.cache_read_input_tokens` / `cache_creation_input_tokens`（**Anthropic 原生字段名，上游同名下发，直接透传**） | 同左（无对应字段，不臆造） |
+| responses | `usage.input_tokens_details.cached_tokens` + `usage.credit` | `usage.credit` |
+
+**上下文（前缀）缓存不受本项目影响（2026-09-24 实测）**：上游按**请求内容前缀**缓存，
+粒度约 512 token 块。经网关连发同一长前缀实测：第 0 轮 `hit=0 miss=1687 credit=0.12`，
+第 1/2 轮 `hit=1536 miss=151 credit=0.05`——命中稳定，积分降到约 40%。
+不破坏缓存的原因（逐条核对过）：
+
+1. 两个 Profile 的 `session.kind` 均为 `none`：**每轮全量消息数组**，不做增量裁剪（增量裁剪才会改变上游看到的前缀）；
+2. 唯一改写落在**尾部**：围栏指引追加到最后一条 user 消息（`msgs[len-1].Text += block`）；
+3. 全球域的首条 system 前置（§28.4 G3）**在同一区域内恒定**，不产生轮间差异（区域间本就是不同缓存命名空间，见下）；
+4. 提示词里没有任何逐请求变化的内容（时间戳/随机 id 之类）。
+
+**两个需要知道的边界**：
+
+- **缓存按区域隔离**：实测国内账号写入的前缀，换全球账号请求时 `hit=0`（不同部署 = 不同缓存）；
+  而同区域内**跨账号共享**（全球账号 A 写入 → 全球账号 B 命中）。故号池在国内/全球之间轮换时，
+  跨区的第一次请求必然全量计费——这是区域部署差异，不是提示词改写造成的。
+- **开启 toolchain `project`/`sanitize` 会改写历史消息**（默认全关，SPEC §22）：那会改变前缀 →
+  必然打破前缀缓存。要省钱就别开这两个。
 
 **变更理由**：旧口径「流式一律省略 + 非流式一律估算」会让客户端"看 token"的需求落空
 （面板/客户端显示的用量与上游账单不一致）。真实用量本来就随流下发，丢掉它再自己估算是
@@ -1458,7 +1491,7 @@ sequenceDiagram
 - codearts text-only 的像素通道升级（probe 仅收集数据）；
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
-*文档状态：Draft v0.11。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+*文档状态：Draft v0.12。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

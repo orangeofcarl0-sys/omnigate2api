@@ -41,35 +41,79 @@ type RawCompletion struct {
 	Reasoning string
 	Finish    string
 	ToolCalls []ToolCall // 原生工具调用（delta.tool_calls 增量拼装；文本围栏路径为空）
-	// Usage 上游下发的真实 token 用量（终帧携带：prompt/completion/total）。
-	// 早期帧可能带全 0 占位，取最后一次非零；上游不回传时为空（调用方退化为估算）。
-	Usage map[string]int
+	// Usage 上游下发的真实用量（终帧携带，含缓存命中与积分）。
+	// 早期帧可能带全 0 占位，取最后一次非零；上游不回传时为 nil（调用方退化为估算）。
+	Usage *Usage
 }
 
-// usageFromFrame 提取 OpenAI 风格帧里的真实用量（全 0 占位视为未提供）。
-func usageFromFrame(data string) (map[string]int, bool) {
+// Usage 上游真实用量（终帧携带）。除标准三项外还含**缓存命中**与**本次积分消耗**——
+// 上游实测字段（2026-09-24）：prompt_cache_hit_tokens / prompt_cache_miss_tokens /
+// prompt_cache_write_tokens / cache_read_input_tokens / cache_creation_input_tokens /
+// prompt_tokens_details.cached_tokens / completion_tokens_details.reasoning_tokens / credit。
+// 这些数字客户端要用来算成本与看缓存效果，丢弃它们等于让用量显示与上游账单对不上。
+type Usage struct {
+	PromptTokens      int     `json:"prompt_tokens"`
+	CompletionTokens  int     `json:"completion_tokens"`
+	TotalTokens       int     `json:"total_tokens"`
+	ReasoningTokens   int     `json:"reasoning_tokens,omitempty"`
+	CachedTokens      int     `json:"cached_tokens,omitempty"` // OpenAI 标准位（prompt_tokens_details.cached_tokens）
+	CacheHitTokens    int     `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens   int     `json:"cache_miss_tokens,omitempty"`
+	CacheWriteTokens  int     `json:"cache_write_tokens,omitempty"`
+	CacheReadTokens   int     `json:"cache_read_input_tokens,omitempty"`     // Anthropic 命名
+	CacheCreateTokens int     `json:"cache_creation_input_tokens,omitempty"` // Anthropic 命名
+	Credit            float64 `json:"credit,omitempty"`                      // 本次积分消耗（上游 credit）
+}
+
+// Any 是否有任何非零用量（全 0 帧视为未提供）。
+func (u *Usage) Any() bool {
+	return u != nil && (u.PromptTokens > 0 || u.CompletionTokens > 0 || u.TotalTokens > 0 || u.Credit > 0)
+}
+
+// usageFromFrame 提取帧里的真实用量（全 0 占位视为未提供）。
+func usageFromFrame(data string) (*Usage, bool) {
 	var f struct {
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens     int     `json:"prompt_tokens"`
+			CompletionTokens int     `json:"completion_tokens"`
+			TotalTokens      int     `json:"total_tokens"`
+			Credit           float64 `json:"credit"`
+			CacheHit         int     `json:"prompt_cache_hit_tokens"`
+			CacheMiss        int     `json:"prompt_cache_miss_tokens"`
+			CacheWrite       int     `json:"prompt_cache_write_tokens"`
+			CacheRead        int     `json:"cache_read_input_tokens"`
+			CacheCreate      int     `json:"cache_creation_input_tokens"`
+			PromptDetails    struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(data), &f) != nil {
 		return nil, false
 	}
 	u := f.Usage
-	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 {
+	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 && u.Credit == 0 {
 		return nil, false
 	}
 	total := u.TotalTokens
 	if total == 0 {
 		total = u.PromptTokens + u.CompletionTokens
 	}
-	return map[string]int{
-		"prompt_tokens":     u.PromptTokens,
-		"completion_tokens": u.CompletionTokens,
-		"total_tokens":      total,
+	cached := u.CacheHit
+	if cached == 0 {
+		cached = u.PromptDetails.CachedTokens
+	}
+	if cached == 0 {
+		cached = u.CacheRead
+	}
+	return &Usage{
+		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, TotalTokens: total,
+		ReasoningTokens: u.CompletionDetails.ReasoningTokens, CachedTokens: cached,
+		CacheHitTokens: u.CacheHit, CacheMissTokens: u.CacheMiss, CacheWriteTokens: u.CacheWrite,
+		CacheReadTokens: u.CacheRead, CacheCreateTokens: u.CacheCreate, Credit: u.Credit,
 	}, true
 }
 
@@ -446,7 +490,7 @@ func AggregateRaw(r io.Reader) (*RawCompletion, error) {
 	)
 	var pendingEvent string
 	stitch := map[int]*ToolCall{}
-	var usage map[string]int
+	var usage *Usage
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -632,7 +676,7 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 	// 故先攒着，等工具调用发完再连同终止帧一起发出，保证「正文在调用前 / 正文在调用后」
 	// 两种相对次序都不被打乱。
 	var deferred strings.Builder
-	var usage map[string]int
+	var usage *Usage
 	flushTools := func() {
 		if flushed || onTool == nil {
 			flushed = true

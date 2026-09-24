@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"omnigate2api/internal/upstream"
 )
 
 // responsesSink /v1/responses 流式 writer。
@@ -26,13 +28,35 @@ type responsesSink struct {
 	done      bool
 	text      strings.Builder // 聚合文本（response.completed.output 用）
 	toolItems []any           // 已完成的 function_call 输出项
-	usage     map[string]int  // 上游真实用量（随 response.completed 下发）
+	usage     *upstream.Usage // 上游真实用量（随 response.completed 下发）
 }
 
 // Usage 收下上游真实用量；Responses 的用量挂在 response.completed.usage。
-func (s *responsesSink) Usage(u map[string]int) error {
+func (s *responsesSink) Usage(u *upstream.Usage) error {
 	s.usage = u
 	return nil
+}
+
+// responsesUsageJSON Responses 形状的用量：input/output/total + 缓存命中
+// （标准位 input_tokens_details.cached_tokens）+ 上游扩展项。
+func responsesUsageJSON(u *upstream.Usage) map[string]any {
+	if u == nil {
+		return nil
+	}
+	m := map[string]any{
+		"input_tokens": u.PromptTokens, "output_tokens": u.CompletionTokens,
+		"total_tokens": u.TotalTokens,
+	}
+	if u.CachedTokens > 0 {
+		m["input_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
+	}
+	if u.ReasoningTokens > 0 {
+		m["output_tokens_details"] = map[string]any{"reasoning_tokens": u.ReasoningTokens}
+	}
+	if u.Credit > 0 {
+		m["credit"] = u.Credit
+	}
+	return m
 }
 
 func newResponsesSink(w http.ResponseWriter, model string) *responsesSink {
@@ -221,12 +245,8 @@ func (s *responsesSink) Finish(fin string) error {
 		"id": s.id, "object": "response", "created_at": time.Now().Unix(),
 		"status": "completed", "model": s.model, "output": s.finishOutput(),
 	}
-	if len(s.usage) > 0 {
-		resp["usage"] = map[string]any{
-			"input_tokens":  s.usage["prompt_tokens"],
-			"output_tokens": s.usage["completion_tokens"],
-			"total_tokens":  s.usage["total_tokens"],
-		}
+	if u := responsesUsageJSON(s.usage); u != nil {
+		resp["usage"] = u
 	}
 	return s.writeData(map[string]any{"type": "response.completed", "response": resp})
 }
@@ -246,7 +266,7 @@ func (s *responsesSink) Error(msg string) error {
 // ---------------------------------------------------------------------------
 
 // buildResponsesResponse 非流式聚合 → Responses Response 对象。
-func buildResponsesResponse(model string, content string, calls []openAIToolCall, finish string, usage map[string]int) map[string]any {
+func buildResponsesResponse(model string, content string, calls []openAIToolCall, finish string, usage *upstream.Usage) map[string]any {
 	var output []any
 	if strings.TrimSpace(content) != "" {
 		output = append(output, map[string]any{
@@ -263,12 +283,6 @@ func buildResponsesResponse(model string, content string, calls []openAIToolCall
 	return map[string]any{
 		"id": "resp_" + randHex(24), "object": "response", "created_at": time.Now().Unix(),
 		"status": "completed", "model": model, "output": output,
-		"usage": map[string]any{
-			"input_tokens":          usage["prompt_tokens"],
-			"output_tokens":         usage["completion_tokens"],
-			"total_tokens":          usage["total_tokens"],
-			"input_tokens_details":  map[string]any{"cached_tokens": 0},
-			"output_tokens_details": map[string]any{"reasoning_tokens": 0},
-		},
+		"usage": responsesUsageJSON(usage),
 	}
 }

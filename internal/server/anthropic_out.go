@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"omnigate2api/internal/upstream"
 )
 
 // anthropicSink /v1/messages 流式 writer。
@@ -21,14 +23,33 @@ type anthropicSink struct {
 	textOpen   bool
 	toolOpen   bool
 	done       bool
-	usage      map[string]int // 上游真实用量（Usage() 交付，随 message_delta 下发）
+	usage      *upstream.Usage // 上游真实用量（Usage() 交付，随 message_delta 下发）
 }
 
 // Usage 收下上游真实用量；Anthropic 的用量出现在**终止事件** message_delta.usage，
 // 故这里只暂存，由 Finish 一并写出（message_start 时上游尚未给出用量，仍为 0）。
-func (s *anthropicSink) Usage(u map[string]int) error {
+func (s *anthropicSink) Usage(u *upstream.Usage) error {
 	s.usage = u
 	return nil
+}
+
+// anthropicUsageJSON Anthropic 形状的用量：input/output + **缓存读写**
+// （cache_read_input_tokens / cache_creation_input_tokens 是 Anthropic 的标准字段，
+// 上游同名下发，客户端据此显示缓存命中；缺失时不补 0 假数据）。
+func anthropicUsageJSON(u *upstream.Usage) map[string]any {
+	m := map[string]any{"input_tokens": 0, "output_tokens": 0}
+	if u == nil {
+		return m
+	}
+	m["input_tokens"] = u.PromptTokens
+	m["output_tokens"] = u.CompletionTokens
+	if u.CacheReadTokens > 0 {
+		m["cache_read_input_tokens"] = u.CacheReadTokens
+	}
+	if u.CacheCreateTokens > 0 {
+		m["cache_creation_input_tokens"] = u.CacheCreateTokens
+	}
+	return m
 }
 
 func newAnthropicSink(w http.ResponseWriter, model string) *anthropicSink {
@@ -174,11 +195,7 @@ func (s *anthropicSink) Finish(fin string) error {
 	s.done = true
 	// message_delta 是 Anthropic 承载**回合用量**的位置（客户端据此统计 token）；
 	// 上游给了真实用量就报真实值，否则至少报 0 而非缺字段。
-	deltaUsage := map[string]any{"output_tokens": 0, "input_tokens": 0}
-	if len(s.usage) > 0 {
-		deltaUsage["input_tokens"] = s.usage["prompt_tokens"]
-		deltaUsage["output_tokens"] = s.usage["completion_tokens"]
-	}
+	deltaUsage := anthropicUsageJSON(s.usage)
 	if err := s.writeEvent("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": anthropicStopReason(fin), "stop_sequence": nil},
@@ -220,7 +237,7 @@ func (s *anthropicSink) Error(msg string) error {
 
 // buildAnthropicMessage 非流式聚合 → Anthropic Message。
 // 工具 arguments（JSON 字符串）反序列化为 input 对象；usage 为估算值。
-func buildAnthropicMessage(model string, content string, calls []openAIToolCall, finish string, usage map[string]int) map[string]any {
+func buildAnthropicMessage(model string, content string, calls []openAIToolCall, finish string, usage *upstream.Usage) map[string]any {
 	var blocks []any
 	if strings.TrimSpace(content) != "" {
 		blocks = append(blocks, map[string]any{"type": "text", "text": content})
@@ -232,7 +249,7 @@ func buildAnthropicMessage(model string, content string, calls []openAIToolCall,
 		}
 		blocks = append(blocks, map[string]any{"type": "tool_use", "id": c.ID, "name": c.Name, "input": input})
 	}
-	u := map[string]any{"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]}
+	u := anthropicUsageJSON(usage)
 	return map[string]any{
 		"id": "msg_" + randHex(24), "type": "message", "role": "assistant",
 		"model": model, "content": blocks,

@@ -42,15 +42,11 @@ type chatSink struct {
 
 // Usage 上游真实用量 → OpenAI 的 usage chunk（choices 为空，位于终止帧之前）。
 // 仅当调用方显式请求（stream_options.include_usage）时下发，与 OpenAI 行为一致。
-func (s *chatSink) Usage(u map[string]int) error {
-	if !s.includeUsage || len(u) == 0 {
+func (s *chatSink) Usage(u *upstream.Usage) error {
+	if !s.includeUsage || !u.Any() {
 		return nil
 	}
-	return s.sw.Usage(map[string]any{
-		"prompt_tokens":     u["prompt_tokens"],
-		"completion_tokens": u["completion_tokens"],
-		"total_tokens":      u["total_tokens"],
-	})
+	return s.sw.Usage(openAIUsageJSON(u))
 }
 
 func (s *chatSink) Text(t string) error {
@@ -101,7 +97,7 @@ func newSink(proto streamProtocol, w http.ResponseWriter, model string, isRateLi
 // usageSink 可选能力：把上游真实用量交给 writer，由各协议决定线格式
 // （OpenAI → usage chunk；Anthropic → message_delta.usage；Responses → response.completed.usage）。
 // 用可选接口而非扩展 streamSink，是为了不动既有三个 writer 与它们的测试。
-type usageSink interface{ Usage(u map[string]int) error }
+type usageSink interface{ Usage(u *upstream.Usage) error }
 
 func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, profile *adapt.UpstreamProfile, matchedKey string, rc io.ReadCloser) bool {
 	flt := newToolStreamFilter(sink)
@@ -190,7 +186,7 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 		fin = "stop"
 	}
 	// 真实用量先于终止帧下发（各协议在自己该在的位置呈现它）。
-	if comp != nil && len(comp.Usage) > 0 {
+	if comp != nil && comp.Usage.Any() {
 		if us, ok := sink.(usageSink); ok {
 			if err := us.Usage(comp.Usage); err != nil {
 				log.Printf("chat stream account=%s usage error: %v", acct.Name, err)

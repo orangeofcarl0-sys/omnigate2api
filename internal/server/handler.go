@@ -761,7 +761,7 @@ func renderRolesMessages(msgs []openAIMessage) []upstream.ChatMessage {
 }
 
 // buildCompletion 组装非流式响应。
-func buildCompletion(model, reasoning, content string, calls []openAIToolCall, finish, chatID string, usage map[string]int) map[string]any {
+func buildCompletion(model, reasoning, content string, calls []openAIToolCall, finish, chatID string, usage *upstream.Usage) map[string]any {
 	message := map[string]any{"role": "assistant"}
 	if len(calls) > 0 {
 		message["tool_calls"] = toOpenAIToolCalls(calls)
@@ -785,7 +785,7 @@ func buildCompletion(model, reasoning, content string, calls []openAIToolCall, f
 		"chat_id": chatID,
 	}
 	if usage != nil {
-		resp["usage"] = usage
+		resp["usage"] = openAIUsageJSON(usage)
 	}
 	return resp
 }
@@ -799,17 +799,50 @@ func tokensApprox(s string) int {
 	return len([]rune(s))/4 + 1
 }
 
-// usageEstimate 用量结算：**优先上游真实 usage**（终帧携带），缺失才退化到估算。
-func usageEstimate(msgs []upstream.ChatMessage, comp *upstream.RawCompletion) map[string]int {
-	if comp != nil && len(comp.Usage) > 0 {
+// usageEstimate 用量结算：**优先上游真实 usage**（终帧携带，含缓存命中与积分），
+// 仅当上游未回传时才退化为 len/4+1 估算。
+func usageEstimate(msgs []upstream.ChatMessage, comp *upstream.RawCompletion) *upstream.Usage {
+	if comp != nil && comp.Usage.Any() {
 		return comp.Usage
 	}
 	var pt int
 	for _, m := range msgs {
 		pt += tokensApprox(m.Content)
 	}
-	ct := tokensApprox(comp.Content) + tokensApprox(comp.Reasoning)
-	return map[string]int{"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+	ct := 0
+	if comp != nil {
+		ct = tokensApprox(comp.Content) + tokensApprox(comp.Reasoning)
+	}
+	return &upstream.Usage{PromptTokens: pt, CompletionTokens: ct, TotalTokens: pt + ct}
+}
+
+// openAIUsageJSON OpenAI 形状的 usage：标准三项 + 缓存命中（标准位
+// prompt_tokens_details.cached_tokens）+ 推理 token + 上游扩展（cache_* 明细、credit 积分）。
+// 上游给了就报，没给就不编（缺字段而非补 0 假数据）。
+func openAIUsageJSON(u *upstream.Usage) map[string]any {
+	if u == nil {
+		return nil
+	}
+	m := map[string]any{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.TotalTokens,
+	}
+	if u.CachedTokens > 0 {
+		m["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
+	}
+	if u.ReasoningTokens > 0 {
+		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.ReasoningTokens}
+	}
+	if u.CacheHitTokens > 0 || u.CacheMissTokens > 0 || u.CacheWriteTokens > 0 {
+		m["cache_hit_tokens"] = u.CacheHitTokens
+		m["cache_miss_tokens"] = u.CacheMissTokens
+		m["cache_write_tokens"] = u.CacheWriteTokens
+	}
+	if u.Credit > 0 {
+		m["credit"] = u.Credit
+	}
+	return m
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

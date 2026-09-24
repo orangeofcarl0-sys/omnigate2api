@@ -21,12 +21,17 @@ const (
 	upTotalTokens  = 1801
 )
 
-// usageServer 假上游：正文 + 终帧携带真实 usage（protoTestServer 已配好三协议 Profile）。
+// usageServer 假上游：正文 + 终帧携带真实 usage（含上游实有的缓存命中与积分字段）。
+// protoTestServer 已配好三协议 Profile。
 func usageServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	stream := orderFrame(map[string]any{"content": "你好"}, "") +
 		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],` +
-		`"usage":{"prompt_tokens":1234,"completion_tokens":567,"total_tokens":1801}}` + "\n\n" +
+		`"usage":{"prompt_tokens":1234,"completion_tokens":567,"total_tokens":1801,` +
+		`"credit":0.12,"prompt_cache_hit_tokens":1024,"prompt_cache_miss_tokens":210,` +
+		`"prompt_cache_write_tokens":0,"cache_read_input_tokens":1024,"cache_creation_input_tokens":0,` +
+		`"prompt_tokens_details":{"cached_tokens":1024},` +
+		`"completion_tokens_details":{"reasoning_tokens":88}}}` + "\n\n" +
 		"data: [DONE]\n\n"
 	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -44,14 +49,50 @@ func TestUsageNonStreamUsesUpstreamNumbers(t *testing.T) {
 		t.Fatalf("status=%d body=%s", code, truncateText(string(raw), 200))
 	}
 	var resp struct {
-		Usage map[string]int `json:"usage"`
+		Usage struct {
+			Prompt     int `json:"prompt_tokens"`
+			Completion int `json:"completion_tokens"`
+			Total      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Usage["prompt_tokens"] != upPromptTokens || resp.Usage["completion_tokens"] != upComplTokens ||
-		resp.Usage["total_tokens"] != upTotalTokens {
-		t.Fatalf("usage must be the upstream's real numbers, got %v", resp.Usage)
+	if resp.Usage.Prompt != upPromptTokens || resp.Usage.Completion != upComplTokens ||
+		resp.Usage.Total != upTotalTokens {
+		t.Fatalf("usage must be the upstream's real numbers, got %+v", resp.Usage)
+	}
+}
+
+// 非流式：缓存命中与积分（上游 credit）要一并报出，否则客户端看不到真实成本与缓存效果。
+func TestUsageReportsCacheAndCredit(t *testing.T) {
+	srv := usageServer(t)
+	body := `{"model":"glm-5.2","stream":false,"messages":[{"role":"user","content":"你好"}]}`
+	raw, code := postChat(t, srv, body)
+	if code != 200 {
+		t.Fatalf("status=%d", code)
+	}
+	var resp struct {
+		Usage struct {
+			Credit       float64 `json:"credit"`
+			CacheHit     int     `json:"cache_hit_tokens"`
+			CacheMiss    int     `json:"cache_miss_tokens"`
+			PromptDetail struct {
+				Cached int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.Credit != 0.12 {
+		t.Fatalf("credit must be reported (上游 credit), got %v", resp.Usage.Credit)
+	}
+	if resp.Usage.CacheHit != 1024 || resp.Usage.CacheMiss != 210 {
+		t.Fatalf("cache hit/miss must be reported, got hit=%d miss=%d", resp.Usage.CacheHit, resp.Usage.CacheMiss)
+	}
+	if resp.Usage.PromptDetail.Cached != 1024 {
+		t.Fatalf("OpenAI 标准位 prompt_tokens_details.cached_tokens 必须填, got %d", resp.Usage.PromptDetail.Cached)
 	}
 }
 
@@ -130,7 +171,14 @@ func TestUsageResponsesCompleted(t *testing.T) {
 	if line == "" {
 		t.Fatalf("response.completed missing:\n%s", truncateText(out, 500))
 	}
-	if !strings.Contains(line, `"usage":{"input_tokens":1234`) || !strings.Contains(line, `"total_tokens":1801`) {
-		t.Fatalf("response.completed must carry real usage:\n%s", truncateText(line, 400))
+	// 注意别依赖 JSON 键顺序：Go 的 map 按字母序输出（credit 会排在 input_tokens 前面），
+	// 形如 "usage":{"input_tokens":… 的字面量匹配会假失败。
+	for _, want := range []string{
+		`"input_tokens":1234`, `"output_tokens":567`, `"total_tokens":1801`,
+		`"input_tokens_details":{"cached_tokens":1024}`, `"credit":0.12`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("response.completed 缺 %s：%s", want, truncateText(line, 400))
+		}
 	}
 }
