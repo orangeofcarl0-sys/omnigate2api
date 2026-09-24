@@ -72,68 +72,128 @@ type chatRequest struct {
 	Gen map[string]any
 }
 
-// genParamOrder 生成参数的**固定**透传顺序（别名归一靠先到者优先，故不能用 map 遍历：
-// map 顺序随机会让 max_tokens 与 max_completion_tokens 谁生效变得不可预测）。
+// generateParamPolicy 发送侧形态纪律（SPEC §33.4）：**我们发什么由官方客户端的形态决定**，
+// 而不是由"上游恰好接受"决定——上游多认一个字段，不代表客户端可以发它：请求形态本身就是
+// 指纹，官方客户端没有的控件出现在我们的 body 里，就是可被识别的差异。
+//
+//   - forward：官方客户端自己会发（或其模型配置驱动的）参数 → 透传；
+//   - default-only：官方没有该控件，但 OpenAI 客户端常带默认值 → **默认值静默放行、非默认值拒绝**
+//     （既不产生形态差异，也不做静默失效）；
+//   - 其余键（n>1 / logit_bias / user …）一律拒绝。
+type genPolicy int
+
+const (
+	genForward     genPolicy = iota // 透传
+	genDefaultOnly                  // 仅默认值放行
+)
+
+// genParamOrder 固定处理顺序（别名归一取先者，故不能用 map 遍历）。
 var genParamOrder = []string{
 	"max_tokens", "max_completion_tokens", "max_output_tokens",
-	"temperature", "top_p", "stop", "stop_sequences",
-	"seed", "frequency_penalty", "presence_penalty",
-	"logprobs", "top_logprobs", "response_format", "reasoning_effort",
+	"temperature", "top_p", "reasoning_effort",
+	"stop", "stop_sequences", "seed",
+	"frequency_penalty", "presence_penalty", "logprobs", "top_logprobs",
+	"n", "response_format",
 }
 
-// genParamAlias 入站键 → 上游键（三协议共用同一张表：anthropic 的 stop_sequences 与
-// chat 的 stop、responses 的 max_output_tokens 与 chat 的 max_tokens 都归一到上游字段）。
-var genParamAlias = map[string]string{
-	"max_tokens":            "max_tokens",
-	"max_completion_tokens": "max_tokens",
-	"max_output_tokens":     "max_tokens",
-	"temperature":           "temperature",
-	"top_p":                 "top_p",
-	"stop":                  "stop",
-	"stop_sequences":        "stop",
-	"seed":                  "seed",
-	"frequency_penalty":     "frequency_penalty",
-	"presence_penalty":      "presence_penalty",
-	"logprobs":              "logprobs",
-	"top_logprobs":          "top_logprobs",
-	"response_format":       "response_format",
-	"reasoning_effort":      "reasoning_effort",
+// genParamPolicy 各入站键的策略与上游字段名。
+var genParamPolicy = map[string]struct {
+	upstream string
+	policy   genPolicy
+}{
+	"max_tokens":            {"max_tokens", genForward},
+	"max_completion_tokens": {"max_tokens", genForward},
+	"max_output_tokens":     {"max_tokens", genForward},
+	"temperature":           {"temperature", genForward},
+	"top_p":                 {"top_p", genForward},
+	"reasoning_effort":      {"reasoning_effort", genForward},
+
+	"stop":              {"stop", genDefaultOnly},
+	"stop_sequences":    {"stop", genDefaultOnly},
+	"seed":              {"seed", genDefaultOnly},
+	"frequency_penalty": {"frequency_penalty", genDefaultOnly},
+	"presence_penalty":  {"presence_penalty", genDefaultOnly},
+	"logprobs":          {"logprobs", genDefaultOnly},
+	"top_logprobs":      {"top_logprobs", genDefaultOnly},
+	"n":                 {"n", genDefaultOnly},
+	"response_format":   {"response_format", genDefaultOnly},
 }
 
-// parseGenParams 从原始请求体提取要透传给上游的生成参数：
-// 白名单（只转已验证上游接受的键）+ 别名归一 + 空值剔除。
-// 空串/null 视为"未指定"，不落键（避免用空值覆盖上游默认）。
-func parseGenParams(body []byte) map[string]any {
+// isDefaultValue 判定"该键取默认值"（默认值不改变输出，故放行且不透传）。
+func isDefaultValue(key string, v any) bool {
+	switch key {
+	case "stop", "stop_sequences":
+		if v == nil {
+			return true
+		}
+		if arr, ok := v.([]any); ok {
+			return len(arr) == 0
+		}
+		return false
+	case "seed", "frequency_penalty", "presence_penalty", "top_logprobs":
+		f, ok := v.(float64)
+		return ok && f == 0
+	case "logprobs":
+		b, ok := v.(bool)
+		return ok && !b
+	case "n":
+		f, ok := v.(float64)
+		return ok && f == 1
+	case "response_format":
+		m, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		t, _ := m["type"].(string)
+		return t == "" || t == "text"
+	}
+	return false
+}
+
+// parseGenParams 提取要透传给上游的生成参数；返回 (参数, 违规键)。
+// 违规键（非默认值且官方客户端形态里没有）→ 调用方回 400，**绝不静默丢弃**。
+func parseGenParams(body []byte) (map[string]any, []string) {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(body, &raw) != nil {
-		return nil
+		return nil, nil
 	}
 	out := map[string]any{}
+	var rejected []string
 	for _, in := range genParamOrder {
 		rv, ok := raw[in]
 		if !ok {
 			continue
 		}
 		var v any
-		if json.Unmarshal(rv, &v) != nil {
+		if json.Unmarshal(rv, &v) != nil || v == nil {
 			continue
 		}
-		if s, isStr := v.(string); isStr && strings.TrimSpace(s) == "" {
+		if sv, isStr := v.(string); isStr && strings.TrimSpace(sv) == "" {
 			continue
 		}
-		if v == nil {
+		spec := genParamPolicy[in]
+		if spec.policy == genDefaultOnly {
+			if !isDefaultValue(in, v) {
+				rejected = append(rejected, in)
+			}
+			continue // 默认值：放行但不透传（不给上游添官方没有的字段）
+		}
+		if _, exists := out[spec.upstream]; exists {
 			continue
 		}
-		up := genParamAlias[in]
-		if _, exists := out[up]; exists {
-			continue // 别名并存：按 genParamOrder 取先者（max_tokens 优先）
-		}
-		out[up] = v
+		out[spec.upstream] = v
 	}
 	if len(out) == 0 {
-		return nil
+		out = nil
 	}
-	return out
+	return out, rejected
+}
+
+// unsupportedParamsError 违规参数的统一错误文案（列出键名与原因，便于调用方自查）。
+func unsupportedParamsError(keys []string) string {
+	return "unsupported parameter(s): " + strings.Join(keys, ", ") +
+		" — 本网关按官方客户端请求形态转发（发送形态即指纹，SPEC §33.4）；" +
+		"请移除这些参数后重试（默认值可保留）"
 }
 
 // parseChatRequest 解析并校验请求体。
@@ -162,8 +222,12 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 		Tools:          raw.Tools,
 		ToolChoice:     parseToolChoice(raw.ToolChoice),
 		IncludeUsage:   raw.StreamOptions != nil && raw.StreamOptions.IncludeUsage,
-		Gen:            parseGenParams(body),
 	}
+	gen, rejected := parseGenParams(body)
+	if len(rejected) > 0 {
+		return nil, errors.New(unsupportedParamsError(rejected))
+	}
+	req.Gen = gen
 	for i, rm := range raw.Messages {
 		m, err := parseMessage(rm)
 		if err != nil {

@@ -52,10 +52,14 @@ func parseAnthropicRequest(body []byte) (*chatRequest, error) {
 		Model:      raw.Model,
 		Stream:     raw.Stream,
 		ToolChoice: parseAnthropicToolChoice(raw.ToolChoice),
-		// 生成参数同样透传（anthropic 的 max_tokens/temperature/top_p/stop_sequences
-		// 经 genParamAlias 归一到上游字段；anthropic 的 max_tokens 是必填项）。
-		Gen: parseGenParams(body),
 	}
+	// 生成参数按官方形态纪律处理（§33.4）：anthropic 的 max_tokens/temperature/top_p 透传，
+	// stop_sequences 属官方无控件项 → 非默认值拒绝。
+	gen, rejected := parseGenParams(body)
+	if len(rejected) > 0 {
+		return nil, errors.New(unsupportedParamsError(rejected))
+	}
+	req.Gen = gen
 	if raw.Tools != nil {
 		req.Tools = anthropicToolsToOpenAI(raw.Tools)
 	}
@@ -345,9 +349,12 @@ func parseResponsesRequest(body []byte) (*chatRequest, error) {
 		Model:      raw.Model,
 		Stream:     raw.Stream,
 		ToolChoice: parseResponsesToolChoice(raw.ToolChoice),
-		// responses 的 max_output_tokens/temperature/top_p 同样归一到上游字段。
-		Gen: parseGenParams(body),
 	}
+	gen, rejected := parseGenParams(body)
+	if len(rejected) > 0 {
+		return nil, errors.New(unsupportedParamsError(rejected))
+	}
+	req.Gen = gen
 	if raw.Tools != nil {
 		req.Tools = responsesToolsToOpenAI(raw.Tools)
 	}

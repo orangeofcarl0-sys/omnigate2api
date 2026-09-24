@@ -31,6 +31,10 @@
 > v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
 > `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
 > 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.14 变更：发送侧形态纪律（§33.4）——**发什么由官方客户端形态决定，而非"上游恰好接受"**：
+> `temperature`/`top_p`/`max_tokens`/`reasoning_effort` 透传；官方客户端没有的控件
+> （stop/seed/penalties/logprobs/n/response_format）默认值放行、**非默认值 400**（不再静默失效、
+> 也不制造形态差异）；实测上游只认 OpenAI 风格 `max_tokens`（camelCase 名被忽略）。
 > v0.13 变更：上游信息整体对账（§33）——修两处 A 级遗漏：**客户端生成参数此前全部被静默丢弃**
 > （temperature/top_p/stop/seed/max_tokens… 现经白名单透传，实测生效）、上游响应头对账标识；
 > 并把"抓全量键路径再改代码"固化为检查单（流式/非流式两条解析路径必须同改）。
@@ -1547,6 +1551,39 @@ prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`
 | 华为 usage **无** `credit` / `cache_read_input_tokens` | 上游本就不下发（腾讯侧才有）；类型化 `Usage` 缺字段为零值，不会误报 |
 | **华为无前缀缓存** | 实测 3 轮同长前缀 `prompt_tokens_details.cached_tokens` 恒缺 → 前缀缓存是**腾讯侧特性**；"缓存命中"的讨论只涉腾讯家族 |
 
+### 33.4 发送侧形态纪律（v0.14）
+
+**原则**：**我们发什么，由官方客户端的形态决定，而不是由"上游恰好接受"决定。** 上游多认一个
+字段，不代表客户端可以发它——请求形态本身就是指纹，官方客户端没有的控件出现在我们的 body 里
+就是可识别的差异。接收侧可以尽量全量吸收（§33.2），发送侧必须收敛。
+
+**取证（2026-09-24）**
+
+| 事实 | 来源 |
+|---|---|
+| 官方请求体尾部为 `…,"tool_choice":"auto","stream":true}` | 官方客户端日志（一条 429 记录连 body 一起打印） |
+| 官方**按模型**下发并应用 `temperature` / `top_p`（如 `"temperature":0.9,"top_p":1`） | 官方客户端日志的模型配置 |
+| 官方启用 `enableRequestBodyGzip`（body 663906 → 426140 字节，省 35.8%） | 官方客户端日志 |
+| 上游**只认 OpenAI 风格 `max_tokens`**：`max_tokens=16 → finish=length`；而遥测/配置里的 camelCase 名 `maxToken=16`、`maxOutputTokens=16` **被忽略**（`finish=stop`） | 直连实测 |
+
+**三档策略**
+
+| 档 | 键 | 行为 |
+|---|---|---|
+| forward（官方会发/其模型配置驱动） | `max_tokens`（并入 `max_completion_tokens` / `max_output_tokens` 别名）、`temperature`、`top_p`、`reasoning_effort` | 透传上游 |
+| default-only（官方无此控件，但 OpenAI 客户端常带默认值） | `stop`/`stop_sequences`、`seed`、`frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`n`、`response_format` | **默认值静默放行且不透传**（无形态差异）；**非默认值 → 400 并点名违规键** |
+| 其余键 | `logit_bias`/`user`/… | 非默认值一律 400 |
+
+**为什么是 400 而不是静默丢弃**：静默丢弃 = 客户端以为生效（这正是上一轮修掉的 bug）；
+透传 = 形态差异（指纹风险）。400 同时避开两者，且把"本网关按官方形态转发"写在错误文案里。
+
+**已知差异（暂不对齐，待验证影响）**：官方客户端在 body 较大时做 **gzip 请求体**
+（`Content-Encoding: gzip`），我们未做。历史上我们的非压缩请求一直正常（未被拦），
+故暂列为已知差异而非缺陷；若日后需要完全对齐，实现点是 `ChatStream` 组装 body 后按大小阈值压缩。
+
+**取证工具**：`tools/extract-client-request.py <客户端日志>` 抽官方真实请求体；
+`cmd/probe "…" rawdump <model>` 抓上游原样响应（§33.1 第 1 步）。
+
 ### 33.3 检查单（改动上游解析时逐条过）
 
 1. 抓真实响应，**列全部键路径**再改代码——不要按需解析；
@@ -1557,7 +1594,7 @@ prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`
 6. 工具就位：`cmd/probe "<prompt>" rawdump <model>` 原样转储上游响应（勿用派生结果做审计——
    那只会让你看到"自己以为的形状"）。
 
-*文档状态：Draft v0.13。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+*文档状态：Draft v0.14。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

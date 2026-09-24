@@ -134,6 +134,11 @@ flowchart TB
   文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
   解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
   「模型限流 xxx(剩余分钟)」。账号级积分耗尽（`14018 额度已用尽`）另行归硬额度处理。
+- **发送侧形态纪律（SPEC §33.4）**：发什么**由官方客户端形态决定**（请求形态即指纹）——
+  `temperature`/`top_p`/`max_tokens`/`reasoning_effort` 透传；官方客户端没有的控件
+  （`stop`/`seed`/`frequency_penalty`/`presence_penalty`/`logprobs`/`top_logprobs`/`n`/
+  `response_format`）**默认值放行、非默认值返回 400 并点名违规键**（既不静默失效，也不制造
+  可识别的形态差异）。实测上游只认 OpenAI 风格 `max_tokens`（`maxToken`/`maxOutputTokens` 被忽略）。
 - **客户端生成参数透传（SPEC §23.1）**：`max_tokens` / `max_completion_tokens` / `max_output_tokens`
   （三者统一归一到上游 `max_tokens`）、`temperature`、`top_p`、`stop` / `stop_sequences`、`seed`、
   `frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`response_format`、
