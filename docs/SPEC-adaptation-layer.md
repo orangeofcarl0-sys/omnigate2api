@@ -31,6 +31,9 @@
 > v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
 > `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
 > 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.10 变更：标准供应商等价面（§29.3）——`GET /v1/models/{id}`（检索单个）、
+> Anthropic 调用方按 `anthropic-version` 分流得到 Anthropic 信封（含 limit/游标分页）、
+> 鉴权同时接受 `x-api-key`。
 > v0.9 变更：模型级限流与传输层有界（§28.4.1）——429+code 6004 按 (账号, 模型) 冷却到上游
 > 声明的解封时刻并轮换（不再整账号软冷却）；自建 Transport 补 DialContext/TLS 握手超时，
 > 修掉"区域不可达 → 请求静默挂死、不换号"导致号池自动切换失效的问题。
@@ -1106,6 +1109,18 @@ sequenceDiagram
 - 带 `X-Provider: codearts|workbuddy`：该家族全量清单（调试/管理视角，可能含未注册裸名）；
 - WebUI 管理页基于「两家族目录并集 + 路由表」的联合视图编辑（§29.7.3）。
 
+**标准供应商等价面（v0.9 补）**：模型信息要能被"正常供应商"那套客户端直接取用，三处缺一不可：
+
+| 入口 | 形状 | 说明 |
+|---|---|---|
+| `GET /v1/models`（OpenAI 调用方） | `{object:"list", data:[{id,object,created,owned_by,...}]}` | 标准四字段齐备；额外字段（`family`/`access*`/`multiplier`/`available_families` 等）为**附加**，合规客户端忽略未知键 |
+| `GET /v1/models`（Anthropic 调用方） | `{data:[{type:"model",id,display_name,created_at}], has_more, first_id, last_id}` | **信封不同，同路径必须按协议分流**：`anthropic-version` 是 Anthropic SDK/CLI 的恒发头（OpenAI 系不带）；支持 `limit`（默认 20，1..1000) 与 `after_id`/`before_id` 游标 |
+| `GET /v1/models/{id}` | OpenAI：条目本身；Anthropic：`{type:"model",…}` | 标准「检索单个模型」。未注册 → 各自协议的错误信封 + 404：OpenAI `model_not_found`（与 §29 C1 禁用语义一致）、Anthropic `{type:"error",error:{type:"not_found_error"}}` |
+
+**鉴权同时接受两种标准头**：`Authorization: Bearer <key>`（OpenAI 系）与 `x-api-key: <key>`
+（Anthropic 系，SDK 只发后者）。只认前者会让 Claude Code 这类客户端在设置了 `OMNIGATE_API_KEY`
+时全部 401——本地免密模式下不会暴露，属"部署后才炸"的坑。
+
 ### 29.4 管理 API（Bearer 保护，与既有 /admin/api/* 一致）
 
 | 端点 | 语义 |
@@ -1425,7 +1440,7 @@ sequenceDiagram
 - codearts text-only 的像素通道升级（probe 仅收集数据）；
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
-*文档状态：Draft v0.9。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+*文档状态：Draft v0.10。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

@@ -239,6 +239,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuth(h.anthropicCountTokens))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesCall))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("GET /v1/models/{id}", h.withAuth(h.modelRetrieve))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// WorkBuddy 风格控制台（页面不鉴权，API 走 Bearer）
@@ -278,13 +279,16 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		// 部署语义）；开放方案（7866:7866）必须设置真实 OMNIGATE_API_KEY。
 		apiKey := strings.TrimSpace(h.cfg.APIKey)
 		if apiKey != "" && !strings.EqualFold(apiKey, "change-me") {
-			authz := r.Header.Get("Authorization")
-			const prefix = "Bearer "
-			if len(authz) < len(prefix) || !strings.EqualFold(authz[:len(prefix)], prefix) {
-				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-				return
+			// 两种标准鉴权头都认：OpenAI 系 Authorization: Bearer，Anthropic 系 x-api-key
+			// （Anthropic SDK 只发后者；只认前者会让 Claude Code 这类客户端在设了 key 时全 401）。
+			key := ""
+			if authz := r.Header.Get("Authorization"); len(authz) >= len("Bearer ") &&
+				strings.EqualFold(authz[:len("Bearer ")], "Bearer ") {
+				key = authz[len("Bearer "):]
 			}
-			key := authz[len(prefix):]
+			if key == "" {
+				key = strings.TrimSpace(r.Header.Get("x-api-key"))
+			}
 			if subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) != 1 {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return

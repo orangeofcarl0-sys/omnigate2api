@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -413,7 +414,15 @@ func infoEntry(family string, mi upstream.ModelInfo, id string) map[string]any {
 
 // models 返回模型列表（SPEC §29.3）：X-Provider 显式家族 → 该家族全量清单；
 // 无渠道标记 → 唯一视图（按路由表，模型名全局唯一 + family 字段）。
+//
+// 协议分流（标准供应商等价面）：Anthropic 客户端（带 `anthropic-version`，SDK 恒发）
+// 期望的信封与 OpenAI 不同（`data[].type/display_name/created_at` + has_more/first_id/
+// last_id），同一路径必须按客户端协议给出对应形状，否则 Anthropic 侧的模型自动发现直接解析失败。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	if isAnthropicCaller(r) {
+		h.anthropicModels(w, r)
+		return
+	}
 	if fam := r.Header.Get("X-Provider"); fam != "" {
 		if h.profiles().Get(fam) != nil {
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -427,6 +436,156 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   h.unifiedModelList(),
 	})
+}
+
+// isAnthropicCaller 判定调用方是否走 Anthropic 协议：`anthropic-version` 是 Anthropic
+// SDK/CLI 的必发头（OpenAI 系客户端不会带）。
+func isAnthropicCaller(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("anthropic-version")) != ""
+}
+
+// findModelEntry 在唯一视图里按 id 查条目（大小写不敏感；与请求解析同一约定）。
+func (h *Handler) findModelEntry(id string) (map[string]any, bool) {
+	id = strings.TrimSpace(id)
+	for _, e := range h.unifiedModelList() {
+		if cur, ok := e["id"].(string); ok && strings.EqualFold(cur, id) {
+			return e, true
+		}
+	}
+	return nil, false
+}
+
+// modelRetrieve GET /v1/models/{id}（标准「检索单个模型」）：OpenAI 形状直返条目，
+// Anthropic 调用方走 Anthropic 形状；未注册 → 各自协议的错误信封 + 404
+// （OpenAI `model_not_found` 与 SPEC §29 C1 的禁用语义一致）。
+func (h *Handler) modelRetrieve(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	entry, ok := h.findModelEntry(id)
+	if !ok {
+		if isAnthropicCaller(r) {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"type":  "error",
+				"error": map[string]any{"type": "not_found_error", "message": "model not found: " + id},
+			})
+			return
+		}
+		writeOpenAIError(w, http.StatusNotFound, "model_not_found", "model not found: "+id)
+		return
+	}
+	if isAnthropicCaller(r) {
+		writeJSON(w, http.StatusOK, anthropicModelEntry(entry))
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+// anthropicModelEntry 唯一视图条目 → Anthropic 模型对象（只放标准字段：
+// Anthropic SDK 对形状较严，额外字段不保证被容忍）。
+func anthropicModelEntry(e map[string]any) map[string]any {
+	id, _ := e["id"].(string)
+	display, _ := e["name"].(string)
+	if display == "" {
+		display = id
+	}
+	return map[string]any{
+		"type": "model", "id": id, "display_name": display,
+		"created_at": modelCreatedAt(e),
+	}
+}
+
+// modelCreatedAt 条目 created（unix 秒）→ RFC3339（Anthropic 的 created_at 形状）。
+func modelCreatedAt(e map[string]any) string {
+	sec, ok := e["created"].(int)
+	if !ok {
+		if f, ok2 := e["created"].(int64); ok2 {
+			sec = int(f)
+		}
+	}
+	if sec == 0 {
+		sec = modelCreated
+	}
+	return time.Unix(int64(sec), 0).UTC().Format(time.RFC3339)
+}
+
+// anthropicModels Anthropic 形状的模型清单：`limit`（默认 20，1..1000）+
+// `after_id`/`before_id` 游标（Anthropic 语义：取该 id 之后/之前的条目）。
+func (h *Handler) anthropicModels(w http.ResponseWriter, r *http.Request) {
+	all := h.unifiedModelList()
+	ids := make([]string, 0, len(all))
+	byID := make(map[string]map[string]any, len(all))
+	for _, e := range all {
+		if id, ok := e["id"].(string); ok && id != "" {
+			ids = append(ids, id)
+			byID[strings.ToLower(id)] = e
+		}
+	}
+	limit := 20
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"type": "error",
+				"error": map[string]any{"type": "invalid_request_error",
+					"message": "limit must be an integer between 1 and 1000"},
+			})
+			return
+		}
+		limit = n
+	}
+	start, end := 0, len(ids)
+	if after := strings.TrimSpace(r.URL.Query().Get("after_id")); after != "" {
+		idx := indexOfFold(ids, after)
+		if idx < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"type": "error",
+				"error": map[string]any{"type": "invalid_request_error",
+					"message": "after_id not found: " + after},
+			})
+			return
+		}
+		start = idx + 1
+	}
+	if before := strings.TrimSpace(r.URL.Query().Get("before_id")); before != "" {
+		idx := indexOfFold(ids, before)
+		if idx < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"type": "error",
+				"error": map[string]any{"type": "invalid_request_error",
+					"message": "before_id not found: " + before},
+			})
+			return
+		}
+		end = idx
+	}
+	if start > end {
+		start = end
+	}
+	window := ids[start:end]
+	hasMore := len(window) > limit
+	if hasMore {
+		window = window[:limit]
+	}
+	data := make([]map[string]any, 0, len(window))
+	for _, id := range window {
+		data = append(data, anthropicModelEntry(byID[strings.ToLower(id)]))
+	}
+	out := map[string]any{"data": data, "has_more": hasMore,
+		"first_id": nil, "last_id": nil}
+	if len(window) > 0 {
+		out["first_id"] = window[0]
+		out["last_id"] = window[len(window)-1]
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// indexOfFold 大小写不敏感查下标（未命中 -1）。
+func indexOfFold(list []string, want string) int {
+	for i, s := range list {
+		if strings.EqualFold(s, want) {
+			return i
+		}
+	}
+	return -1
 }
 
 // modelListFor 按家族组装模型列表（客户端 /v1/models 视图：有限等待上游）。

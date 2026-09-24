@@ -134,6 +134,11 @@ flowchart TB
   文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
   解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
   「模型限流 xxx(剩余分钟)」。账号级积分耗尽（`14018 额度已用尽`）另行归硬额度处理。
+- **模型信息的标准接口（SPEC §29.3）**：`GET /v1/models`（OpenAI 形状）+ `GET /v1/models/{id}`
+  （检索单个，未注册 → 404 `model_not_found`）；同一路径对 **Anthropic 调用方**（带
+  `anthropic-version`，SDK 恒发）返回 Anthropic 信封（`type/display_name/created_at` +
+  `has_more/first_id/last_id`，支持 `limit` 与 `after_id`/`before_id` 游标）。鉴权同时接受
+  `Authorization: Bearer` 与 `x-api-key`——Anthropic SDK 只发后者。
 - **裸模型名路由（v1.3）**：客户端只发模型名，渠道完全由网关侧路由表决定
   （默认表 = 两渠道清单合并，撞名组裁决给 codearts，撞名 fail-fast 拒绝重复注册）；
   `X-Provider` 保留为显式覆盖。`/v1/models` 无渠道时返回唯一视图（每模型名一条，
