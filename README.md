@@ -134,6 +134,11 @@ flowchart TB
   文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
   解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
   「模型限流 xxx(剩余分钟)」。账号级积分耗尽（`14018 额度已用尽`）另行归硬额度处理。
+- **客户端生成参数透传（SPEC §23.1）**：`max_tokens` / `max_completion_tokens` / `max_output_tokens`
+  （三者统一归一到上游 `max_tokens`）、`temperature`、`top_p`、`stop` / `stop_sequences`、`seed`、
+  `frequency_penalty`、`presence_penalty`、`logprobs`、`top_logprobs`、`response_format`、
+  `reasoning_effort` 按白名单透传给上游（此前**全部被静默丢弃**——设 `max_tokens` 不截断、
+  `temperature:0` 不生效）。`model`/`stream`/`messages` 由网关持有，客户端无法通过同名键篡改。
 - **缓存命中与积分可见（SPEC §16.4）**：usage 里一并报出上游的
   `prompt_tokens_details.cached_tokens`（OpenAI 标准位）/ `cache_read_input_tokens`
   （Anthropic 原生字段）与**本次积分 `credit`**。实测本网关**不破坏上游前缀缓存**：

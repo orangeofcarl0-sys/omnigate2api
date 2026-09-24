@@ -24,7 +24,7 @@ func TestTencentChatStreamGlobalRealmInjectsSystem(t *testing.T) {
 	c.base = srv.URL
 	rc, err := c.ChatStream(context.Background(), "",
 		[]ChatMessage{{Role: "user", Content: "hi"}}, "",
-		SignCredential{SecurityToken: "t", Domain: "www.workbuddy.ai"}, "n", "m", nil, "")
+		SignCredential{SecurityToken: "t", Domain: "www.workbuddy.ai"}, "n", "m", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestTencentChatStreamGlobalRealmKeepsExistingSystem(t *testing.T) {
 	c.base = srv.URL
 	rc, err := c.ChatStream(context.Background(), "",
 		[]ChatMessage{{Role: "system", Content: "custom"}, {Role: "user", Content: "hi"}}, "",
-		SignCredential{SecurityToken: "t", Domain: "www.workbuddy.ai"}, "n", "m", nil, "")
+		SignCredential{SecurityToken: "t", Domain: "www.workbuddy.ai"}, "n", "m", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestTencentChatStreamCNRealmNoInjection(t *testing.T) {
 	c.base = srv.URL
 	rc, err := c.ChatStream(context.Background(), "",
 		[]ChatMessage{{Role: "user", Content: "hi"}}, "",
-		SignCredential{SecurityToken: "t", Domain: "www.codebuddy.cn"}, "n", "m", nil, "")
+		SignCredential{SecurityToken: "t", Domain: "www.codebuddy.cn"}, "n", "m", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

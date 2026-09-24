@@ -52,6 +52,9 @@ func parseAnthropicRequest(body []byte) (*chatRequest, error) {
 		Model:      raw.Model,
 		Stream:     raw.Stream,
 		ToolChoice: parseAnthropicToolChoice(raw.ToolChoice),
+		// 生成参数同样透传（anthropic 的 max_tokens/temperature/top_p/stop_sequences
+		// 经 genParamAlias 归一到上游字段；anthropic 的 max_tokens 是必填项）。
+		Gen: parseGenParams(body),
 	}
 	if raw.Tools != nil {
 		req.Tools = anthropicToolsToOpenAI(raw.Tools)
@@ -342,6 +345,8 @@ func parseResponsesRequest(body []byte) (*chatRequest, error) {
 		Model:      raw.Model,
 		Stream:     raw.Stream,
 		ToolChoice: parseResponsesToolChoice(raw.ToolChoice),
+		// responses 的 max_output_tokens/temperature/top_p 同样归一到上游字段。
+		Gen: parseGenParams(body),
 	}
 	if raw.Tools != nil {
 		req.Tools = responsesToolsToOpenAI(raw.Tools)

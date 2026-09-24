@@ -40,7 +40,7 @@ type fakeClient struct {
 	inactiveActivity bool
 }
 
-func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
 	return nil, nil
 }
 func (f *fakeClient) RefreshToken(ctx context.Context, cfg upstream.LoginConfig, refreshToken, codeVerifier, domain string) (*upstream.TokenResponse, error) {

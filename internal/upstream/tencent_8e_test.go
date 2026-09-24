@@ -73,7 +73,7 @@ func TestTencentChatHeadersOfficialCLI(t *testing.T) {
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
 	// 空账号字段：按官方 CLI 约定发 X-No-*: 1 占位
-	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{}, "n", "m", nil, "")
+	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{}, "n", "m", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestTencentChatStreamToolChoice(t *testing.T) {
 	defer srv.Close()
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
-	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", nil, "required")
+	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", nil, "required", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

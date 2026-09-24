@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -186,17 +187,19 @@ func tencentChatHeaders(req *http.Request, cred SignCredential, origin string) {
 // ChatStream 发送 /v2/chat/completions：roles 消息保真透传（tools 原样拼入 body），
 // 模型名不做映射（上游按真实 ID 匹配，参考实现实证）；toolChoice 已按上游
 // string 语义归一化（§28.4 决策 D：none 在上层已删 tools，此处仅拼非空值）。
-func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
 	// 全球域要求首条为 system prompt（区域契约差异，见 tencent_realm.go）：
 	// 缺失则上游 400 + code=11128，且会把账号连续错误推入冷却。
 	if tencentRegion(cred.Domain) {
 		messages = ensureLeadingSystem(messages)
 	}
-	body := map[string]any{
-		"model":    model,
-		"stream":   true,
-		"messages": messages, // ChatMessage.MarshalJSON 双形态（§30.5：分片数组透传）
-	}
+	// gen 先铺底（客户端生成参数：temperature/top_p/stop/seed/max_tokens/…），
+	// 随后由权威字段覆盖（§23.1）——上游实测全部接受这些参数。
+	body := map[string]any{}
+	applyGen(body, gen)
+	body["model"] = model
+	body["stream"] = true
+	body["messages"] = messages // ChatMessage.MarshalJSON 双形态（§30.5：分片数组透传）
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
@@ -217,6 +220,11 @@ func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages 
 	if resp.StatusCode >= 400 {
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		// 上游响应头里有对账标识（Traceid / X-Request-Id / EO-LOG-UUID / EO-Cache-Status）：
+		// 失败时记下来，复盘时能直接拿去找上游；成功路径不记（避免每请求一条日志噪音）。
+		log.Printf("tencent chat failed status=%d trace=%s edge=%s req=%s",
+			resp.StatusCode, resp.Header.Get("Traceid"), resp.Header.Get("EO-Cache-Status"),
+			resp.Header.Get("X-Request-Id"))
 		return nil, &ApiError{Code: resp.StatusCode, Status: resp.StatusCode,
 			Message: truncateStr(string(rb), 200), Path: "/v2/chat/completions"}
 	}

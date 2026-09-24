@@ -66,6 +66,74 @@ type chatRequest struct {
 	// IncludeUsage 对应 OpenAI 的 stream_options.include_usage：流式回合是否在
 	// [DONE] 前追加一个只带 usage 的 chunk（OpenAI 只在显式请求时下发）。
 	IncludeUsage bool
+	// Gen 客户端的生成参数（白名单透传给上游，见 parseGenParams）。
+	// 早前上游 body 只拼 model/stream/messages/tools，客户端设的 temperature/max_tokens
+	// 等**全部静默失效**——这里补上。
+	Gen map[string]any
+}
+
+// genParamOrder 生成参数的**固定**透传顺序（别名归一靠先到者优先，故不能用 map 遍历：
+// map 顺序随机会让 max_tokens 与 max_completion_tokens 谁生效变得不可预测）。
+var genParamOrder = []string{
+	"max_tokens", "max_completion_tokens", "max_output_tokens",
+	"temperature", "top_p", "stop", "stop_sequences",
+	"seed", "frequency_penalty", "presence_penalty",
+	"logprobs", "top_logprobs", "response_format", "reasoning_effort",
+}
+
+// genParamAlias 入站键 → 上游键（三协议共用同一张表：anthropic 的 stop_sequences 与
+// chat 的 stop、responses 的 max_output_tokens 与 chat 的 max_tokens 都归一到上游字段）。
+var genParamAlias = map[string]string{
+	"max_tokens":            "max_tokens",
+	"max_completion_tokens": "max_tokens",
+	"max_output_tokens":     "max_tokens",
+	"temperature":           "temperature",
+	"top_p":                 "top_p",
+	"stop":                  "stop",
+	"stop_sequences":        "stop",
+	"seed":                  "seed",
+	"frequency_penalty":     "frequency_penalty",
+	"presence_penalty":      "presence_penalty",
+	"logprobs":              "logprobs",
+	"top_logprobs":          "top_logprobs",
+	"response_format":       "response_format",
+	"reasoning_effort":      "reasoning_effort",
+}
+
+// parseGenParams 从原始请求体提取要透传给上游的生成参数：
+// 白名单（只转已验证上游接受的键）+ 别名归一 + 空值剔除。
+// 空串/null 视为"未指定"，不落键（避免用空值覆盖上游默认）。
+func parseGenParams(body []byte) map[string]any {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	out := map[string]any{}
+	for _, in := range genParamOrder {
+		rv, ok := raw[in]
+		if !ok {
+			continue
+		}
+		var v any
+		if json.Unmarshal(rv, &v) != nil {
+			continue
+		}
+		if s, isStr := v.(string); isStr && strings.TrimSpace(s) == "" {
+			continue
+		}
+		if v == nil {
+			continue
+		}
+		up := genParamAlias[in]
+		if _, exists := out[up]; exists {
+			continue // 别名并存：按 genParamOrder 取先者（max_tokens 优先）
+		}
+		out[up] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseChatRequest 解析并校验请求体。
@@ -94,6 +162,7 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 		Tools:          raw.Tools,
 		ToolChoice:     parseToolChoice(raw.ToolChoice),
 		IncludeUsage:   raw.StreamOptions != nil && raw.StreamOptions.IncludeUsage,
+		Gen:            parseGenParams(body),
 	}
 	for i, rm := range raw.Messages {
 		m, err := parseMessage(rm)

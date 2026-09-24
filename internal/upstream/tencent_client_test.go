@@ -58,7 +58,7 @@ func TestTencentChatStreamHeadersAndBody(t *testing.T) {
 		{Role: "tool", ToolCallID: "c1", Content: "r"},
 	}
 	cred := SignCredential{SecurityToken: "tok", UserID: "u1", EnterpriseID: "e1", Domain: "www.codebuddy.cn"}
-	rc, err := c.ChatStream(context.Background(), "", msgs, "", cred, "n", "glm-4.7", nil, "")
+	rc, err := c.ChatStream(context.Background(), "", msgs, "", cred, "n", "glm-4.7", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestTencentChatStreamToolsPassthrough(t *testing.T) {
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
 	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "exec_command"}}}
-	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", tools, "")
+	rc, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", tools, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestTencentChatStreamErrorClassified(t *testing.T) {
 	defer srv.Close()
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
-	_, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", nil, "")
+	_, err := c.ChatStream(context.Background(), "", []ChatMessage{{Role: "user", Content: "q"}}, "", SignCredential{SecurityToken: "t"}, "n", "m", nil, "", nil)
 	if err == nil {
 		t.Fatal("429 must error")
 	}

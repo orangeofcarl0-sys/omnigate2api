@@ -31,6 +31,9 @@
 > v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
 > `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
 > 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.13 变更：上游信息整体对账（§33）——修两处 A 级遗漏：**客户端生成参数此前全部被静默丢弃**
+> （temperature/top_p/stop/seed/max_tokens… 现经白名单透传，实测生效）、上游响应头对账标识；
+> 并把"抓全量键路径再改代码"固化为检查单（流式/非流式两条解析路径必须同改）。
 > v0.12 变更：usage 增加**缓存命中与本次积分**（§16.4）——上游的
 > `prompt_cache_hit/miss/write_tokens`、`cache_read/creation_input_tokens`、`cached_tokens`
 > 与 `credit` 不再被丢弃，按协议落到标准位；并实测确认本项目**不打乱提示词前缀**、
@@ -443,7 +446,7 @@ responses  → /v1/responses 端点：responsesAdapter.Response 纯函数
 | tools | tools 数组 | `input_schema` → parameters | 扁平 `{name,parameters,strict}` → 嵌套 function 格式 |
 | tool_choice | 现有对象/字符串解析 | auto/any/none 适配 | 同 anthropic；strict 保留透传 |
 | stream | 透传 | 透传 | 透传（真流式，见 §16） |
-| max_tokens | max_completion_tokens 兜底 | max_tokens | max_output_tokens / max_tokens → max_tokens |
+| max_tokens | max_completion_tokens 兜底 | max_tokens | max_output_tokens / max_tokens → max_tokens；**三者统一归一到上游 `max_tokens` 后透传**（§33.2） |
 | provider 路由 | `X-Provider` / body.provider | 同左 | 同左 |
 
 ### 13.3 非文本块的折叠（多模态占位）
@@ -1491,7 +1494,53 @@ sequenceDiagram
 - codearts text-only 的像素通道升级（probe 仅收集数据）；
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
-*文档状态：Draft v0.12。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+---
+
+## 33. 上游信息对账（v0.13 审计）
+
+**动机**：此前两次"上游给了、我们丢了"（真实 usage 被估算取代；缓存命中/积分字段被丢弃）都属于
+**同一类错误**——只按需解析，从不做整体对账。本节把对账结果固化，作为以后改动上游解析时的检查单。
+
+### 33.1 方法
+
+对每个消费中的上游端点：原样抓一份真实响应 → 递归列出**全部键路径** → 与我们的解析结构逐条比对
+→ 得出「已消费 / 有意忽略（附理由）/ 遗漏（需修）」三类。SSE 端点额外记录响应头。
+
+### 33.2 对账结论（2026-09-24）
+
+**A 级遗漏（影响客户端可见行为，已修）**
+
+| 项 | 现象 | 处置 |
+|---|---|---|
+| 客户端生成参数全丢 | 上游 body 只拼 `model/stream/messages/tools/tool_choice`，客户端设的 `max_tokens`/`temperature`/`top_p`/`stop`/`seed`/`frequency_penalty`/`presence_penalty`/`logprobs`/`top_logprobs`/`response_format`/`reasoning_effort` **全部静默失效**（设 `max_tokens` 不截断、设 `temperature:0` 不生效） | §23.1 增加 `gen` 参数：入站白名单提取 + 别名归一（三协议统一到上游字段）+ 权威字段覆盖。实测 `max_tokens=16 → finish=length`、`stop=["六"] → finish=stop` |
+| usage 缓存/积分丢失 | 上游 usage 含 `prompt_cache_hit/miss/write_tokens`、`cache_read/creation_input_tokens`、`prompt_tokens_details.cached_tokens`、`completion_tokens_details.reasoning_tokens`、`credit`，只取了 3 项 | §16.4：按协议落到标准位（OpenAI `prompt_tokens_details.cached_tokens`、Anthropic 原生 `cache_read_input_tokens`、Responses `input_tokens_details.cached_tokens`）+ `credit` |
+
+**B 级遗漏（观测/对账用，已修）**
+
+| 项 | 处置 |
+|---|---|
+| 上游响应头 `Traceid` / `X-Request-Id` / `EO-LOG-UUID` / `EO-Cache-Status` 全丢 | 聊天失败时记入日志（成功路径不记，避免每请求噪音）——上报上游问题时可直接给 trace id |
+
+**有意忽略（附理由，非遗漏）**
+
+| 项 | 理由 |
+|---|---|
+| `id` / `created` / `object`（上游帧） | 网关自行生成（`chatcmpl-<…>`）；上游 id 对客户端无契约意义，且跨账号轮换会跳变 |
+| `choices[].delta.function_call` | 上游 **schema 里有但实测从未非空**（模型走 `tool_calls`）。保留为"若出现需支持"的观察项 |
+| `choices[].delta.refusal` | 同批实测未出现非空；拒绝文本通常走 `content`。同上列为观察项 |
+| `choices[].logprobs`（响应）/ `top_logprobs`（请求） | 请求侧已透传；响应侧当前不重建该字段——**已知缺口**：请求 `logprobs:true` 的客户端拿不到对数概率。价值低、成本中，暂列观察项 |
+| `usage.*_tokens_details` 的 `accepted_prediction/audio/rejected_prediction_tokens` | 上游恒 0（实测），无信息量 |
+| `completion_thinking_tokens` | 与 `completion_tokens_details.reasoning_tokens` **实测一致**（515=515），取后者即可 |
+
+### 33.3 检查单（改动上游解析时逐条过）
+
+1. 抓真实响应，**列全部键路径**再改代码——不要按需解析；
+2. 流式与非流式**是两条解析路径**（`StreamDeltasWithTools` / `AggregateRaw`），改一条必须改另一条；
+3. 响应头也要看（对账标识、缓存状态）；
+4. 新增字段先问三个问题：客户端要用吗（可见性）？影响成本吗（用量/缓存/积分）？失败时排障要用吗（trace）；
+5. 每个"不消费"的字段都要写下理由，否则它下个月就会变成一次遗漏。
+
+*文档状态：Draft v0.13。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

@@ -484,7 +484,7 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 				tools = nil
 			}
 		}
-		rc, serr := h.openStream(r, acct, chatID, msgs, cred, model, tools, toolChoice)
+		rc, serr := h.openStream(r, acct, chatID, msgs, cred, model, tools, toolChoice, req.Gen)
 		if serr != nil {
 			h.cfg.Pool.ReleaseLock(acct.Name) // 释放槽位再换号
 			if isClientCancel(serr) {
@@ -570,11 +570,11 @@ func (h *Handler) pickAccount(family, model string, stickyAcct *string, tried ma
 // 已完成的会话槽位释放较慢（实测 >15s），遇到时等待后重试同一账号，
 // 最多 10 次（每次 5s，共 50s）。等待期间释放并发锁，让排队请求也能
 // 尝试（避免死锁式串行等待）。
-func (h *Handler) openStream(r *http.Request, acct *pool.Account, chatID string, msgs []upstream.ChatMessage, cred upstream.SignCredential, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+func (h *Handler) openStream(r *http.Request, acct *pool.Account, chatID string, msgs []upstream.ChatMessage, cred upstream.SignCredential, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
 	ctx := r.Context()
 	var lastErr error
 	for retry := 0; retry < 10; retry++ {
-		rc, serr := acct.Client.ChatStream(ctx, chatID, msgs, "", cred, acct.UserName, model, tools, toolChoice)
+		rc, serr := acct.Client.ChatStream(ctx, chatID, msgs, "", cred, acct.UserName, model, tools, toolChoice, gen)
 		if serr == nil {
 			return rc, nil
 		}

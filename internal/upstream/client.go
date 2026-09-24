@@ -523,13 +523,14 @@ func ChatHeadersV2(token, traceID, language string) map[string]string {
 // ChatStream 发送聊天请求：华为签名风格；tools 为本机透传的工具定义
 // （华为 text-only 模拟层不使用，roles 上游直接拼入 body）；toolChoice
 // 为腾讯 string 语义归一化结果，华为路径忽略。
-func (c *Client) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string) (io.ReadCloser, error) {
+func (c *Client) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
+	// gen 先铺底（客户端生成参数），随后由权威字段覆盖（§23.1）。
+	body := map[string]any{}
+	applyGen(body, gen)
 	// messages 直接序列化（ChatMessage.MarshalJSON 双形态：string/分片数组，§30.5）
-	body := map[string]any{
-		"model":    CanonicalModel(model),
-		"stream":   true,
-		"messages": messages,
-	}
+	body["model"] = CanonicalModel(model)
+	body["stream"] = true
+	body["messages"] = messages
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}

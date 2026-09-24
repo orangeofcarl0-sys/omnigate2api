@@ -185,7 +185,7 @@ func main() {
 		}
 		rc, err = c.SendChatV2(context.Background(), body, "", cred, cred.SecurityToken)
 	default:
-		rc, err = c.ChatStream(context.Background(), chatID, []upstream.ChatMessage{{Role: "user", Content: msg}}, "", cred, a.UserName, model, nil, "")
+		rc, err = c.ChatStream(context.Background(), chatID, []upstream.ChatMessage{{Role: "user", Content: msg}}, "", cred, a.UserName, model, nil, "", nil)
 	}
 	if err != nil {
 		panic(err)
