@@ -510,7 +510,7 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 			h.saveChats()
 		}
 		if req.Stream {
-			sink := newSink(proto, w, model, profile.IsRateLimit)
+			sink := newSink(proto, w, model, profile.IsRateLimit, req.IncludeUsage)
 			if h.streamOut(sink, acct, model, profile, rr.MatchedKey, rc) {
 				storeChat()
 				h.turnSuccess(profile, acct, chatID, rr.RouteKey, len(req.Messages))
@@ -799,7 +799,11 @@ func tokensApprox(s string) int {
 	return len([]rune(s))/4 + 1
 }
 
+// usageEstimate 用量结算：**优先上游真实 usage**（终帧携带），缺失才退化到估算。
 func usageEstimate(msgs []upstream.ChatMessage, comp *upstream.RawCompletion) map[string]int {
+	if comp != nil && len(comp.Usage) > 0 {
+		return comp.Usage
+	}
 	var pt int
 	for _, m := range msgs {
 		pt += tokensApprox(m.Content)

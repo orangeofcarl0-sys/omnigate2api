@@ -26,6 +26,13 @@ type responsesSink struct {
 	done      bool
 	text      strings.Builder // 聚合文本（response.completed.output 用）
 	toolItems []any           // 已完成的 function_call 输出项
+	usage     map[string]int  // 上游真实用量（随 response.completed 下发）
+}
+
+// Usage 收下上游真实用量；Responses 的用量挂在 response.completed.usage。
+func (s *responsesSink) Usage(u map[string]int) error {
+	s.usage = u
+	return nil
 }
 
 func newResponsesSink(w http.ResponseWriter, model string) *responsesSink {
@@ -210,12 +217,18 @@ func (s *responsesSink) Finish(fin string) error {
 		}
 	}
 	s.done = true
-	return s.writeData(map[string]any{
-		"type": "response.completed", "response": map[string]any{
-			"id": s.id, "object": "response", "created_at": time.Now().Unix(),
-			"status": "completed", "model": s.model, "output": s.finishOutput(),
-		},
-	})
+	resp := map[string]any{
+		"id": s.id, "object": "response", "created_at": time.Now().Unix(),
+		"status": "completed", "model": s.model, "output": s.finishOutput(),
+	}
+	if len(s.usage) > 0 {
+		resp["usage"] = map[string]any{
+			"input_tokens":  s.usage["prompt_tokens"],
+			"output_tokens": s.usage["completion_tokens"],
+			"total_tokens":  s.usage["total_tokens"],
+		}
+	}
+	return s.writeData(map[string]any{"type": "response.completed", "response": resp})
 }
 
 func (s *responsesSink) Error(msg string) error {

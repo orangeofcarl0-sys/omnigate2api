@@ -134,6 +134,10 @@ flowchart TB
   文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
   解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
   「模型限流 xxx(剩余分钟)」。账号级积分耗尽（`14018 额度已用尽`）另行归硬额度处理。
+- **用量（usage）为上游真实值（SPEC §16.4）**：上游终帧的 token 用量不再被丢弃——非流式
+  响应体、chat 流式（仅在调用方请求 `stream_options.include_usage` 时补一帧 usage chunk，
+  与 OpenAI 一致）、Anthropic `message_delta.usage`、Responses `response.completed.usage`
+  均报真实 `input/output/total tokens`；上游未回传时才退化为估算。
 - **模型信息的标准接口（SPEC §29.3）**：`GET /v1/models`（OpenAI 形状）+ `GET /v1/models/{id}`
   （检索单个，未注册 → 404 `model_not_found`）；同一路径对 **Anthropic 调用方**（带
   `anthropic-version`，SDK 恒发）返回 Anthropic 信封（`type/display_name/created_at` +

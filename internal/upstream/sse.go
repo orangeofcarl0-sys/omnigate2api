@@ -41,6 +41,36 @@ type RawCompletion struct {
 	Reasoning string
 	Finish    string
 	ToolCalls []ToolCall // 原生工具调用（delta.tool_calls 增量拼装；文本围栏路径为空）
+	// Usage 上游下发的真实 token 用量（终帧携带：prompt/completion/total）。
+	// 早期帧可能带全 0 占位，取最后一次非零；上游不回传时为空（调用方退化为估算）。
+	Usage map[string]int
+}
+
+// usageFromFrame 提取 OpenAI 风格帧里的真实用量（全 0 占位视为未提供）。
+func usageFromFrame(data string) (map[string]int, bool) {
+	var f struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal([]byte(data), &f) != nil {
+		return nil, false
+	}
+	u := f.Usage
+	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 {
+		return nil, false
+	}
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.PromptTokens + u.CompletionTokens
+	}
+	return map[string]int{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      total,
+	}, true
 }
 
 // ToolCall 拼装完成的原生流式工具调用（OpenAI delta.tool_calls 按 index 合并）。
@@ -416,12 +446,16 @@ func AggregateRaw(r io.Reader) (*RawCompletion, error) {
 	)
 	var pendingEvent string
 	stitch := map[int]*ToolCall{}
+	var usage map[string]int
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
 		if ev, data, ok := scanLine(strings.TrimRight(line, "\r\n"), &pendingEvent); ok {
+			if u, uok := usageFromFrame(data); uok {
+				usage = u // 非流式路径同样取上游真实用量（终帧携带）
+			}
 			applyEvent(&content, &reason, &finish, &upErr, stitch, ev, data)
 		}
 		if err == io.EOF {
@@ -436,6 +470,7 @@ func AggregateRaw(r io.Reader) (*RawCompletion, error) {
 		Reasoning: reason.String(),
 		Finish:    finish,
 		ToolCalls: stitchedCalls(stitch),
+		Usage:     usage,
 	}, nil
 }
 
@@ -481,6 +516,37 @@ func (s *SSEChunkWriter) Finish(fin string) error {
 		return err
 	}
 	return s.Done()
+}
+
+// Usage 写只带 usage 的 chunk（choices 为空；OpenAI 的 stream_options.include_usage 形态）。
+// 帧序：位于终止帧与 [DONE] 之前（本 writer 的 Finish 会随后写它们）。
+func (s *SSEChunkWriter) Usage(usage map[string]any) error {
+	if s.done {
+		return nil
+	}
+	return s.writePlain(map[string]any{"choices": []any{}, "usage": usage})
+}
+
+// writePlain 写一帧不含 choices[0].delta 的自定义 chunk。
+func (s *SSEChunkWriter) writePlain(extra map[string]any) error {
+	payload := map[string]any{
+		"id": s.id, "object": "chat.completion.chunk",
+		"created": time.Now().Unix(), "model": s.model,
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(s.w, "data: "+string(raw)+"\n\n"); err != nil {
+		return err
+	}
+	if s.fl != nil {
+		s.fl.Flush()
+	}
+	return nil
 }
 
 // Done 写 [DONE] 终止标记。
@@ -566,6 +632,7 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 	// 故先攒着，等工具调用发完再连同终止帧一起发出，保证「正文在调用前 / 正文在调用后」
 	// 两种相对次序都不被打乱。
 	var deferred strings.Builder
+	var usage map[string]int
 	flushTools := func() {
 		if flushed || onTool == nil {
 			flushed = true
@@ -587,6 +654,9 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 		if ev, data, ok := scanLine(strings.TrimRight(line, "\r\n"), &pendingEvent); ok {
 			var upErr error
 			beforeContent, beforeReason := content.Len(), reason.Len()
+			if u, ok := usageFromFrame(data); ok {
+				usage = u // 真实用量：以上游终帧为准
+			}
 			applyEvent(&content, &reason, &finish, &upErr, stitch, ev, data)
 			if upErr != nil {
 				if e := onDelta("", "", "", upErr); e != nil {
@@ -651,5 +721,5 @@ func StreamDeltasWithTools(r io.Reader, onDelta func(content, reason, finish str
 		}
 	}
 	return &RawCompletion{Content: content.String(), Reasoning: reason.String(),
-		Finish: finish, ToolCalls: stitchedCalls(stitch)}, streamErr
+		Finish: finish, ToolCalls: stitchedCalls(stitch), Usage: usage}, streamErr
 }

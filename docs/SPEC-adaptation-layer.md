@@ -31,6 +31,9 @@
 > v0.8 变更：付费/免费标注的权威源升级为 `GET {base}/v3/config`（桌面 UA）的
 > `models[].credits` + `modelPromotions[]`（结构化促销含折扣因子与起止/每日时段窗口），
 > 按账号区域分别判定并暴露 `access_by_realm`，过期自动回落牌价（§29.7.2）。
+> v0.11 变更：出站 usage 改为**真实用量**（§16.4）——上游终帧的 `usage` 不再被丢弃，
+> 非流式取真实值、chat 流式按 `stream_options.include_usage` 补 usage chunk、
+> Anthropic 落在 `message_delta.usage`、Responses 落在 `response.completed.usage`。
 > v0.10 变更：标准供应商等价面（§29.3）——`GET /v1/models/{id}`（检索单个）、
 > Anthropic 调用方按 `anthropic-version` 分流得到 Anthropic 信封（含 limit/游标分页）、
 > 鉴权同时接受 `x-api-key`。
@@ -549,7 +552,7 @@ writer 从同一数据源重建事件序列。守卫检测（transcriptEcho / no
 | `content_block_delta` | 文本增量 | text_delta |
 | `input_json_delta` | 工具调用发出 | partial_json（本地模拟层一次性得到完整 arguments，单帧发完；不强制分片） |
 | `content_block_stop` | finish 到来（或流结束） | 关闭所有已开块，逐块 stop |
-| `message_delta` | finish | stop_reason: stop→`end_turn` / tool_calls→`tool_use` / length→`max_tokens`；usage 估算 |
+| `message_delta` | finish | stop_reason: stop→`end_turn` / tool_calls→`tool_use` / length→`max_tokens`；**usage 为上游真实 input/output tokens**（§16.4） |
 | `message_stop` | 全部收尾 | — |
 
 - 块序规则：文本块（若有）先于工具块（post 抑制保证无"工具后正文"）。
@@ -575,12 +578,27 @@ writer 从同一数据源重建事件序列。守卫检测（transcriptEcho / no
   {type:function_call,id,call_id,name,arguments}]；status=completed；usage 估算
   input_tokens/output_tokens 拆分近似）。
 
-### 16.4 出站 usage 规范（对齐 Go 参考实现）
+### 16.4 出站 usage 规范（v0.11 改为真实用量）
 
-- 流式 chunk：usage 字段显式省略（客户端按协议容忍缺失；不做补 0 假数据）；
-- 非流式/聚合响应：usage 为估算值（现有 usageEstimate）；
-- anthropic/responses 对象：按各自 schema 给出拆分的 input/output 估算近似，
-  总量与 chat 路径一致。
+**取值口径**：上游终帧带真实 `usage`（`{prompt_tokens, completion_tokens, total_tokens}`，
+华为/腾讯两家族均下发），解析层（`StreamDeltasWithTools` 与 `AggregateRaw` 两条路径）
+统一取最后一次非零值存入 `RawCompletion.Usage`；**有真实值用真实值**，上游未回传时
+才退化为 `usageEstimate`（len/4+1 估算）。
+
+**各协议落点**（`streamOut` 于终止帧前经可选接口 `usageSink` 交付给 writer）：
+
+| 协议 | 位置 | 规则 |
+|---|---|---|
+| chat 流式 | 终止帧前追加只带 usage 的 chunk（`choices: []`） | **仅当调用方显式请求 `stream_options.include_usage`**（与 OpenAI 一致，不给严格客户端添乱）；未请求则不发明细 |
+| chat 非流式 | 响应体 `usage` | 真实值优先，估算兜底 |
+| anthropic 流式 | `message_delta.usage`（`input_tokens`/`output_tokens`） | Anthropic 承载**回合用量**的位置。`message_start.usage` 仍为 0：上游此时尚未给出用量，不臆造数字 |
+| anthropic 非流式 | `message.usage` | 同 chat 口径 |
+| responses 流式 | `response.completed.response.usage`（含 `total_tokens`） | 同上 |
+
+**变更理由**：旧口径「流式一律省略 + 非流式一律估算」会让客户端"看 token"的需求落空
+（面板/客户端显示的用量与上游账单不一致）。真实用量本来就随流下发，丢掉它再自己估算是
+纯损失；`include_usage` 的门控只影响**是否**在流里多一帧，不影响非流式与 Anthropic 侧的
+取值。
 
 ---
 
@@ -908,7 +926,7 @@ workbuddy2api（Go，本 fork 的祖先）。下表逐项核对本实现（v0.3.
 | **模型清单端点** | GET `/console/enterprises/personal/models`（Bearer、envelope、只取 agent "cli"） | 静态华为表 | **缺口 5** |
 | **tool_choice string** | 对象形态 → 400 code=11101；`"none"` 需连 tools 删除；auto/required → 字符串 | 丢弃不传（none 语义不兑现） | **缺口 6** |
 | X-Tenant-Id | 仅 Python 发（=enterpriseId）；Go/官方不发 | 不发 | ✅ 跟随官方 |
-| stream_options.include_usage | 仅 Python 发；Go/官方不发 | 不发 | ✅ 跟随官方 |
+| stream_options.include_usage | 仅 Python 发；Go/官方不发 | **跟随请求**：调用方显式请求则补一帧 usage chunk，否则不发（v0.11 改） | ⚠️ 与参考实现不同：真实用量本就随上游下发，省略它等于主动丢信息 |
 | 刷新触发 | 两者均惰性：请求前置 ExpiringSoon 检查（60s/10m 窗口） | Validate 前置（30m skew）+ proactive <1h | ✅ 已一致（更积极） |
 | 刷新保留旧值 | 响应缺 refreshToken/domain/expiresIn 时保留旧值防刷新风暴 | 同 | ✅ 已一致 |
 
@@ -1440,7 +1458,7 @@ sequenceDiagram
 - codearts text-only 的像素通道升级（probe 仅收集数据）；
 - 出站方向（模型返回图片）——上游模型均为文本出。
 
-*文档状态：Draft v0.10。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
+*文档状态：Draft v0.11。v0.3.1 全链（8a→8f、清理 A1-A6、安全 F1/F2、改名 omnigate2api）已实施；§29 裸模型名路由 + WebUI 管理入口（R1-R4）已实施并审计通过，§29.7 模型目录与面板重做（v0.6）已实施并浏览器实测（筛选/搜索/归属裁决/脏检查与未保存保护/批量补齐/保存热生效/逐账号扫描/禁用恢复），§24.2.1 积分口径与 §28.4 G3 全球域首条 system 契约（v0.7）已实施并活测（国内 4856 / 全球 350 积分；全球账号强制路由后 200），§29.7.2 标注源升级为 /v3/config 促销（v0.8）已实施并活测（dsv41f：国内按量计费 x0.11 / 国际 Free now x0.00），§28.4.1 模型级限流按 (账号,模型) 冷却与传输层有界（v0.9）已实施并活测（不可达账号从"挂 90s 无响应"变为"1.5–6.7s 换号成功"）；腾讯签到/积分（§24.2 落地）、面板额度展示、默认本地免密、A1-A4 结构清理随 v1.3 交付。*
 
 ---
 

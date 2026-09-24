@@ -36,7 +36,21 @@ type streamSink interface {
 
 // chatSink OpenAI SSE chunk 线格式。
 type chatSink struct {
-	sw *upstream.SSEChunkWriter
+	sw           *upstream.SSEChunkWriter
+	includeUsage bool // stream_options.include_usage：是否追加 usage chunk（OpenAI 语义）
+}
+
+// Usage 上游真实用量 → OpenAI 的 usage chunk（choices 为空，位于终止帧之前）。
+// 仅当调用方显式请求（stream_options.include_usage）时下发，与 OpenAI 行为一致。
+func (s *chatSink) Usage(u map[string]int) error {
+	if !s.includeUsage || len(u) == 0 {
+		return nil
+	}
+	return s.sw.Usage(map[string]any{
+		"prompt_tokens":     u["prompt_tokens"],
+		"completion_tokens": u["completion_tokens"],
+		"total_tokens":      u["total_tokens"],
+	})
 }
 
 func (s *chatSink) Text(t string) error {
@@ -61,10 +75,10 @@ func (s *chatSink) Finish(fin string) error {
 func (s *chatSink) Error(msg string) error { return s.sw.Error(msg) }
 
 // newSink 按入站协议构造 writer；isRateLimit 为限流分类器（Profile 驱动）。
-func newSink(proto streamProtocol, w http.ResponseWriter, model string, isRateLimit upstream.RateClassifier) streamSink {
+func newSink(proto streamProtocol, w http.ResponseWriter, model string, isRateLimit upstream.RateClassifier, includeUsage bool) streamSink {
 	switch proto {
 	case protoChat:
-		return &chatSink{sw: upstream.NewSSEChunkWriter(w, model, isRateLimit)}
+		return &chatSink{sw: upstream.NewSSEChunkWriter(w, model, isRateLimit), includeUsage: includeUsage}
 	case protoAnthropic:
 		return newAnthropicSink(w, model)
 	case protoResponses:
@@ -84,6 +98,11 @@ func newSink(proto streamProtocol, w http.ResponseWriter, model string, isRateLi
 //
 // sink.Finish 必须晚于 flt.Close（残留缓冲冲刷可能产生 text/tool_call 增量，
 // 帧序契约：正文/调用增量全部发出后才允许终止帧）。
+// usageSink 可选能力：把上游真实用量交给 writer，由各协议决定线格式
+// （OpenAI → usage chunk；Anthropic → message_delta.usage；Responses → response.completed.usage）。
+// 用可选接口而非扩展 streamSink，是为了不动既有三个 writer 与它们的测试。
+type usageSink interface{ Usage(u map[string]int) error }
+
 func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, profile *adapt.UpstreamProfile, matchedKey string, rc io.ReadCloser) bool {
 	flt := newToolStreamFilter(sink)
 	// 围栏模拟是 **Profile 声明的能力**（Tool.FenceOpen，如华为 codearts）；原生 tools
@@ -98,7 +117,7 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	var lastUpErr string
 	var echo strings.Builder
 	nativeTools := false // 原生 tool_calls 路径（roles 上游）已发出 ≥1 调用（§28.4 决策 D）
-	_, serr := upstream.StreamDeltasWithTools(rc, func(content, reason, finish string, upErr error) error {
+	comp, serr := upstream.StreamDeltasWithTools(rc, func(content, reason, finish string, upErr error) error {
 		echo.WriteString(content)
 		h.cfg.Pool.PingKeepalive(acct.Name) // 长流期间保活
 		if upErr != nil {
@@ -169,6 +188,15 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	}
 	if fin == "" {
 		fin = "stop"
+	}
+	// 真实用量先于终止帧下发（各协议在自己该在的位置呈现它）。
+	if comp != nil && len(comp.Usage) > 0 {
+		if us, ok := sink.(usageSink); ok {
+			if err := us.Usage(comp.Usage); err != nil {
+				log.Printf("chat stream account=%s usage error: %v", acct.Name, err)
+				return false
+			}
+		}
 	}
 	if err := sink.Finish(fin); err != nil {
 		log.Printf("chat stream account=%s finish error: %v", acct.Name, err)

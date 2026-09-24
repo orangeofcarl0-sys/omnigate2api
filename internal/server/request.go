@@ -63,7 +63,9 @@ type chatRequest struct {
 	ToolChoice     toolChoiceOpenAI
 	ConversationID string
 	Provider       string `json:"provider"` // 多上游路由(SPEC §4.4),缺省 codearts
-
+	// IncludeUsage 对应 OpenAI 的 stream_options.include_usage：流式回合是否在
+	// [DONE] 前追加一个只带 usage 的 chunk（OpenAI 只在显式请求时下发）。
+	IncludeUsage bool
 }
 
 // parseChatRequest 解析并校验请求体。
@@ -75,6 +77,9 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 		Messages       []json.RawMessage `json:"messages"`
 		Tools          []map[string]any  `json:"tools"`
 		ToolChoice     json.RawMessage   `json:"tool_choice"`
+		StreamOptions  *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
@@ -88,6 +93,7 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 		ConversationID: raw.ConversationID,
 		Tools:          raw.Tools,
 		ToolChoice:     parseToolChoice(raw.ToolChoice),
+		IncludeUsage:   raw.StreamOptions != nil && raw.StreamOptions.IncludeUsage,
 	}
 	for i, rm := range raw.Messages {
 		m, err := parseMessage(rm)

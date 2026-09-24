@@ -21,6 +21,14 @@ type anthropicSink struct {
 	textOpen   bool
 	toolOpen   bool
 	done       bool
+	usage      map[string]int // 上游真实用量（Usage() 交付，随 message_delta 下发）
+}
+
+// Usage 收下上游真实用量；Anthropic 的用量出现在**终止事件** message_delta.usage，
+// 故这里只暂存，由 Finish 一并写出（message_start 时上游尚未给出用量，仍为 0）。
+func (s *anthropicSink) Usage(u map[string]int) error {
+	s.usage = u
+	return nil
 }
 
 func newAnthropicSink(w http.ResponseWriter, model string) *anthropicSink {
@@ -164,9 +172,17 @@ func (s *anthropicSink) Finish(fin string) error {
 		return err
 	}
 	s.done = true
+	// message_delta 是 Anthropic 承载**回合用量**的位置（客户端据此统计 token）；
+	// 上游给了真实用量就报真实值，否则至少报 0 而非缺字段。
+	deltaUsage := map[string]any{"output_tokens": 0, "input_tokens": 0}
+	if len(s.usage) > 0 {
+		deltaUsage["input_tokens"] = s.usage["prompt_tokens"]
+		deltaUsage["output_tokens"] = s.usage["completion_tokens"]
+	}
 	if err := s.writeEvent("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": anthropicStopReason(fin), "stop_sequence": nil},
+		"usage": deltaUsage,
 	}); err != nil {
 		return err
 	}
