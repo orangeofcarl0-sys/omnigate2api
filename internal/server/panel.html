@@ -454,6 +454,18 @@ select option{ background:#fff; color:var(--text); }
           <input type="radio" name="oauthChannel" value="tencent"/> 腾讯 WorkBuddy
         </label>
       </div>
+      <div id="tencentRealmRow" class="hidden" style="margin:-4px 0 10px">
+        <span class="muted" style="font-size:12px;margin-right:8px">腾讯区域</span>
+        <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"
+               title="国内 copilot.tencent.com（登录页 codebuddy.cn）">
+          <input type="radio" name="tencentRealm" value="cn" checked/> 国内
+        </label>
+        <label style="display:inline-flex;align-items:center;gap:4px"
+               title="国际 www.workbuddy.ai（登录页含 Google/GitHub；Google 拒绝内嵌 webview，请用系统浏览器打开授权页）">
+          <input type="radio" name="tencentRealm" value="global"/> 国际
+        </label>
+        <div class="muted" style="font-size:11px;margin-top:4px" id="tencentRealmHint">国内版与账号无关，由登录入口决定；国际版登录页才有 Google/GitHub，且必须用系统浏览器打开（内嵌 webview 会被 Google 拒绝）。</div>
+      </div>
       <div class="steps">
         <div><b>1.</b> 点击下方按钮在浏览器打开授权页</div>
         <div><b>2.</b> 使用目标账号完成登录 / 授权</div>
@@ -764,9 +776,20 @@ $("acctBody").addEventListener("click", async (e) => {
 /* ---------- OAuth 授权登录（华为 PKCE / 腾讯设备流） ---------- */
 let oauthSessionId = "";
 let oauthTencentState = "";
+// oauthActiveChan 本次流程实际发起的渠道（轮询按它走，避免中途改选渠道把请求打到
+// 另一个端点）；空 = 无进行中的流程。
+let oauthActiveChan = "";
 let oauthTimer = null;
 let oauthBusy = false;
 function oauthChannel(){ return (document.querySelector('input[name="oauthChannel"]:checked')||{}).value || "huawei"; }
+// tencentRealm 腾讯登录区域：国内 codebuddy.cn / 国际 workbuddy.ai——由登录入口
+// 决定（区域由 base 决定，不由账号决定），发起后服务端随 state 记住。
+function tencentRealm(){ return (document.querySelector('input[name="tencentRealm"]:checked')||{}).value || "cn"; }
+function realmLabel(r){ return r === "global" ? "国际版 workbuddy.ai" : "国内版 codebuddy.cn"; }
+function syncOAuthRealmRow(){
+  const row = $("tencentRealmRow");
+  if (row) row.classList.toggle("hidden", oauthChannel() !== "tencent");
+}
 
 function setOAuthStatus(html, ok){
   const el = $("oauthStatus");
@@ -780,17 +803,20 @@ function openOAuthModal(){
   $("oauthModal").classList.remove("hidden");
   oauthSessionId = "";
   oauthTencentState = "";
+  oauthActiveChan = "";
   stopOAuthPoll();
   $("oauthUrl").textContent = "（发起后显示）";
   $("oauthCopy").disabled = true;
   $("oauthOpen").disabled = true;
   $("oauthPoll").disabled = true;
+  syncOAuthRealmRow();
   setOAuthStatus("点击「发起授权」开始", null);
 }
 function closeOAuthModal(){
   stopOAuthPoll();
   oauthSessionId = "";
   oauthTencentState = "";
+  oauthActiveChan = "";
   $("oauthModal").classList.add("hidden");
 }
 
@@ -801,17 +827,19 @@ async function startOAuth(){
   setOAuthStatus('<span class="spin"></span>正在向服务端申请授权链接…', null);
   try {
     const chan = oauthChannel();
+    const realm = chan === "tencent" ? tencentRealm() : "";
     const data = chan === "tencent"
-      ? await api("/admin/api/oauth/tencent/start", {method:"POST", body:"{}"})
+      ? await api("/admin/api/oauth/tencent/start", {method:"POST", body: JSON.stringify({realm: realm})})
       : await api("/admin/api/oauth/start", {method:"POST", body:"{}"});
     if (!data.ok || !data.auth_url) throw new Error(data.message || "发起失败");
+    oauthActiveChan = chan; // 轮询按发起时的渠道走（改选渠道不影响进行中的流程）
     oauthSessionId = data.session_id || "";
     oauthTencentState = data.state || "";
     $("oauthUrl").textContent = data.auth_url;
     $("oauthCopy").disabled = false;
     $("oauthOpen").disabled = false;
     $("oauthPoll").disabled = false;
-    setOAuthStatus("已生成链接，请打开授权页完成登录。正在自动检测…", null);
+    setOAuthStatus(`已生成链接${chan === "tencent" ? "（" + realmLabel(realm) + "）" : ""}，请打开授权页完成登录。正在自动检测…`, null);
     // 自动打开
     try { window.open(data.auth_url, "_blank", "noopener,noreferrer"); } catch {}
     stopOAuthPoll();
@@ -828,7 +856,8 @@ async function startOAuth(){
 }
 
 async function pollOAuth(silent){
-  const chan = oauthChannel();
+  // 用**发起时**的渠道轮询：中途改渠道选择不该把轮询打到另一个端点。
+  const chan = oauthActiveChan || oauthChannel();
   if ((chan === "tencent" ? !oauthTencentState : !oauthSessionId) || oauthBusy) return;
   oauthBusy = true;
   if (!silent) setOAuthStatus('<span class="spin"></span>正在确认授权结果…', null);
@@ -840,21 +869,37 @@ async function pollOAuth(silent){
       setOAuthStatus('<span class="spin"></span>' + (data.message || "等待浏览器完成授权…"), null);
       return;
     }
-    if (data.status === "done" && data.ok) {
+    // 成功判定只看 ok：腾讯渠道的响应没有 status 字段（历史 bug：只认 status==="done"
+    // 会把**已经成功**的腾讯登录判成失败，state 已被服务端消费 → 之后每次重试都
+    // "state expired"，用户被卡死在这个假错误里）。
+    if (data.ok) {
       stopOAuthPoll();
-      setOAuthStatus("✓ " + (data.message || "登录成功"), true);
-      toast(data.message || "登录成功");
-      oauthSessionId = "";
+      oauthActiveChan = "";
+      oauthSessionId = ""; oauthTencentState = "";
       $("oauthPoll").disabled = true;
+      if (data.added === false) {
+        setOAuthStatus("✓ " + (data.message || "已更新现有账号凭证"), true);
+        toast("已更新现有账号凭证（同一 uid）", true);
+      } else {
+        setOAuthStatus("✓ " + (data.message || "登录成功"), true);
+        toast(data.message || "登录成功");
+      }
       await loadOverview();
-      setTimeout(closeOAuthModal, 900);
+      // 服务端登录后会异步初始化新账号（额度快照/签到）——延迟再回读一次，
+      // 把刚查出来的额度刷进列表（初始化是 best-effort，失败也不影响登录）。
+      setTimeout(() => loadOverview().catch(() => {}), 3000);
+      setTimeout(closeOAuthModal, 1200);
       return;
     }
-    // error
+    // 终端失败（state 失效等）：停轮询 + 清状态，否则会一直空转到用户重开
     stopOAuthPoll();
+    oauthActiveChan = "";
+    oauthSessionId = ""; oauthTencentState = "";
+    $("oauthPoll").disabled = true;
     setOAuthStatus("✗ " + (data.message || "授权失败"), false);
-    toast(data.message || "授权失败", false);
+    if (!silent) toast(data.message || "授权失败", false);
   } catch (e) {
+    // 网络/HTTP 错误：非静默时提示；静默轮询不刷屏（保持上一状态）
     if (!silent) {
       setOAuthStatus("查询失败: " + e.message, false);
       toast(e.message, false);
@@ -866,6 +911,7 @@ async function pollOAuth(silent){
 
 $("btnAddAccount").onclick = openOAuthModal;
 $("btnAddAccount2").onclick = openOAuthModal;
+document.querySelectorAll('input[name="oauthChannel"]').forEach(el => el.addEventListener("change", syncOAuthRealmRow));
 $("oauthClose").onclick = closeOAuthModal;
 $("oauthModal").addEventListener("click", (e) => { if (e.target === $("oauthModal")) closeOAuthModal(); });
 $("oauthStart").onclick = startOAuth;

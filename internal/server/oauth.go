@@ -58,10 +58,12 @@ func (s *oauthStore) get(id string) *oauthSession {
 	return s.byID[id]
 }
 
-// tencentState 一条进行中的腾讯设备流（state → 过期时间）。
+// tencentState 一条进行中的腾讯设备流（state → 过期时间 + 区域）。
+// 区域随 state 记住：token/account 两段只在发起时选定的 base 上有效。
 type tencentState struct {
 	AuthURL string `json:"auth_url"`
 	Expires int64  `json:"expires"` // Unix 秒
+	Realm   string `json:"realm"`   // ""/"cn" 国内；"global" 国际
 }
 
 // getBySecret 按 portal 回调携带的 secret 定位会话（code 通道用）。
@@ -219,6 +221,9 @@ func (h *Handler) adminOAuthPoll(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 同一 uid 已在池中 = 这次是更新凭证而不是新增账号（与腾讯渠道同一口径，
+	// 面板据此提示"想新增账号请换一个账号登录"）。
+	existed := h.cfg.Pool.Get(tok.UserID) != nil
 	if err := h.saveLoginResult(tok, sess.Verifier, sess.TicketID, h.oauth.secretFor(sess.TicketID)); err != nil {
 		sess.Done = true
 		sess.Err = err.Error()
@@ -227,10 +232,18 @@ func (h *Handler) adminOAuthPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Done = true
 	h.oauth.del(req.SessionID)
+	msg := fmt.Sprintf("登录成功：%s (%s)——已触发额度/福利领取初始化", nonempty(tok.UserName, "未命名"), shortID(tok.UserID))
+	if existed {
+		msg = fmt.Sprintf("登录成功：%s (%s) 已在账号池中——已更新其凭证。想新增账号请换一个账号登录",
+			nonempty(tok.UserName, "未命名"), shortID(tok.UserID))
+		log.Printf("huawei login uid=%s 已在池中 → 仅更新凭证（未新增账号）", shortID(tok.UserID))
+	}
+	h.initAccountAsync(tok.UserID) // 额度快照 + 当日福利领取（异步，失败不影响登录）
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"status":  "done",
-		"message": fmt.Sprintf("登录成功：%s (%s)", nonempty(tok.UserName, "未命名"), shortID(tok.UserID)),
+		"added":   !existed,
+		"message": msg,
 		"account": map[string]any{"uid": tok.UserID, "nickname": tok.UserName},
 	})
 }
@@ -328,6 +341,28 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte("<h3>登录成功，可关闭此页面并回到 WebUI。</h3>"))
+}
+
+// initAccountAsync 登录成功后的账号初始化（SPEC §24.3）：校验凭证 + 补跑该账号
+// 当日的每日动作（华为福利领取 / 腾讯签到 + 额度快照）。
+//
+// 异步、best-effort：不阻塞登录响应（浏览器端还会延迟回读一次面板）；失败只记
+// 日志——账号已入池，调度器 Tick（默认 30 分钟）与面板手动入口仍兜底。
+// 不这么做的话：新账号的额度快照要等下一个 Tick，当日已跑过的签到/福利（按动作
+// 去重）更是要等次日，面板就一直是"未查询"。
+func (h *Handler) initAccountAsync(uid string) {
+	if h.cfg.AccountInit == nil || uid == "" {
+		return
+	}
+	acct := h.cfg.Pool.Get(uid)
+	if acct == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		h.cfg.AccountInit(ctx, acct)
+	}()
 }
 
 // saveLoginResult 落盘 auth 并加入账号池。ticketID/secret 非空时一并持久化

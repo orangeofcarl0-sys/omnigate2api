@@ -867,6 +867,48 @@ type ChatAPI interface {
 华为 PKCE 二段握手保持；腾讯 OAuth 设备流新增 `cmd/login-tencent`（或
 `cmd/login -provider tencent`）。登录产出即落盘对应命名空间前缀。
 
+**设备流的区域选择（v1.4 补，区域由 base 决定，不由账号决定）**：
+
+- 设备流发起时**没有凭证 domain** 可依——区域必须显式给出：国内
+  `copilot.tencent.com`（登录页 codebuddy.cn，入口 微信/手机号/邮箱/SSO）、国际
+  `www.workbuddy.ai`（登录页含 Google/GitHub/X）。`TencentClient.deviceFlowBase(realm)`
+  单点收敛该选择，`OMNIGATE_TENCENT_BASE` 覆盖优先（测试/实验）。
+- 三段（state/token/account）必须同区域——**state 只在对应 base 上有效**，故面板
+  把 realm 随 state 一起记住（`tencentState.Realm`），poll 沿用发起时的区域。
+- **落账 domain 按所选区域补齐**：凭证 `domain` 是此后 chat/计费/活动全部请求的区域判据
+  （`TencentRegion` 按 `.workbuddy.ai` 后缀分流）。上游没回 domain 或与所选区域矛盾时，
+  按所选区域写入默认登录域（`DeviceFlowDomain`）并记日志——否则账号会被路由到相反区域，
+  表现为"登录成功但请求全 400"。
+- 两个实测坑：① Google 登录**拒绝内嵌 webview**（`accounts.google.com/.../pk/error`），
+  国际版必须用系统浏览器打开授权页；② 必须换 Google 账号，同一 uid 会覆盖
+  `auths/workbuddy-{uid}.json` 而不新增账号（"显示成功但账号数没变"）。
+- 面板入口：授权登录模态的腾讯渠道下选区域（国内/国际），start 请求带
+  `{"realm":"cn"|"global"}`；CLI 入口用 `OMNIGATE_TENCENT_BASE` 环境变量表达同一选择。
+
+**poll 响应契约（两渠道统一，v1.4 补）**：
+
+- 两渠道的成功响应都带 `status:"done"` + `added`（`true` = 新增账号 / `false` = **同一
+  uid 已在池中，本次是更新其凭证**）。面板只按 `ok` 判成功，`added===false` 时改用
+  "已更新现有账号"的措辞并提示换账号姿势（登出站点 / 换 Google 账号 / 无痕窗口）。
+  **历史 bug**：面板曾只认 `status==="done"`，而腾讯渠道的响应没有该字段 → 登录**已经
+  成功**（凭证已落盘、账号已入池）却被判成失败，state 也已消费 → 用户再点「我已授权」
+  永远得到 `state expired`，卡死在假错误里。
+- state 失效（上游授权窗口约 10 分钟过期，或网关期间重启过——state 只在内存）不再是
+  4xx，而是 **200 + `{ok:false, expired:true, message}`**：面板据此**停止轮询并清掉本地
+  state**（静默轮询同样处理），并提示重新「发起授权」。否则自动轮询会对着死 state 空转。
+- 同一 uid 重复登录 = 覆盖 `auths/workbuddy-{uid}.json` + 池内原地替换（`AddAccount`
+  同名替换），**账号数不变**——响应的 `added:false` 是这一事实的唯一信号。
+- **登录成功即初始化新账号（v1.4 补）**：响应返回前触发 `Config.AccountInit`
+  （main 注入 `scheduler.InitAccount`），异步为该账号补跑"上线动作"——`Validate`
+  （凭证可用性 + 临近过期自动续期）+ 该账号**当日**的每日动作（华为：福利领取 +
+  token 余额快照；腾讯：签到（幂等）+ 积分余额快照）。日志：`account init account=… ok …`。
+  为什么必须有这一步：`claimDaily` 的每日去重是**按动作**（label）而不是按账号——
+  今天已经跑过签到的家族，之后新加入的账号要等**次日**才被服务；额度快照也要等
+  下一个 Tick（默认 30 分钟），期间面板一直显示"未查询"（这就是"新账号不会主动初始化"）。
+  每日动作本身幂等（签到回 already、benefit claim 幂等），补跑安全、与当日后续 Tick 不冲突；
+  失败只记日志（账号已入池，Tick 与面板手动入口仍兜底）。面板在成功后延迟 ~3s 回读一次列表，
+  把刚查出来的额度刷进去。
+
 ---
 
 ## 25. workbuddy Profile 内置声明草案（v0.3）

@@ -328,3 +328,65 @@ func TestSchedulerTencentBalanceRefreshedWhenActivityInactive(t *testing.T) {
 		t.Fatalf("quota snapshot must be recorded: credits=%d updated=%d", credits, updated)
 	}
 }
+
+// InitAccount（SPEC §24.3）：面板新加账号的即时初始化——校验凭证 + 补跑该账号
+// 当日的每日动作（腾讯签到 + 额度快照）。每日去重是按动作的（claimDaily），所以
+// "今天已经跑过"的家族里新加的账号必须靠这条路径补跑，否则要等次日。
+func TestSchedulerInitAccount(t *testing.T) {
+	u2 := &auth.Auth{UserID: "t1", UserName: "tc", Profile: "workbuddy", CloudDragonTok: "t2",
+		RefreshToken: "r2", Expiration: "2099-01-01T00:00:00Z", EnterpriseID: "e2", Domain: "www.codebuddy.cn"}
+	p, err := pool.New([]*auth.Auth{u2}, pool.Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &fakeClient{}
+	p.Accounts()[0].Client = first
+	// 先跑一次 Tick：当日每日动作"已办"（新账号会漏掉的正是这道门）
+	s := New(Config{Pool: p, Enabled: true})
+	s.Tick(context.Background())
+	if first.checkins != 1 {
+		t.Fatalf("baseline tick must check in: %d", first.checkins)
+	}
+
+	// 此刻新加一个腾讯账号：没有额度快照（面板显示"未查询"）
+	acct := p.AddAccount(&auth.Auth{UserID: "t9", UserName: "new", Profile: "workbuddy",
+		CloudDragonTok: "t9", RefreshToken: "r9", Expiration: "2099-01-01T00:00:00Z",
+		EnterpriseID: "e9", Domain: "www.workbuddy.ai"})
+	stub := &fakeClient{}
+	acct.Client = stub
+	if q := quotaRow(t, p, "t9"); q["quota_updated_at"].(int64) != 0 {
+		t.Fatalf("fresh account must have no quota snapshot: %+v", q)
+	}
+
+	s.InitAccount(context.Background(), acct)
+	if stub.checkins != 1 {
+		t.Fatalf("init must check in for the new account: %d", stub.checkins)
+	}
+	q := quotaRow(t, p, "t9")
+	if q["quota_updated_at"].(int64) == 0 || q["credits"].(int64) == 0 {
+		t.Fatalf("init must fill the quota snapshot（面板不再显示未查询）: %+v", q)
+	}
+	// 幂等：上游回 already，再跑一次不报错、额度照旧刷新
+	s.InitAccount(context.Background(), acct)
+	if stub.checkins != 2 {
+		t.Fatalf("second init must still poll upstream (already): %d", stub.checkins)
+	}
+
+	// 非腾讯/非华为家族（或 nil 账号）：安全 no-op
+	s.InitAccount(context.Background(), nil)
+}
+
+// quotaRow 从面板视图里取某账号的额度字段（与 Pool.List 同口径）。
+func quotaRow(t *testing.T, p *pool.Pool, uid string) map[string]any {
+	t.Helper()
+	for _, row := range p.List() {
+		if row["uid"] == uid {
+			return row
+		}
+	}
+	t.Fatalf("account %s not in pool view", uid)
+	return nil
+}

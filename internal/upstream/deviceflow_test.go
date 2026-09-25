@@ -43,7 +43,7 @@ func TestTencentDeviceFlow(t *testing.T) {
 	t.Setenv("OMNIGATE_TENCENT_BASE", srv.URL)
 	c := NewTencent(5 * time.Second)
 
-	authURL, state, err := c.DeviceFlowState()
+	authURL, state, err := c.DeviceFlowState("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,11 +51,11 @@ func TestTencentDeviceFlow(t *testing.T) {
 		t.Fatalf("state: %q %q", state, authURL)
 	}
 
-	tok, done, err := c.DeviceFlowToken(state)
+	tok, done, err := c.DeviceFlowToken("", state)
 	if err != nil || done {
 		t.Fatalf("first poll must be pending: done=%v err=%v", done, err)
 	}
-	tok, done, err = c.DeviceFlowToken(state)
+	tok, done, err = c.DeviceFlowToken("", state)
 	if err != nil || !done {
 		t.Fatalf("second poll must be done: done=%v err=%v", done, err)
 	}
@@ -63,11 +63,41 @@ func TestTencentDeviceFlow(t *testing.T) {
 		t.Fatalf("token: %+v", tok)
 	}
 
-	uid, ent, nick, err := c.DeviceFlowAccount(state, tok.AccessToken)
+	uid, ent, nick, err := c.DeviceFlowAccount("", state, tok.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if uid != "u9" || ent != "e9" || nick != "nick" {
 		t.Fatalf("account: %q %q %q", uid, ent, nick)
+	}
+}
+
+// 设备流区域选择（HANDOFF §6.6）：区域由 base 决定——国内 copilot.tencent.com、
+// 国际 www.workbuddy.ai；deviceFlowBase 不依赖凭证 domain（登录前没有 domain）。
+func TestTencentDeviceFlowRealm(t *testing.T) {
+	t.Setenv("OMNIGATE_TENCENT_BASE", "")
+
+	cases := []struct{ realm, base, origin string }{
+		{"", "https://copilot.tencent.com", "https://www.codebuddy.cn"},
+		{"cn", "https://copilot.tencent.com", "https://www.codebuddy.cn"},
+		{"global", "https://www.workbuddy.ai", "https://www.workbuddy.ai"},
+	}
+	for _, tc := range cases {
+		base, origin := NewTencent(5 * time.Second).deviceFlowBase(tc.realm)
+		if base != tc.base || origin != tc.origin {
+			t.Fatalf("realm=%q base=%q origin=%q want %q %q", tc.realm, base, origin, tc.base, tc.origin)
+		}
+	}
+	// 实验/测试覆盖优先于区域（stub 服务器两域共用）
+	t.Setenv("OMNIGATE_TENCENT_BASE", "http://127.0.0.1:1/stub")
+	if base, _ := NewTencent(5 * time.Second).deviceFlowBase("global"); base != "http://127.0.0.1:1/stub" {
+		t.Fatalf("env override must win: %q", base)
+	}
+	// 账号域兜底：按区域给默认登录域（TencentRegion 按此后缀分流）
+	if DeviceFlowDomain("global") != "www.workbuddy.ai" || DeviceFlowDomain("cn") != "www.codebuddy.cn" {
+		t.Fatalf("default domains wrong: %q %q", DeviceFlowDomain("global"), DeviceFlowDomain("cn"))
+	}
+	if !TencentRegion(DeviceFlowDomain("global")) || TencentRegion(DeviceFlowDomain("cn")) {
+		t.Fatalf("default domain must imply its realm")
 	}
 }

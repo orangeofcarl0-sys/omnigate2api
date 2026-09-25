@@ -129,9 +129,10 @@ flowchart TB
   `400 + code=11128`（安全策略拦截）；网关在全球域账号上自动前置一条中性 system，
   国内域不注入。缺失该前置时全球账号会「看着健康却从不服务」——每次被轮询到都 400，
   请求靠换号重试兜住，但白付一次往返并把账号推入冷却。
-- **加全球账号（运维）**：设备流的区域由 base 决定，不由账号决定——加国外账号必须带
-  `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 发起（否则拿到的是国内登录页，只有
-  微信/手机号/邮箱，没有 Google/GitHub/X 入口）：
+- **加全球账号（运维）**：最简单是面板「授权登录」→ 腾讯 WorkBuddy → 区域选**国际**
+  （面板会按所选区域发起设备流并把凭证 domain 落账成 `www.workbuddy.ai`）。设备流的区域由
+  base 决定、不由账号决定；CLI 等价做法是带 `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai`
+  发起（否则拿到的是国内登录页，只有微信/手机号/邮箱，没有 Google/GitHub/X 入口）：
   ```bash
   docker compose exec -e OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai \
     omnigate2api omnigate2api-login-tencent url     # 打印 authUrl，用外部浏览器打开
@@ -139,8 +140,13 @@ flowchart TB
     omnigate2api omnigate2api-login-tencent poll    # 授权后落盘 auths/workbuddy-{uid}.json
   ```
   两个注意点：① **Google 登录不能用内嵌 webview**（Google 拒绝嵌入式 OAuth），必须用系统
-  浏览器；② 必须用**不同的** Google 账号，否则同一 uid 会覆盖原凭证文件而不新增账号。
+  浏览器；② 必须用**不同的** Google 账号，否则同一 uid 会覆盖原凭证文件而不新增账号——
+  面板会明说这次是"已在账号池中，已更新其凭证"（`added:false`），看到这句就说明没新增。
   落盘后 `POST /admin/api/reload`（面板「重载 auths」）热生效，无需重启。
+- **登录即初始化（无需等待）**：面板/CLI 登录成功后，网关会异步为新账号补跑凭证校验、
+  额度快照与**当日**的签到（腾讯）/福利领取（华为），面板几秒后自动把额度刷出来；
+  日志形如 `account init account=… ok balance=…`。不做这一步的话，新账号要等下一个轮询
+  周期（默认 30 分钟）才有额度，而当天已经跑过的每日动作要等到**次日**才轮到它。
 - **模型级限流与按模型冷却（SPEC §28.4.1）**：上游对单个模型限使用量（`429 + code 6004`，
   文案自证"可切换其他模型继续使用"）。池按 **(账号, 模型)** 记账冷却并轮换到其它账号，
   解封时刻取上游声明值，**整账号健康不受影响**——同账号其它模型照常可用；面板显示
@@ -289,11 +295,10 @@ docker compose exec omnigate2api omnigate2api-login-tencent poll
 ```
 
 落盘后 `POST /admin/api/reload`（面板「重载 auths」）**热生效，无需重启**
-（`docker compose restart` 会顺带重置当日福利领取去重，仅在需要时用）；也可以直接用面板「授权登录」（v1.3 起内置设备流模态，授权后同样热入池）。
+（`docker compose restart` 会顺带重置当日福利领取去重，仅在需要时用）；也可以直接用面板「授权登录」——腾讯渠道下有**区域选择**（国内 / 国际），授权后同样热入池（v1.3 起内置设备流模态，v1.4 起支持国际）。
 
 - 凭证落盘 `auths/workbuddy-{uid}.json`（与华为 `codearts-*` 命名空间并存，家族隔离）；
-- **加国际版账号**必须带 `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 发起（区域由 base 决定，
-  不由账号决定；否则拿到的是国内登录页），完整步骤与注意事项见上文「多渠道上游」；
+- **加国际版账号**：面板「授权登录」选腾讯渠道 + 区域「国际」即走 `www.workbuddy.ai`；CLI 等价做法是带 `OMNIGATE_TENCENT_BASE=https://www.workbuddy.ai` 发起（区域由 base 决定，不由账号决定；否则拿到的是国内登录页，只有微信/手机号/邮箱，没有 Google/GitHub）。完整步骤与注意事项见上文「多渠道上游」；
 - 使用：显式渠道用请求头 `X-Provider: workbuddy`；v1.3 起无需渠道头——直接发裸模型名，
   网关按路由表自动分流（`kimi-k2.7` / `hy3` 等 → 腾讯，`glm-5.2` 等 → 华为），
   路由表可在 WebUI「模型与路由」里增删改；

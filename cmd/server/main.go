@@ -89,6 +89,10 @@ func main() {
 		Profiles:          buildProfiles(),
 		Listen:            cfg.Listen,
 		OAuthCallbackHost: cfg.OAuthCallbackHost,
+		// 登录成功后的新账号初始化：凭证校验 + 额度快照 + 当日签到/福利领取
+		// （异步、best-effort，见 SPEC §24.3）。不接的话新账号要等下一个 Tick
+		// 才有额度，而当日已跑过的每日动作（按动作去重）更是要等次日。
+		AccountInit: sch.InitAccount,
 		Usage: server.NewUsageStats(
 			filepath.Join(filepath.Dir(cfg.StateFile), "usage.json"), cfg.Pricing),
 	})

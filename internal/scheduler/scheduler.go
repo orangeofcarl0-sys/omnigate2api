@@ -230,16 +230,24 @@ func (s *Scheduler) claimBenefit(ctx context.Context) {
 		return
 	}
 	s.claimDaily(ctx, "benefit claim", "codearts", func(acct *pool.Account) (string, error) {
-		if _, err := s.cfg.Client.ClaimBenefit(ctx, acct.Auth); err != nil {
-			return "", err
-		}
-		bal, err := s.cfg.Client.FetchTokensBalance(ctx, acct.Auth)
-		if err != nil {
-			return "ok (balance query failed: " + err.Error() + ")", nil
-		}
-		acct.SetQuota(pool.AccountQuota{Remain: bal.TotalBalance, Total: bal.TotalQuota, Used: bal.UsedAmount, UpdatedAt: time.Now().Unix()})
-		return fmt.Sprintf("ok balance=%d/%d used=%d", bal.TotalBalance, bal.TotalQuota, bal.UsedAmount), nil
+		return s.claimBenefitFor(ctx, acct)
 	})
+}
+
+// claimBenefitFor 单个华为账号：领取活动福利额度 + 刷新 token 余额快照。
+func (s *Scheduler) claimBenefitFor(ctx context.Context, acct *pool.Account) (string, error) {
+	if s.cfg.Client == nil {
+		return "", nil
+	}
+	if _, err := s.cfg.Client.ClaimBenefit(ctx, acct.Auth); err != nil {
+		return "", err
+	}
+	bal, err := s.cfg.Client.FetchTokensBalance(ctx, acct.Auth)
+	if err != nil {
+		return "ok (balance query failed: " + err.Error() + ")", nil
+	}
+	acct.SetQuota(pool.AccountQuota{Remain: bal.TotalBalance, Total: bal.TotalQuota, Used: bal.UsedAmount, UpdatedAt: time.Now().Unix()})
+	return fmt.Sprintf("ok balance=%d/%d used=%d", bal.TotalBalance, bal.TotalQuota, bal.UsedAmount), nil
 }
 
 // claimTencentCheckin 每自然日（北京时间）为腾讯账号签到一次（幂等）并查询
@@ -247,43 +255,84 @@ func (s *Scheduler) claimBenefit(ctx context.Context) {
 // 「Buddy 加油站」积分），失败只记日志、不影响账号健康。
 func (s *Scheduler) claimTencentCheckin(ctx context.Context) {
 	s.claimDaily(ctx, "tencent checkin", "workbuddy", func(acct *pool.Account) (string, error) {
-		api, ok := acct.Client.(upstream.BillingAPI)
-		if !ok {
-			return "", nil // 无计费能力（非腾讯客户端）：跳过
-		}
-		// 活动态预检（2026-09-23 实证）：status 显式给出 active=false 时直接跳过
-		// 领取（全球版活动未开启时领取必 10001）；字段缺失（CN 形态）不预检。
-		// 注意：跳过的是**领取**，不是余额查询——全球版没有签到活动但仍在消耗
-		// 聊天额度，余额必须刷新（否则面板在每次重启后一直显示"未查询"）。
-		st, serr := api.CheckinStatus(acct.Auth)
-		if serr == nil && st != nil && st.Active != nil && !*st.Active {
-			return fmt.Sprintf("skip reason=activity_inactive theme=%s%s", st.ThemeName,
-				refreshTencentBalance(acct, api)), nil
-		}
-		res, err := api.DailyCheckin(acct.Auth)
-		if err != nil {
-			return "", err
-		}
-		gain := ""
-		if res != nil {
-			switch {
-			case res.Inactive:
-				return fmt.Sprintf("skip reason=activity_inactive msg=%s%s", res.Reason,
-					refreshTencentBalance(acct, api)), nil
-			case res.Already:
-				gain = " already"
-			default:
-				gain = fmt.Sprintf(" credit=+%d", res.Credit)
-			}
-			if res.StreakDays > 0 {
-				gain += fmt.Sprintf(" streak=%d", res.StreakDays)
-			}
-		}
-		if st2, serr2 := api.CheckinStatus(acct.Auth); serr2 == nil && st2 != nil {
-			gain += fmt.Sprintf(" total=%d theme=%s", st2.TotalCredits, st2.ThemeName)
-		}
-		return "ok" + gain + refreshTencentBalance(acct, api), nil
+		return s.claimTencentCheckinFor(acct)
 	})
+}
+
+// claimTencentCheckinFor 单个腾讯账号：签到（幂等）+ 刷新积分余额快照。
+func (s *Scheduler) claimTencentCheckinFor(acct *pool.Account) (string, error) {
+	api, ok := acct.Client.(upstream.BillingAPI)
+	if !ok {
+		return "", nil // 无计费能力（非腾讯客户端）：跳过
+	}
+	// 活动态预检（2026-09-23 实证）：status 显式给出 active=false 时直接跳过
+	// 领取（全球版活动未开启时领取必 10001）；字段缺失（CN 形态）不预检。
+	// 注意：跳过的是**领取**，不是余额查询——全球版没有签到活动但仍在消耗
+	// 聊天额度，余额必须刷新（否则面板在每次重启后一直显示"未查询"）。
+	st, serr := api.CheckinStatus(acct.Auth)
+	if serr == nil && st != nil && st.Active != nil && !*st.Active {
+		return fmt.Sprintf("skip reason=activity_inactive theme=%s%s", st.ThemeName,
+			refreshTencentBalance(acct, api)), nil
+	}
+	res, err := api.DailyCheckin(acct.Auth)
+	if err != nil {
+		return "", err
+	}
+	gain := ""
+	if res != nil {
+		switch {
+		case res.Inactive:
+			return fmt.Sprintf("skip reason=activity_inactive msg=%s%s", res.Reason,
+				refreshTencentBalance(acct, api)), nil
+		case res.Already:
+			gain = " already"
+		default:
+			gain = fmt.Sprintf(" credit=+%d", res.Credit)
+		}
+		if res.StreakDays > 0 {
+			gain += fmt.Sprintf(" streak=%d", res.StreakDays)
+		}
+	}
+	if st2, serr2 := api.CheckinStatus(acct.Auth); serr2 == nil && st2 != nil {
+		gain += fmt.Sprintf(" total=%d theme=%s", st2.TotalCredits, st2.ThemeName)
+	}
+	return "ok" + gain + refreshTencentBalance(acct, api), nil
+}
+
+// InitAccount 单个账号的即时初始化：面板登录成功后给新账号补跑"上线动作"——
+// 校验凭证（临近过期自动续期）+ 该账号当日的每日动作（华为福利领取 / 腾讯签到
+// + 余额快照）。
+//
+// 为什么需要它：claimDaily 的每日去重是**按动作**（label）而不是按账号——今天已经
+// 跑过签到的家族，之后新加入的账号要等**次日**才被服务；额度快照也要等下一个
+// Tick（默认 30 分钟），期间面板一直显示"未查询"。每日动作本身幂等（签到回
+// already、benefit claim 幂等），所以补跑安全，也不会与当日后续 Tick 冲突。
+func (s *Scheduler) InitAccount(ctx context.Context, acct *pool.Account) {
+	if acct == nil || s.cfg.Pool == nil {
+		return
+	}
+	if ok, err := s.cfg.Pool.Validate(acct); err != nil {
+		log.Printf("account init account=%s validate failed err=%v", acct.Name, err)
+	} else if !ok {
+		log.Printf("account init account=%s validate: token invalid（已入池，按健康状态自然处理）", acct.Name)
+	}
+	var (
+		msg string
+		err error
+	)
+	switch acct.ProfileID {
+	case "codearts":
+		msg, err = s.claimBenefitFor(ctx, acct)
+	case "workbuddy":
+		msg, err = s.claimTencentCheckinFor(acct)
+	default:
+		return
+	}
+	if err != nil {
+		log.Printf("account init account=%s failed err=%v", acct.Name, err)
+	} else if msg != "" {
+		log.Printf("account init account=%s %s", acct.Name, msg)
+	}
 }
 
 // refreshTencentBalance 刷新积分余额快照并返回日志后缀。

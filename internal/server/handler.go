@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	crand "crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -210,6 +211,11 @@ type Config struct {
 	RoutesFile string
 	// Usage Token 用量统计与白嫖金额换算（SPEC §34）；nil = 关闭（不落账、面板显示不可用）。
 	Usage *UsageStats
+	// AccountInit 登录成功后的新账号初始化钩子（凭证校验 + 额度快照 + 当日签到/
+	// 福利领取）：main 注入调度器 Scheduler.InitAccount（SPEC §24.3）。nil = 跳过
+	// （测试/嵌入式）。不设它会怎样：新账号要等下一个 Tick（默认 30 分钟）才有额度
+	// 快照，且当日已跑过的每日动作（按动作去重）要等**次日**才轮到它。
+	AccountInit func(context.Context, *pool.Account)
 }
 
 // maxBodyBytes 请求体上限（SPEC §30.7）：32MB——上游图片实测上限 ~1MB/张、
