@@ -4,6 +4,7 @@ package pool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -488,24 +489,26 @@ func (p *Pool) Validate(a *Account) (bool, error) {
 
 	authz := a.Auth
 	if authz.ExpiringSoon(p.cfg.RefreshSkew) || authz.Expired() {
-		if authz.Refresh() == "" {
-			// 没有 refresh_token（华为云 ticket 通道不返回），不立即 disable，
-			// 只打告警日志。token 过期后上游 401 会自然 disable。
-			log.Printf("pool token account=%s expiring soon (remaining=%s) but no refresh_token, re-login required",
-				a.Name, authz.Remaining().Round(time.Minute))
-			a.mu.Lock()
-			a.lastValidated = time.Now()
-			a.mu.Unlock()
-			return true, nil
-		}
-		cfg := upstream.DefaultLoginConfig()
-		resp, err := a.Client.RefreshToken(context.Background(), cfg, authz.Refresh(), authz.Verifier(), authz.Domain)
+		err := refreshAuthCreds(a, nil)
 		if err != nil {
-			p.Disable(a.Name, "refresh failed: "+err.Error())
-			return false, nil
-		}
-		if err := applyAuthCreds(authz, resp); err != nil {
-			log.Printf("pool token refresh save failed account=%s err=%v", a.Name, err)
+			switch {
+			case errors.Is(err, errNoRenewalPath):
+				// 没有 refresh_token 且 ticket 会话不可用（华为 ticket 通道不发
+				// refresh_token，见 §6.5）：不立即 disable，只打告警日志。
+				// token 过期后上游 401 会自然 disable。
+				log.Printf("pool token account=%s expiring soon (remaining=%s) but no renewal path (%v), re-login required",
+					a.Name, authz.Remaining().Round(time.Minute), err)
+				a.mu.Lock()
+				a.lastValidated = time.Now()
+				a.mu.Unlock()
+				return true, nil
+			case errors.Is(err, errSaveFailed):
+				// 凭证已更新到内存，只是落盘失败——不致命（历史语义：记日志继续）。
+				log.Printf("pool token refresh save failed account=%s err=%v", a.Name, err)
+			default:
+				p.Disable(a.Name, "refresh failed: "+err.Error())
+				return false, nil
+			}
 		}
 		log.Printf("pool token refreshed account=%s", a.Name)
 	}
@@ -772,20 +775,62 @@ func (p *Pool) RefreshToken(name string) error {
 	}
 
 	authz := acct.Auth
-	if authz.Refresh() == "" {
-		return fmt.Errorf("no refresh_token available")
+	if err := refreshAuthCreds(acct, nil); err != nil {
+		return err
 	}
-
-	cfg := upstream.DefaultLoginConfig()
-	resp, err := acct.Client.RefreshToken(context.Background(), cfg, authz.Refresh(), authz.Verifier(), authz.Domain)
-	if err != nil {
-		return fmt.Errorf("refresh failed: %w", err)
-	}
-	if err := applyAuthCreds(authz, resp); err != nil {
-		return fmt.Errorf("save token: %w", err)
-	}
-	log.Printf("pool token refreshed manually account=%s", name)
+	log.Printf("pool token refreshed manually account=%s name=%s", name, authz.UserName)
 	return nil
+}
+
+// ticketPoller 华为 ticket 30 天免登录换发（仅 codearts 客户端实现，腾讯无此通道）。
+type ticketPoller interface {
+	PollTicket(ctx context.Context, cfg upstream.LoginConfig, ticketID, secret string) (*upstream.TokenResponse, error)
+}
+
+// 续期失败分型：errNoRenewalPath = 两条续期路都没有（需人工重登）；
+// errSaveFailed = 凭证已更新到内存但落盘失败（不致命，Validate 对它只记日志——
+// 测试账号没有落盘路径，历史上就是"记日志继续"的语义）。
+var (
+	errNoRenewalPath = errors.New("no refresh_token and no ticket session available")
+	errSaveFailed    = errors.New("save failed")
+)
+
+// refreshAuthCreds 续期账号凭证：优先 refresh_token；缺失时走华为 ticket 30 天
+// 免登录通道静默换发新 STS（华为文档「配置账号30天免登录」：客户端 26.5.1+ 的
+// 登录会话 30 天内有效，ticket+secret 可重复换发）。两条路都没有 → errNoRenewalPath。
+func refreshAuthCreds(acct *Account, pollerOverride ticketPoller) error {
+	authz := acct.Auth
+	cfg := upstream.DefaultLoginConfig()
+	if authz.Refresh() != "" {
+		resp, err := acct.Client.RefreshToken(context.Background(), cfg, authz.Refresh(), authz.Verifier(), authz.Domain)
+		if err != nil {
+			return fmt.Errorf("refresh failed: %w", err)
+		}
+		if err := applyAuthCreds(authz, resp); err != nil {
+			return fmt.Errorf("%w: %w", errSaveFailed, err)
+		}
+		return nil
+	}
+	tr := pollerOverride
+	if tr == nil {
+		if tp, ok := acct.Client.(ticketPoller); ok {
+			tr = tp
+		}
+	}
+	if tr != nil {
+		if id, secret := authz.TicketCreds(); id != "" && secret != "" {
+			resp, err := tr.PollTicket(context.Background(), cfg, id, secret)
+			if err != nil {
+				return fmt.Errorf("ticket re-poll failed: %w", err)
+			}
+			if err := applyAuthCreds(authz, resp); err != nil {
+				return fmt.Errorf("%w: %w", errSaveFailed, err)
+			}
+			log.Printf("pool token re-minted via ticket session account=%s", acct.Name)
+			return nil
+		}
+	}
+	return errNoRenewalPath
 }
 
 // applyAuthCreds 刷新结果落回凭证并保存（Validate 内联刷新与 RefreshToken 共用）。

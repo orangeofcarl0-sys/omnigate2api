@@ -85,8 +85,19 @@ func DefaultLoginConfig() LoginConfig {
 		STSHost:       STSHost,
 		RedirectPath:  "/oauth/callback",
 		PluginName:    "snap_AIIDE",
-		PluginVersion: "5.1.0",
+		PluginVersion: loginPluginVersion(),
 	}
+}
+
+// loginPluginVersion 登录伪装的客户端版本。文档「配置账号30天免登录」的 30 天
+// 档与客户端版本相关（26.5.1+ / 华为账号），但网关侧的 plugin-version 是否参与
+// 判定未实证——默认维持逆向基线 5.1.0 不动（发送形态纪律：无实证不改指纹）；
+// 实验时可用 OMNIGATE_LOGIN_PLUGIN_VERSION 覆盖后再观察凭证有效期。
+func loginPluginVersion() string {
+	if v := os.Getenv("OMNIGATE_LOGIN_PLUGIN_VERSION"); v != "" {
+		return v
+	}
+	return "5.1.0"
 }
 
 // Client CodeArts 云 API 客户端。

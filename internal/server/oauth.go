@@ -219,7 +219,7 @@ func (h *Handler) adminOAuthPoll(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if err := h.saveLoginResult(tok, sess.Verifier); err != nil {
+	if err := h.saveLoginResult(tok, sess.Verifier, sess.TicketID, h.oauth.secretFor(sess.TicketID)); err != nil {
 		sess.Done = true
 		sess.Err = err.Error()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "status": "error", "message": err.Error()})
@@ -318,7 +318,11 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("<h3>换取凭证失败：" + err.Error() + "</h3>"))
 		return
 	}
-	if err := h.saveLoginResult(tok, sess.Verifier); err != nil {
+	ticketID, ticketSecret := "", ""
+	if sess != nil {
+		ticketID, ticketSecret = sess.TicketID, secret
+	}
+	if err := h.saveLoginResult(tok, sess.Verifier, ticketID, ticketSecret); err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("<h3>保存账号失败：" + err.Error() + "</h3>"))
 		return
@@ -326,8 +330,9 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("<h3>登录成功，可关闭此页面并回到 WebUI。</h3>"))
 }
 
-// saveLoginResult 落盘 auth 并加入账号池。
-func (h *Handler) saveLoginResult(tok *upstream.TokenResponse, codeVerifier string) error {
+// saveLoginResult 落盘 auth 并加入账号池。ticketID/secret 非空时一并持久化
+// （华为 ticket 30 天免登录通道：续期时静默换发新 STS，见 HANDOFF §6.5）。
+func (h *Handler) saveLoginResult(tok *upstream.TokenResponse, codeVerifier, ticketID, ticketSecret string) error {
 	if h.cfg.AuthDir == "" {
 		return errors.New("auth_dir not configured")
 	}
@@ -335,6 +340,7 @@ func (h *Handler) saveLoginResult(tok *upstream.TokenResponse, codeVerifier stri
 	a := auth.New(tok.UserID, tok.UserName, tok.DomainID,
 		cred.SecurityToken, cred.AccessKeyID, cred.SecretAccessKey,
 		cred.Expiration, tok.RefreshToken, codeVerifier)
+	a.SetTicketCreds(ticketID, ticketSecret)
 	if err := auth.SaveNew(h.cfg.AuthDir, a); err != nil {
 		return err
 	}

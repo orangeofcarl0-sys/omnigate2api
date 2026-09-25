@@ -25,7 +25,11 @@ type Auth struct {
 	Expiration      string `json:"expiration"` // RFC3339
 	RefreshToken    string `json:"refresh_token"`
 	CodeVerifier    string `json:"code_verifier"` // PKCE verifier，refresh 需要
-	UpdatedAt       int64  `json:"updated_at"`
+	// 华为 ticket 30 天免登录通道（HANDOFF §6.5 / 华为文档「配置账号30天免登录」）：
+	// ticket+secret 在会话期（约 30 天）内可静默换发新 STS，替代不可用的 refresh_token。
+	TicketID     string `json:"ticket_id,omitempty"`
+	TicketSecret string `json:"ticket_secret,omitempty"`
+	UpdatedAt    int64  `json:"updated_at"`
 	// 腾讯专用（华为留空）
 	EnterpriseID string `json:"enterprise_id,omitempty"`
 	Domain       string `json:"domain,omitempty"`
@@ -85,6 +89,20 @@ func (a *Auth) Verifier() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.CodeVerifier
+}
+
+// TicketCreds 返回 ticket 免登录通道凭证（ticket_id + secret）。
+func (a *Auth) TicketCreds() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TicketID, a.TicketSecret
+}
+
+// SetTicketCreds 登录成功后更新 ticket 免登录凭证。
+func (a *Auth) SetTicketCreds(id, secret string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TicketID, a.TicketSecret = id, secret
 }
 
 // ExpiresAt 返回 token 过期时间。
