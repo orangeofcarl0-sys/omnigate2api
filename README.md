@@ -222,7 +222,13 @@ flowchart TB
 - 每轮折叠尺寸日志（`chat fold ... continue=true/false`）；
 - `TRANSCRIPT_ECHO` 漂移检测：模型输出中出现转录标记复述/编造时记录并落盘样本；
 - `OMNIGATE_DEBUG_PROMPTS` 开启折叠提示词全文落盘（`data/prompts/`）；
-- `OMNIGATE_DEBUG_CONFIG` 把上游 `/v3/config` 原始响应按区域落盘（上游审计：改解析前先列全部键路径，SPEC §33.3）。
+- `OMNIGATE_DEBUG_CONFIG` 把上游 `/v3/config` 原始响应按区域落盘（上游审计：改解析前先列全部键路径，SPEC §33.3）；
+- **Token 统计与白嫖金额（SPEC §34）**：面板按日/模型落账上游真实用量（输入/输出/缓存命中），
+  **白嫖金额 = 按"正常 API 调用花费"折算**——token × 模型牌价倍率 × 基准（实测 0.105
+  积分/千 token/倍率）× 积分牌价（国内 ¥0.014/积分、国际 $0.03/credits，均可在 config.json
+  `pricing` 覆盖）；实际积分消耗与促销免费部分单列。重启不丢（`data/usage.json`，
+  逐日保留 90 天）；「今日」按北京自然日切档并在 tile 上标注日期，「按天」表看逐日曲线
+  （`GET /admin/api/usage?days=N`，缺省近 14 天）。
 
 ## 快速开始
 

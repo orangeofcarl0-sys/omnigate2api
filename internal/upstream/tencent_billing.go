@@ -90,7 +90,7 @@ func (c *TencentClient) activityBaseFor(domain string) string {
 	if v := os.Getenv("OMNIGATE_ACTIVITY_BASE"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	if tencentRegion(domain) {
+	if TencentRegion(domain) {
 		return tencentBaseGlobal
 	}
 	return "https://copilot.tencent.com"
@@ -102,7 +102,7 @@ func (c *TencentClient) billingBaseFor(domain string) string {
 	if v := os.Getenv("OMNIGATE_BILLING_BASE"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	if tencentRegion(domain) {
+	if TencentRegion(domain) {
 		return "https://www.workbuddy.ai"
 	}
 	return "https://www.codebuddy.cn"

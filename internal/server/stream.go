@@ -187,6 +187,7 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	}
 	// 真实用量先于终止帧下发（各协议在自己该在的位置呈现它）。
 	if comp != nil && comp.Usage.Any() {
+		h.recordUsage(profile, acct, model, comp.Usage) // 用量落账（SPEC §34）
 		if us, ok := sink.(usageSink); ok {
 			if err := us.Usage(comp.Usage); err != nil {
 				log.Printf("chat stream account=%s usage error: %v", acct.Name, err)

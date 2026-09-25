@@ -124,16 +124,16 @@ func (c *TencentClient) chatDo(acct *auth.Auth, method, path string, body []byte
 	return c.tencentDo(acct, tencentHTTPOpts{base: base, method: method, path: path, body: body, desktopUA: desktop})
 }
 
-// tencentRegion 按凭证 domain 后缀判定区域：.workbuddy.ai → global 域，
+// TencentRegion 按凭证 domain 后缀判定区域：.workbuddy.ai → global 域，
 // 否则 CN 默认（base/Origin/Referer/计费域共用同一判定，单点收敛）。
-func tencentRegion(domain string) bool {
+func TencentRegion(domain string) bool {
 	return strings.HasSuffix(strings.TrimSpace(domain), ".workbuddy.ai")
 }
 
-// resolve 按凭证 domain 后缀解析 (base, origin)：区域判定见 tencentRegion；
+// resolve 按凭证 domain 后缀解析 (base, origin)：区域判定见 TencentRegion；
 // OMNIGATE_TENCENT_BASE 仅覆盖 base（测试/实验，Origin 仍按域规则）。
 func (c *TencentClient) resolve(domain string) (base, origin string) {
-	global := tencentRegion(domain)
+	global := TencentRegion(domain)
 	if global {
 		base = tencentBaseGlobal
 		origin = tencentOriginGlobal
@@ -190,7 +190,7 @@ func tencentChatHeaders(req *http.Request, cred SignCredential, origin string) {
 func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages []ChatMessage, traceID string, cred SignCredential, userName string, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
 	// 全球域要求首条为 system prompt（区域契约差异，见 tencent_realm.go）：
 	// 缺失则上游 400 + code=11128，且会把账号连续错误推入冷却。
-	if tencentRegion(cred.Domain) {
+	if TencentRegion(cred.Domain) {
 		messages = ensureLeadingSystem(messages)
 	}
 	// gen 先铺底（客户端生成参数：temperature/top_p/stop/seed/max_tokens/…），

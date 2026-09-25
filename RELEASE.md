@@ -21,6 +21,9 @@ fork 自 HITZY2002/omnigate2api（华为云 CodeArts Agent / 码道 OpenAI 兼�
   `GOMEMLIMIT`/`GOGC` 内存边界、请求体上限 64→32MB
 - **运维**：一键启动 `start.sh` / `start.cmd` / `panel.cmd`（引擎 → 指纹重建 → 容器 → 就绪）、
   桌面快捷入口、`OMNIGATE_DEBUG_CONFIG` 上游配置审计转储
+- **用量观测（SPEC §34）**：面板「Token 统计与白嫖金额」卡——按（北京自然日 × 渠道 × 模型）
+  落账上游真实用量，白嫖金额按"正常 API 调用花费"折算（牌价可在 config.json `pricing` 覆盖）；
+  「按天」逐日表 + `GET /admin/api/usage?days=N`，`data/usage.json` 保留 90 天
 - 华为通道 roles 化（SPEC §31）+ 双上游图片透传（SPEC §30）；修复原生 tool_calls 与正文流序颠倒
 
 ## v1.3.0

@@ -484,3 +484,20 @@ func (h *Handler) adminGrowth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
 }
+
+// adminUsage Token 用量统计与白嫖金额（SPEC §34 观测面）：今日/累计 + 按模型 + 逐日。
+// 只读本网关自己落账的数据（data/usage.json），不打上游。
+func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Usage == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	// 逐日视图天数：?days=N（缺省 14；非正数/非法值回落默认，上限由 SnapshotDays 钳到保留期）。
+	days := usageDaysDefault
+	if v := strings.TrimSpace(r.URL.Query().Get("days")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	writeJSON(w, http.StatusOK, h.cfg.Usage.SnapshotDays(days))
+}

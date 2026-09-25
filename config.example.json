@@ -11,6 +11,13 @@
   },
   "max_concurrent": 5,
   "keepalive_window": "10m",
+  "pricing": {
+    "credit_cny": 0.014,
+    "credit_usd": 0.03,
+    "usd_cny": 7.15,
+    "credit_per_1k_mult": 0.105,
+    "free_cny_per_mtoken": 0
+  },
   "watch": {
     "enabled": true,
     "poll_minutes": 30,

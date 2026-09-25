@@ -130,6 +130,43 @@ func (h *Handler) turnFailure(profile *adapt.UpstreamProfile, matchedKey string)
 	h.indexFor(profile).drop(matchedKey)
 }
 
+// recordUsage 落账一次真实上游用量（SPEC §34）。两个收口：流式 streamOut 的
+// usage 帧分支、非流式 completeChat 的 usageEstimate 之后——都只认上游真实
+// usage（Usage.Any()），估算值不落账。免费判定：
+//   - workbuddy：该区域促销缓存的生效类别（非 paid 即免费直用；缓存未命中
+//     按"不免费"处理——宁可少报。为什么不用 credit==0：微小请求积分取整为 0）；
+//   - codearts：福利模型（maas_type benefit，每日 token 额度）。
+func (h *Handler) recordUsage(profile *adapt.UpstreamProfile, acct *pool.Account, model string, u *upstream.Usage) {
+	if h.cfg.Usage == nil || u == nil || !u.Any() {
+		return
+	}
+	family, realm := "codearts", "huawei"
+	if profile != nil && profile.Auth.Family() == "workbuddy" {
+		family = "workbuddy"
+		realm = "cn"
+		if upstream.TencentRegion(acct.Auth.Domain) {
+			realm = "global"
+		}
+	}
+	// 缓存命中字段三家拼写不同（OpenAI cached_tokens / Anthropic cache_read /
+	// 腾讯 cache_hit），语义相同取最大值，避免同义字段相加重复计。
+	cached := u.CachedTokens
+	if u.CacheReadTokens > cached {
+		cached = u.CacheReadTokens
+	}
+	if u.CacheHitTokens > cached {
+		cached = u.CacheHitTokens
+	}
+	free, classified := false, true
+	switch family {
+	case "workbuddy":
+		free, classified = promoFree(realm, model, time.Now()) // 缓存未冷 → uncertain，快照时折叠
+	case "codearts":
+		free = isBenefitModel(model)
+	}
+	h.cfg.Usage.Record(family, realm, model, int64(u.PromptTokens), int64(u.CompletionTokens), int64(cached), u.Credit, free, !classified)
+}
+
 // registerSession 成功回合后登记指纹（全量与续接均登记最新状态，供下一轮匹配）。
 func (h *Handler) registerSession(profile *adapt.UpstreamProfile, routeKey string, msgsLen int, acct, chatID string) {
 	if routeKey == "" {
@@ -171,6 +208,8 @@ type Config struct {
 	// Routes 裸模型名路由表（SPEC §29，nil → 内置默认表）；RoutesFile 供 WebUI 保存。
 	Routes     *adapt.RouteTable
 	RoutesFile string
+	// Usage Token 用量统计与白嫖金额换算（SPEC §34）；nil = 关闭（不落账、面板显示不可用）。
+	Usage *UsageStats
 }
 
 // maxBodyBytes 请求体上限（SPEC §30.7）：32MB——上游图片实测上限 ~1MB/张、
@@ -254,6 +293,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/reload", h.withAuth(h.adminReload))
 	h.mux.HandleFunc("POST /admin/api/accounts/enable", h.withAuth(h.adminEnable))
 	h.mux.HandleFunc("GET /admin/api/growth", h.withAuth(h.adminGrowth))
+	h.mux.HandleFunc("GET /admin/api/usage", h.withAuth(h.adminUsage))
 	h.mux.HandleFunc("GET /admin/api/routes", h.withAuth(h.adminRoutesGet))
 	h.mux.HandleFunc("PUT /admin/api/routes", h.withAuth(h.adminRoutesPut))
 	h.mux.HandleFunc("GET /admin/api/routes/overview", h.withAuth(h.adminRoutesOverview))
@@ -647,6 +687,7 @@ func (h *Handler) completeChat(w http.ResponseWriter, acct *pool.Account, rc io.
 		h.dumpEcho(model, content)
 	}
 	usage := usageEstimate(msgs, comp)
+	h.recordUsage(profile, acct, model, comp.Usage) // 只认上游真实 usage；估算值不落账
 	switch proto {
 	case protoAnthropic:
 		writeJSON(w, http.StatusOK, buildAnthropicMessage(model, content, calls, finish, usage))

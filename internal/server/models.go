@@ -291,6 +291,20 @@ func (h *Handler) waitModels(c *modelCache, family string, wait time.Duration) [
 // startRefresh 后台触发一次拉取（不阻塞调用方）。返回是否确实发起了拉取。
 // inflight 标记由 refreshModels 自己 claim——此处只判断"没人拉就拉起"，
 // 否则先置位再拉起会让被拉起的 goroutine 把自己当成重复请求（自我阻塞）。
+// PreheatModels 冷启动预热（main 启动时异步调用）：拉取两渠道目录并刷新促销缓存。
+// 用量统计的免费判定依赖促销缓存（SPEC §34.2）——没有预热的话，纯 API 流量
+// （无人打开面板）会让缓存一直冷着，重启后的用量全部按"不免费"落账。
+// 非阻塞、best-effort：失败静默，靠下次触发/自愈兜底。
+func (h *Handler) PreheatModels() {
+	for _, family := range []string{"codearts", "workbuddy"} {
+		cache := cacheFor(family)
+		if h.startRefresh(cache, family) {
+			continue // refreshModels 成功后自带 refreshPromos
+		}
+		h.refreshPromos(h.modelAccountCandidates(family)) // 目录缓存已热/被冷却：仍确保促销缓存热
+	}
+}
+
 func (h *Handler) startRefresh(c *modelCache, family string) bool {
 	c.Lock()
 	if c.inflight || len(c.ids) > 0 {
@@ -847,6 +861,45 @@ func promoClaim(realm string) bool {
 	}
 	modelPromos.inflight[realm] = true
 	return true
+}
+
+// promoFree 用量落账的免费判定（SPEC §34）：按该区域促销缓存的生效类别判断——
+// 非按量计费（免费/限时免费/夜间免费/福利/折扣）都算"免费直用"。缓存未命中或
+// 该区域清单里没有此模型 → ok=false（调用方按"不免费"处理：宁可少报不虚报）。
+// 为什么不用 credit==0 判定：微小请求的积分按整数取整后为 0（实测 glm-5.3 全球
+// 48in/16out 记 0 积分），会把付费用量误判成白嫖。
+func promoFree(realm, modelID string, now time.Time) (free, ok bool) {
+	modelPromos.RLock()
+	defer modelPromos.RUnlock()
+	cfg := modelPromos.cfgs[realm]
+	if cfg == nil {
+		return false, false
+	}
+	if _, present := cfg.Find(modelID); !present {
+		return false, false
+	}
+	kind, _, _, _ := cfg.EffectiveAccess(modelID, now)
+	return kind != upstream.AccessPaid, true
+}
+
+// promoMultiplier 促销缓存里该区域模型的牌价倍率（"x0.79" → 0.79）。
+// 用于用量统计的"免费直用按正常 API 花费折算"（SPEC §34.2）。未命中 → ok=false。
+func promoMultiplier(realm, modelID string) (float64, bool) {
+	modelPromos.RLock()
+	defer modelPromos.RUnlock()
+	cfg := modelPromos.cfgs[realm]
+	if cfg == nil {
+		return 0, false
+	}
+	cm, ok := cfg.Find(modelID)
+	if !ok {
+		return 0, false
+	}
+	m, err := strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(cm.Multiplier()), "x"), 64)
+	if err != nil || m < 0 {
+		return 0, false
+	}
+	return m, true
 }
 
 // promoFinish 落定一次拉取结果（成功覆盖缓存并清错；失败记原因与负冷却）。

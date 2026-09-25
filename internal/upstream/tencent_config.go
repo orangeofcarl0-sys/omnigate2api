@@ -41,7 +41,7 @@ func dumpRawConfig(acct *auth.Auth, raw []byte) {
 		return
 	}
 	realm := "cn"
-	if tencentRegion(acct.Domain) {
+	if TencentRegion(acct.Domain) {
 		realm = "global"
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {

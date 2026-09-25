@@ -89,7 +89,10 @@ func main() {
 		Profiles:          buildProfiles(),
 		Listen:            cfg.Listen,
 		OAuthCallbackHost: cfg.OAuthCallbackHost,
+		Usage: server.NewUsageStats(
+			filepath.Join(filepath.Dir(cfg.StateFile), "usage.json"), cfg.Pricing),
 	})
+	go h.PreheatModels() // 冷启动预热目录+促销缓存（用量统计免费判定依赖，SPEC §34.2）
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

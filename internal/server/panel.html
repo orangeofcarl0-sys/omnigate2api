@@ -319,6 +319,51 @@ select option{ background:#fff; color:var(--text); }
   </div>
 
   <div class="card">
+    <div class="card-h">
+      <h2>Token 统计与白嫖金额</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="muted" style="font-size:12px">上游真实用量落账；白嫖 = 活动积分抵扣 + 免费直用（SPEC §34）</span>
+        <button class="btn" id="btnUsage" style="padding:6px 10px">刷新用量</button>
+      </div>
+    </div>
+    <div class="card-b">
+      <div style="display:flex;gap:10px;flex-wrap:wrap" id="usageTiles"></div>
+      <table class="table" style="margin-top:10px">
+        <thead>
+          <tr>
+            <th>模型</th>
+            <th>渠道</th>
+            <th>今日 输入/输出</th>
+            <th>累计 输入/输出</th>
+            <th>累计缓存命中</th>
+            <th>积分消耗</th>
+            <th>白嫖金额</th>
+          </tr>
+        </thead>
+        <tbody id="usageBody"><tr><td colspan="7" class="empty">暂无数据（发一次带用量的请求后点「刷新用量」）</td></tr></tbody>
+      </table>
+      <div class="muted" style="font-size:11px;margin-top:8px" id="usageNote"></div>
+      <div style="display:flex;align-items:baseline;gap:8px;margin-top:14px">
+        <strong style="font-size:13px">按天</strong>
+        <span class="muted" style="font-size:11px">北京自然日，最新在前；跨日自动切档（「今日」归零即新的一天），历史保留 90 天</span>
+      </div>
+      <table class="table" style="margin-top:6px">
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>请求</th>
+            <th>输入/输出</th>
+            <th>缓存命中</th>
+            <th>积分消耗</th>
+            <th>白嫖金额</th>
+          </tr>
+        </thead>
+        <tbody id="usageDayBody"><tr><td colspan="6" class="empty">暂无数据</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-h"><h2>模型</h2><span class="muted" id="modelCount"></span></div>
     <div class="card-b"><div class="chips" id="modelChips"></div></div>
   </div>
@@ -593,6 +638,54 @@ async function loadGrowth(){
   }).join("");
 }
 
+function fmtTok(n){ return Number(n||0).toLocaleString(); }
+function fmtCNY(v){ return v>0 ? "¥"+Number(v).toFixed(2) : "—"; }
+
+// 用量统计与白嫖金额（/admin/api/usage，SPEC §34）：只读本网关落账的数据，不打上游。
+async function loadUsage(){
+  const d = await api("/admin/api/usage");
+  if (!d || d.enabled === false) return;
+  const t = d.today || {}, tot = d.total || {};
+  const tile = (k,v)=>`<div class="stat" style="flex:1 1 150px;padding:10px 12px"><div class="k">${k}</div><div class="v" style="font-size:20px">${v}</div></div>`;
+  // 今日档按北京自然日切：跨日后归零是正常行为，标注日期避免误判成"统计没生效"；
+  // 归零显式写 0 而不是"—"（"—"是"没有数据"的意思，两者不该混）。
+  const dayTag = (d.date||"").slice(5);
+  const todayTok = (t.input_tokens||0)+(t.output_tokens||0);
+  $("usageTiles").innerHTML =
+    tile(`今日 tokens${dayTag?" · "+dayTag:""}`, todayTok>0 ? fmtTok(todayTok) : "0") +
+    tile(`今日请求${dayTag?" · "+dayTag:""}`, Number(t.requests||0).toLocaleString()) +
+    tile("累计 tokens", fmtTok((tot.input_tokens||0)+(tot.output_tokens||0))) +
+    tile("白嫖金额（API 牌价）", fmtCNY(tot.api_cost_cny)) +
+    tile("其中·积分抵扣", fmtCNY(tot.credits_cny));
+  const realmName = r => r==="global" ? "全球" : (r==="cn" ? "CN" : "华为");
+  const rows = (d.models||[]).map(m => {
+    const money = m.total.api_cost_cny>0 ? "¥"+Number(m.total.api_cost_cny).toFixed(2) : "—";
+    return `<tr>
+      <td><strong>${escapeHtml(m.model)}</strong></td>
+      <td><span class="badge" data-fam="${m.family}">${realmName(m.realm)}</span></td>
+      <td>${fmtTok(m.today.input_tokens)} / ${fmtTok(m.today.output_tokens)}</td>
+      <td>${fmtTok(m.total.input_tokens)} / ${fmtTok(m.total.output_tokens)}</td>
+      <td>${fmtTok(m.total.cached_tokens)}</td>
+      <td>${m.total.credits>0 ? Number(m.total.credits).toFixed(2) : "—"}</td>
+      <td>${money}</td>
+    </tr>`;
+  }).join("");
+  $("usageBody").innerHTML = rows || `<tr><td colspan="7" class="empty">暂无数据（发一次带用量的请求后点「刷新用量」）</td></tr>`;
+  // 按天（逐日）视图：服务端按北京自然日分桶，最新在前。
+  const dayRows = (d.days||[]).map(x => `<tr>
+      <td class="mono">${escapeHtml(x.date||"")}${x.date===d.date?' <span class="badge info">今日</span>':''}</td>
+      <td>${Number(x.requests||0).toLocaleString()}</td>
+      <td>${fmtTok(x.input_tokens)} / ${fmtTok(x.output_tokens)}</td>
+      <td>${fmtTok(x.cached_tokens)}</td>
+      <td>${x.credits>0 ? Number(x.credits).toFixed(2) : "—"}</td>
+      <td>${x.api_cost_cny>0 ? "¥"+Number(x.api_cost_cny).toFixed(2) : "—"}</td>
+    </tr>`).join("");
+  $("usageDayBody").innerHTML = dayRows || `<tr><td colspan="6" class="empty">暂无数据</td></tr>`;
+  const p = d.pricing || {};
+  $("usageNote").textContent =
+    `白嫖金额 = token × 模型牌价倍率 × 基准 ${p.credit_per_1k_mult} 积分/千token × 积分牌价（国内 ¥${p.credit_cny} · 国际 $${p.credit_usd}/credits，汇率 ${p.usd_cny}），即"若按正常 API 调用要花多少钱"。倍率未知或促销烘为 0 的模型只计 token 数；实际积分消耗（国内域上报）单列。只记上游真实用量；重启不丢（data/usage.json）。`;
+}
+
 async function loadOverview(){
   const data = await api("/admin/api/overview");
   render(data);
@@ -604,6 +697,7 @@ async function showApp(){
   $("appView").classList.remove("hidden");
   try {
     await loadOverview();
+    loadUsage().catch(()=>{});
   } catch (e) {
     toast("登录失败: " + e.message, false);
     clearKey();
@@ -627,6 +721,7 @@ $("keyInput").addEventListener("keydown", e => { if (e.key === "Enter") $("login
 $("btnLogout").onclick = () => { clearKey(); showLogin(); toast("已退出"); };
 $("btnRefresh").onclick = async () => {
   loadGrowth().catch(()=>{}); // 成长数据随刷新异步拉取（失败静默，按钮可手动重试）
+  loadUsage().catch(()=>{});  // 用量统计随刷新异步拉取
   try { await loadOverview(); toast("已刷新"); } catch(e){ toast(e.message,false); }
 };
 
@@ -644,6 +739,7 @@ async function runAction(path, body){
 
 $("btnCredits").onclick = () => runAction("/admin/api/credits", {});
 $("btnGrowth").onclick = () => loadGrowth().catch(e => toast(e.message));
+$("btnUsage").onclick = () => loadUsage().catch(e => toast(e.message));
 $("btnCheckin").onclick = () => runAction("/admin/api/checkin", {});
 $("btnKeepalive").onclick = () => runAction("/admin/api/keepalive", {});
 $("btnReload").onclick = () => runAction("/admin/api/reload", {});

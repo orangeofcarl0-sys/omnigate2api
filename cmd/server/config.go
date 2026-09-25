@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"omnigate2api/internal/pool"
+	"omnigate2api/internal/server"
 )
 
 // Config 顶层配置。
@@ -41,6 +42,10 @@ type Config struct {
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"`
 	} `json:"upstream"`
+
+	// Pricing 白嫖金额换算单价（SPEC §34）：缺省字段回落内置牌价
+	// （国内 ¥0.014/积分、国际 $0.03/credits、汇率 7.15）。
+	Pricing *server.Pricing `json:"pricing,omitempty"`
 
 	SoftRateDur    time.Duration
 	ErrCooldownDur time.Duration

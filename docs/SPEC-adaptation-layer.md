@@ -1852,3 +1852,51 @@ prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`
 
 **新增审计工具（本版）**：`OMNIGATE_DEBUG_CONFIG=<目录>`（空=关）把 `/v3/config` 原始响应按区域落盘
 （目录 0700 / 文件 0600），补上 §33.3 六步里的第 1 步"列全部键路径"——本次正是靠它拿到 CN/全球 178/120 条键路径才敢下结论。
+
+## 34. Token 用量统计与「白嫖金额」换算（v1.4 观测面）
+
+### 34.1 落账口径
+
+- 只记**上游真实 usage**（`Usage.Any()`），估算值不落账；两个收口：流式 `streamOut` 的
+  usage 帧分支、非流式 `completeChat` 的 `usageEstimate` 之后（`handler.recordUsage`）。
+- 聚合键 = (北京时间自然日, 家族, 区域, 模型)；缓存命中字段三家拼写不同
+  （OpenAI `cached_tokens` / Anthropic `cache_read` / 腾讯 `cache_hit`），语义相同取最大值防重复计。
+- 持久化 `data/usage.json`：10s 去抖落盘（临时文件 + rename 原子替换），保留 90 天，重启不丢。
+
+### 34.2 白嫖口径与换算（拍板：**直接按正常 API 调用花费算**）
+
+- **白嫖金额（主口径）= 全部用量按"正常 API 调用花费"折算**：
+  `token(输入+输出) ÷ 1000 × 模型牌价倍率 × 基准 × 区域积分牌价`。
+  基准 `pricing.credit_per_1k_mult`（每千 token × 倍率的积分数）**实测 0.105**：
+  glm-5.3（x0.79）3874 token 无缓存请求记 0.32 积分。积分牌价：国内 **¥0.014/积分**
+  （700 元/5 万积分）、国际 **$0.03/credits**（$15/500）、汇率 **7.15** —— 来源：社区对
+  官方售卖页的整理（maiphucgiang_codebuddy2api `app/credits.py`），均可在 config.json
+  `pricing` 块覆盖。倍率未知（缓存冷/模型不在清单）→ 该行只计 token 不折钱。
+- **辅助口径**：`credits_cny` = 实际消耗积分折价（上游 `credit` 字段 × 区域积分牌价，
+  仅国内域上报）；`free_cny` = 其中促销免费直用部分（`EffectiveAccess` 非 paid）。
+- **免费判定**：按该账号**区域的促销生效判定**（非 paid）与华为福利模型
+  （`maas_type benefit`）；促销缓存未冷 → 记入 `uncertain`，快照时按当前促销状态
+  一次性折叠（自愈）。**为什么不用 credit==0 判定**：微小请求的积分按显示精度
+  取整后为 0（实测 glm-5.3 全球 48in/16out 记 0 积分），会把付费用量误判成白嫖。
+- **华为非福利模型**走真实计费（用户自己的华为账户），照常统计 token；
+  其牌价倍率不在腾讯体系内 → API 牌价折算为 0（不计入白嫖金额）。
+
+### 34.3 配置与 API
+
+- config.json：`"pricing": {"credit_cny": 0.014, "credit_usd": 0.03, "usd_cny": 7.15,
+  "credit_per_1k_mult": 0.105, "free_cny_per_mtoken": 0}`（缺省字段回落内置牌价/实测基准；
+  `free_cny_per_mtoken`>0 时用固定单价覆盖倍率折算链）。
+- `GET /admin/api/usage`：`{enabled, date, today, total, days[], models[], pricing}`；聚合出参
+  `api_cost_cny`（白嫖金额主口径）/ `credits_cny` / `free_cny` + `free_priced`。
+  `days[]` = 逐日汇总（`{date, …同聚合出参}`，北京自然日、**最新在前**）：`?days=N` 取最近 N 天，
+  缺省 14、非正数/非法值回落缺省、上限钳到保留期 90。`today` 与 `date` 同样按北京自然日切档。
+- 面板「Token 统计与白嫖金额」卡：今日/累计 tokens 与请求数（今日档在 tile 上标注日期——跨日
+  归零是切档的预期表现，不是统计失效）、两口径白嫖金额、按模型表（渠道徽章 / 今日与累计 输入输出 /
+  缓存命中 / 积分消耗 / 金额）、「按天」表（日期 / 请求 / 输入输出 / 缓存命中 / 积分消耗 / 金额）。
+  **文案约束**：新卡片避开 `>积分<` / `>签到<` 逐字片段（panel.go 全局替换，见 §28.6）。
+
+### 34.4 边界
+
+- 上游未回 usage 的请求不落账（部分全球域流式帧无 usage）——统计 ≠ 全量账单；
+- 全球域 usage 帧实测不带 credit（或取整为 0）：积分抵扣口径主要对国内域有效；
+- 白嫖金额是"按官方牌价的参考值"，非实际可提现金额；积分取整、促销窗口变化都影响精度。
