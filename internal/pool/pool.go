@@ -226,8 +226,17 @@ func (p *Pool) List() []map[string]any {
 		if cooling {
 			until = a.coolUntil.Format(time.RFC3339)
 		}
-		reason := a.disabledReason
-		if reason == "" {
+		// reason 只表达**当前**状态（禁用原因 / 冷却原因）。历史错误走 last_error
+		// 字段，由面板放进 tooltip——模型级限流会写账号级 lastErr，而它到期后没人清，
+		// 于是"原因"永远挂在面板上下不去（2026-09-27 用户报"黏在板子上"）。
+		reason := ""
+		switch {
+		case a.disabled:
+			reason = a.disabledReason
+			if reason == "" {
+				reason = a.lastErr
+			}
+		case cooling:
 			reason = a.lastErr
 		}
 		out = append(out, map[string]any{
@@ -548,6 +557,19 @@ func (p *Pool) Validate(a *Account) (bool, error) {
 		a.coolUntil = time.Time{}
 		a.coolKind = CoolNone
 		a.lastErr = ""
+	} else {
+		// 清理已过期的冷却痕迹（housekeeping）：模型级限流到期后没人清 lastErr，
+		// 会让"原因"永远挂在面板上（2026-09-27 用户报"黏在板子上"）；顺带删掉过期的
+		// modelCool 条目，别让 state.json 越积越脏。
+		now := time.Now()
+		for m, until := range a.modelCool {
+			if !now.Before(until) {
+				delete(a.modelCool, m)
+			}
+		}
+		if len(a.modelCool) == 0 && a.lastErr != "" {
+			a.lastErr = ""
+		}
 	}
 	a.mu.Unlock()
 	return true, nil

@@ -302,3 +302,54 @@ func TestModelScopedCooldownFallback(t *testing.T) {
 		t.Fatalf("sole account must still be returned as fallback: %+v", a)
 	}
 }
+
+// "原因"只表达当前状态（2026-09-27 用户报"冷却报因黏在板子上"）：模型级限流会写
+// 账号级 lastErr，到期后没人清 → 面板一直挂着长错误文案。现在 List 的 reason 只在
+// 禁用/账号级冷却时非空；历史错误留在 last_error（面板放进 tooltip），且到期后由
+// Validate 清掉。
+func TestListReasonReflectsCurrentStateOnly(t *testing.T) {
+	a := testAuth("t1", "workbuddy")
+	p := newTestPool(t, "", a)
+	acct := p.Get("t1")
+
+	// 模型级限流（账号本身健康）：reason 必须为空，模型限流另走 model_cooling
+	p.CoolModel("t1", "deepseek-v4.1-flash", time.Now().Add(30*time.Minute), `{"code":6004,"msg":"usage exceeds frequency limit"}`)
+	row := p.List()[0]
+	if row["reason"] != "" {
+		t.Fatalf("model-level limit must not stick in reason: %v", row["reason"])
+	}
+	if row["cooling"] != false || row["disabled"] != false {
+		t.Fatalf("account itself stays healthy: %+v", row)
+	}
+	if mc, _ := row["model_cooling"].([]map[string]any); len(mc) != 1 {
+		t.Fatalf("model cooling must be reported separately: %+v", row["model_cooling"])
+	}
+	if last, _ := row["last_error"].(string); !strings.Contains(last, "6004") {
+		t.Fatalf("history must stay available in last_error: %v", row["last_error"])
+	}
+
+	// 账号级冷却：reason 就是冷却原因（当前状态）
+	p.Cooldown("t1", CoolSoft, time.Minute, "429 too many requests")
+	if row := p.List()[0]; row["cooling"] != true || row["reason"] != "429 too many requests" {
+		t.Fatalf("active cooldown must explain itself: %+v", row)
+	}
+
+	// 冷却/限流都过期后：Validate 把痕迹清掉，reason 与 last_error 都归位
+	acct.mu.Lock()
+	acct.coolUntil = time.Time{}
+	acct.coolKind = CoolNone
+	acct.modelCool = map[string]time.Time{"deepseek-v4.1-flash": time.Now().Add(-time.Minute)}
+	acct.lastErr = "stale"
+	acct.lastValidated = time.Time{}
+	acct.mu.Unlock()
+	if ok, err := p.Validate(acct); err != nil || !ok {
+		t.Fatalf("validate: ok=%v err=%v", ok, err)
+	}
+	row = p.List()[0]
+	if row["reason"] != "" || row["last_error"] != "" {
+		t.Fatalf("expired cooling traces must be pruned: reason=%v last_error=%v", row["reason"], row["last_error"])
+	}
+	if mc, _ := row["model_cooling"].([]map[string]any); len(mc) != 0 {
+		t.Fatalf("expired model cooling must be pruned: %+v", row["model_cooling"])
+	}
+}
