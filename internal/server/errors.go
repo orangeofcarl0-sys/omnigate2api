@@ -121,6 +121,11 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 			h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, time.Minute, ae.Error())
 			return
 		}
+		// 其余（含 403 等无专属分支的状态码）走累计熔断。**必须把上游原话记下来**：
+		// 2026-09-27 排查腾讯 403 时发现，这条路径此前只累计不记原因，日志里只剩
+		// 状态码，等于把唯一的线索丢了（面板「原因」也只写 consecutive errors）。
+		log.Printf("upstream error account=%s model=%s status=%d msg=%s",
+			acct.Name, model, ae.Status, truncateText(ae.Message, 200))
 		h.cfg.Pool.NoteError(acct.Name, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 	}
 }

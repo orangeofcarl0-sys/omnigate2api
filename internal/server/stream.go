@@ -172,6 +172,9 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 				h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, 45*time.Second, lastUpErr)
 			}
 		default:
+			// 同 errors.go：无专属分支的上游错误必须留原话（否则只剩 consecutive errors）
+			log.Printf("upstream error (frame) account=%s model=%s msg=%s",
+				acct.Name, model, truncateText(lastUpErr, 200))
 			h.cfg.Pool.NoteError(acct.Name, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 		}
 		h.turnFailure(profile, matchedKey)
