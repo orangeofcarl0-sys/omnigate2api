@@ -8,6 +8,7 @@ package pool
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,19 +237,25 @@ func TestQuotaReflectedInListAndStats(t *testing.T) {
 	}
 }
 
-// Validate 对过期且无 refresh_token 的账号返回「可用」（警告日志，不误禁——
-// SPEC §7：令牌过期由真实请求 401 自然禁用）。
-func TestValidateExpiredWithoutRefreshTokenStaysUsable(t *testing.T) {
+// Validate 对"已过期且无续期路径"的账号判死（2026-09-27 改口径）：旧行为是返回可用、
+// 等真实请求 401 再禁用——实测后果是账号过期 12 小时面板仍显示"健康"、期间每个请求
+// 白打一次上游 401。现在已过期即禁用并写明 re-login required；仅"临近过期（未过期）"
+// 才保持可用（见 TestValidateNoRenewalPathSplitsByExpiry）。
+func TestValidateExpiredWithoutRenewalPathDisables(t *testing.T) {
 	a := testAuth("t1", "workbuddy")
 	a.Expiration = "2020-01-01T00:00:00Z"
 	a.RefreshToken = ""
 	p := newTestPool(t, "", a)
 	ok, err := p.Validate(p.Get("t1"))
-	if err != nil || !ok {
-		t.Fatalf("validate must not disable on expiry alone: ok=%v err=%v", ok, err)
+	if err != nil || ok {
+		t.Fatalf("expired token with no renewal path must not validate ok: ok=%v err=%v", ok, err)
 	}
-	if !p.Healthy("t1") {
-		t.Fatal("account must remain healthy")
+	if p.Healthy("t1") {
+		t.Fatal("account must be disabled (needs re-login)")
+	}
+	row := p.List()[0]
+	if reason, _ := row["reason"].(string); !strings.Contains(reason, "re-login required") {
+		t.Fatalf("reason must point at re-login: %v", row["reason"])
 	}
 }
 

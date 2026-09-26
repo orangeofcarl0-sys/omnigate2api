@@ -86,3 +86,75 @@ func TestRefreshAuthCredsNoPath(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// Validate 对"无续期路径"分型处置（2026-09-27 事故）：**已过期** → 判死并写明
+// "re-login required"（否则面板显示健康、每个请求白打一次上游 401 才被禁用）；
+// **仅临近过期** → 保持可用（给 ticket 会话/人工重登留时间窗）。
+func TestValidateNoRenewalPathSplitsByExpiry(t *testing.T) {
+	past := time.Now().Add(-12 * time.Hour).UTC().Format(time.RFC3339)
+	soon := time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)
+
+	// 已过期 + 无 refresh_token/ticket → 禁用
+	expired := &auth.Auth{UserID: "e1", UserName: "huawei-expired", Profile: "codearts",
+		CloudDragonTok: "tok", Expiration: past}
+	p, err := New([]*auth.Auth{expired}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p.Validate(p.Get("e1")); ok {
+		t.Fatal("expired token with no renewal path must not validate ok")
+	}
+	row := p.List()[0]
+	if row["disabled"] != true {
+		t.Fatalf("must be disabled: %+v", row)
+	}
+	if reason, _ := row["reason"].(string); !strings.Contains(reason, "re-login required") {
+		t.Fatalf("reason must say re-login required: %+v", row["reason"])
+	}
+
+	// 临近过期（未过期）+ 无续期路 → 仍可用（不判死）
+	soonAcct := &auth.Auth{UserID: "s1", UserName: "huawei-soon", Profile: "codearts",
+		CloudDragonTok: "tok", Expiration: soon}
+	p2, err := New([]*auth.Auth{soonAcct}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := p2.Validate(p2.Get("s1")); !ok {
+		t.Fatal("still-valid token must stay usable until it actually expires")
+	}
+	if p2.List()[0]["disabled"] == true {
+		t.Fatalf("must not disable before expiry: %+v", p2.List()[0])
+	}
+}
+
+// renewalKind / List 暴露续期能力：refresh_token / ticket / 无（面板据此显示"到期需重登"）。
+func TestListRenewalKind(t *testing.T) {
+	withRT := &auth.Auth{UserID: "r1", UserName: "rt", Profile: "workbuddy",
+		CloudDragonTok: "t", RefreshToken: "rt", Expiration: "2099-01-01T00:00:00Z"}
+	withTicket := &auth.Auth{UserID: "k1", UserName: "ticket", Profile: "codearts",
+		CloudDragonTok: "t", Expiration: "2099-01-01T00:00:00Z"}
+	withTicket.SetTicketCreds("tid", "tsecret")
+	none := &auth.Auth{UserID: "n1", UserName: "none", Profile: "codearts",
+		CloudDragonTok: "t", Expiration: "2099-01-01T00:00:00Z"}
+
+	p, err := New([]*auth.Auth{withRT, withTicket, none}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]any{}
+	for _, row := range p.List() {
+		got[row["uid"].(string)] = row["renewal"]
+	}
+	if got["r1"] != "refresh_token" || got["k1"] != "ticket" || got["n1"] != "" {
+		t.Fatalf("renewal kinds wrong: %+v", got)
+	}
+}

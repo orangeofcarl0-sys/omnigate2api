@@ -909,6 +909,31 @@ type ChatAPI interface {
   失败只记日志（账号已入池，Tick 与面板手动入口仍兜底）。面板在成功后延迟 ~3s 回读一次列表，
   把刚查出来的额度刷进去。
 
+### 24.4 凭证续期能力与华为 ticket 30 天免登录（v1.4）
+
+**三种续期路径，面板逐账号可见**（`Pool.List()` 的 `renewal` / `expires_at` / `token_remaining`）：
+
+| 能力 | 凭证字段 | 续期方式 | 面板显示 |
+|---|---|---|---|
+| `refresh_token` | `refresh_token` | 各家族自己的 refresh 端点（华为 STS refresh / 腾讯 `/v2/plugin/auth/token/refresh`） | `续期 refresh_token` |
+| `ticket` | `ticket_id` + `ticket_secret` | 华为 ticket 通道：`PollTicket(ticket_id, secret)` **静默换发新 STS** | `续期 ticket` |
+| 无 | 两者皆空 | **只能人工重登** | `续期 无（到期需重登）` |
+
+- 华为 ticket 通道**不下发 `refresh_token`**，故登录成功时把 `ticket_id/ticket_secret` 一并持久化
+  （`saveLoginResult`，设备流与 code 回调两条路径都覆盖）。续期链 = refresh_token 优先 →
+  ticket 静默换发 → 两条都没有才 `errNoRenewalPath`（要求重登）。成功特征日志：
+  `pool token re-minted via ticket session account=…`。
+- 华为文档《配置账号 30 天免登录》（IAM 自定义身份策略含 `signin::authorizeOAuth2Access` +
+  `signin::createOauth2Token`；登录主体为**华为账号** + 客户端 26.5.1+）用于把 **ticket 会话**
+  从 24h 延到 ~30 天。网关侧只负责"会话期内静默换发"；**该策略是否作用于网关登录路径仍未实证**
+  （`OMNIGATE_LOGIN_PLUGIN_VERSION` 是版本实验开关，默认保持逆向基线 5.1.0，无实证不改指纹）。
+- **`Validate` 按是否已过期分型**（2026-09-27 改口径）：仅"临近过期（尚未过期）"+ 无续期路 →
+  告警但**保持可用**（给 ticket 会话/人工重登留时间窗）；**已过期** + 无续期路 → 直接禁用并写
+  `token expired and no renewal path (re-login required)`。旧行为（一律返回可用、等真实请求
+  401 再禁用）的实测代价：账号过期 **12 小时**面板仍显示"健康"，期间每个请求白打一次上游 401。
+- 面板账号「状态」列显示 `续期 <能力>` + 到期倒计时（已过期 / ≤2h 高亮），
+  「刷新状态」按钮现在对这类账号如实返回 `token invalid`。
+
 ---
 
 ## 25. workbuddy Profile 内置声明草案（v0.3）

@@ -252,11 +252,29 @@ func (p *Pool) List() []map[string]any {
 			"max_concurrent":    a.maxConcurrent,
 			"token_remaining":   a.Auth.Remaining().Round(time.Minute).String(),
 			"expires_at":        a.Auth.ExpiresAt().Format(time.RFC3339),
+			"renewal":           renewalKind(a.Auth),
 		})
 		a.mu.Unlock()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i]["uid"].(string) < out[j]["uid"].(string) })
 	return out
+}
+
+// renewalKind 凭证的**自动续期能力**（面板显示 + 排障）：有 refresh_token → "refresh_token"；
+// 只有 ticket 会话（华为 ticket 通道不下发 refresh_token，见 HANDOFF §6.5.1）→ "ticket"；
+// 两者皆无 → ""（到期只能人工重登）。2026-09-27 事故教训：账号过期 12 小时、面板仍显示
+// "健康"，就是因为这个能力既没被记录也没被展示。
+func renewalKind(a *auth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	if strings.TrimSpace(a.RefreshToken) != "" {
+		return "refresh_token"
+	}
+	if id, secret := a.TicketCreds(); id != "" && secret != "" {
+		return "ticket"
+	}
+	return ""
 }
 
 // Stats 汇总。
@@ -493,9 +511,18 @@ func (p *Pool) Validate(a *Account) (bool, error) {
 		if err != nil {
 			switch {
 			case errors.Is(err, errNoRenewalPath):
-				// 没有 refresh_token 且 ticket 会话不可用（华为 ticket 通道不发
-				// refresh_token，见 §6.5）：不立即 disable，只打告警日志。
-				// token 过期后上游 401 会自然 disable。
+				// 没有 refresh_token 且 ticket 会话不可用（华为 ticket 通道不下发
+				// refresh_token，见 §6.5.1）。分型处置——**已过期与仅"临近过期"是两回事**：
+				if authz.Expired() {
+					// 已过期且两条续期路都没有：只能人工重登。判死并写明原因，否则面板
+					// 一直显示"健康"、每个请求白打一次上游 401 才被禁用（2026-09-27
+					// 实测：过期 12 小时仍报 ok remaining=-12h8m）。
+					log.Printf("pool token account=%s expired (remaining=%s) and no renewal path (%v) → re-login required",
+						a.Name, authz.Remaining().Round(time.Minute), err)
+					p.Disable(a.Name, "token expired and no renewal path (re-login required)")
+					return false, nil
+				}
+				// 尚未过期（只是 expiring soon）：不判死，给 ticket 会话/人工重登留时间窗。
 				log.Printf("pool token account=%s expiring soon (remaining=%s) but no renewal path (%v), re-login required",
 					a.Name, authz.Remaining().Round(time.Minute), err)
 				a.mu.Lock()
