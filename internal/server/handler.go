@@ -537,6 +537,14 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 				writeProtoError(proto, w, http.StatusServiceUnavailable, "client_cancelled", "client disconnected")
 				return
 			}
+			// 请求参数非法（华为 InferHub.001001005）：客户端侧问题——换号无用（同家族
+			// 必然同样拒绝）、更不该冷却账号。直接把上游原话按 400 回给客户端。
+			if isRequestParamError(serr.Error()) {
+				log.Printf("upstream request param error (client-side) account=%s model=%s err=%s",
+					acct.Name, model, truncateText(serr.Error(), 200))
+				writeProtoError(proto, w, http.StatusBadRequest, "invalid_request_error", serr.Error())
+				return
+			}
 			lastErr = serr
 			h.handleUpstreamError(acct, model, serr)
 			continue
@@ -656,6 +664,15 @@ func (h *Handler) completeChat(w http.ResponseWriter, acct *pool.Account, rc io.
 		// 客户端主动断开不是账号故障，不冷却（直接结束本次请求）。
 		if isClientCancel(aerr) {
 			log.Printf("chat account=%s client canceled upstream wait; no penalty", acct.Name)
+			h.turnFailure(profile, matchedKey)
+			return true, nil
+		}
+		// 请求参数非法（华为 InferHub.001001005）：客户端侧问题——换号无用（同家族
+		// 必然同样拒绝）、更不该冷却账号。直接按 400 回上游原话并结束本回合。
+		if isRequestParamError(aerr.Error()) {
+			log.Printf("upstream request param error (client-side, no penalty) account=%s model=%s err=%s",
+				acct.Name, model, truncateText(aerr.Error(), 200))
+			writeProtoError(proto, w, http.StatusBadRequest, "invalid_request_error", aerr.Error())
 			h.turnFailure(profile, matchedKey)
 			return true, nil
 		}

@@ -158,6 +158,10 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	if terminal {
 		log.Printf("chat stream account=%s upstream error frame: %s", acct.Name, lastUpErr)
 		switch {
+		case isRequestParamError(lastUpErr):
+			// 请求参数非法（客户端侧）：只记日志，不计错误、不冷却账号
+			log.Printf("upstream request param error (client-side, no penalty) account=%s model=%s err=%s",
+				acct.Name, model, truncateText(lastUpErr, 200))
 		case isQuotaError(lastUpErr):
 			// 额度不足（华为 MaaS 福利 4291 分钟级限流）：软冷却 60s 不累计
 			h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, 60*time.Second, lastUpErr)

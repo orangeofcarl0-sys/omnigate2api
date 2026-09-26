@@ -538,6 +538,12 @@ func (c *Client) ChatStream(ctx context.Context, chatID string, messages []ChatM
 	// gen 先铺底（客户端生成参数），随后由权威字段覆盖（§23.1）。
 	body := map[string]any{}
 	applyGen(body, gen)
+	// 华为硬上限钳制：上游广告的 max_tokens（131072/393216）高于其 API 实际接受值
+	// （65536），客户端照广告值下发必得 400 InferHub.001001005（见 CodeartsMaxOutputTokens）。
+	if from, to, clamped := clampCodeartsMaxTokens(body); clamped {
+		log.Printf("codearts max_tokens clamped model=%s from=%d to=%d (上游硬上限 %d)",
+			model, from, to, CodeartsMaxOutputTokens)
+	}
 	// messages 直接序列化（ChatMessage.MarshalJSON 双形态：string/分片数组，§30.5）
 	body["model"] = CanonicalModel(model)
 	body["stream"] = true

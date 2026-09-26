@@ -334,3 +334,45 @@ func Test29PromoRefreshSkipsUnsupportedFamilies(t *testing.T) {
 		t.Fatal("cn realm must still be claimable by the tencent family")
 	}
 }
+
+// 对外广告的 max_output_tokens 必须收敛到华为硬上限（2026-09-26 实测：上游目录广告
+// 131072/393216，其 API 只接受 ≤65536）——否则客户端照广告值下发 max_tokens 必得
+// 400 InferHub.001001005。腾讯侧不受影响（实测其广告值可被接受）。
+func Test29AdvertisedMaxOutClampedForCodearts(t *testing.T) {
+	if got := advertisedMaxOut("codearts", 131072); got != upstream.CodeartsMaxOutputTokens {
+		t.Fatalf("codearts 131072 → %d want %d", got, upstream.CodeartsMaxOutputTokens)
+	}
+	if got := advertisedMaxOut("codearts", 393216); got != upstream.CodeartsMaxOutputTokens {
+		t.Fatalf("codearts 393216 → %d want %d", got, upstream.CodeartsMaxOutputTokens)
+	}
+	if got := advertisedMaxOut("codearts", 8192); got != 8192 {
+		t.Fatalf("codearts 未超限值不得被改：%d", got)
+	}
+	if got := advertisedMaxOut("workbuddy", 393216); got != 393216 {
+		t.Fatalf("workbuddy 广告值必须原样保留：%d", got)
+	}
+
+	// 静态表 + 唯一视图两条路径都要收敛
+	for _, s := range staticModels {
+		if s.maxOut <= upstream.CodeartsMaxOutputTokens {
+			continue
+		}
+		got, ok := s.entry("codearts")["max_output_tokens"].(int64)
+		if !ok || got != int64(upstream.CodeartsMaxOutputTokens) {
+			t.Fatalf("静态表 %s 广告 %v want %d", s.id, s.entry("codearts")["max_output_tokens"], upstream.CodeartsMaxOutputTokens)
+		}
+	}
+	resetModelCaches()
+	fake := fakeModelCatalog(t, nil, modelCatalogBody)
+	t.Setenv("OMNIGATE_TENCENT_BASE", fake.URL)
+	_, _, _, h := buildTestServer(t, fake.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
+	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+	for _, e := range h.unifiedModelList() {
+		if e["routed_family"] != "codearts" {
+			continue
+		}
+		if mo, ok := e["max_output_tokens"].(int64); ok && mo > int64(upstream.CodeartsMaxOutputTokens) {
+			t.Fatalf("唯一视图 %v 广告 %d 超过华为硬上限", e["id"], mo)
+		}
+	}
+}

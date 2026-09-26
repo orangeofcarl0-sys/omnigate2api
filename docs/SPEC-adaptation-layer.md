@@ -1623,6 +1623,27 @@ prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`
 （`Content-Encoding: gzip`），我们未做。历史上我们的非压缩请求一直正常（未被拦），
 故暂列为已知差异而非缺陷；若日后需要完全对齐，实现点是 `ChatStream` 组装 body 后按大小阈值压缩。
 
+**上游硬约束：华为 `max_tokens` ≤ 65536（v1.4 补，实测 2026-09-26）**
+
+- 事实：上游自己的模型目录（agent detail `model_parameters.max_tokens`）广告
+  **131072 / 393216**，但其 API **只接受 ≤65536**——glm-5.3-flash 与
+  deepseek-v4-flash-0731 两个模型边界完全一致：`65536` → 200，`65537` → 400
+  `InferHub.001001005 The request param is invalid`。腾讯侧无此约束（实测其广告值
+  128000 可被接受）。
+- 后果：客户端（ZCode 等）按我们 `/v1/models` 广告的 `max_output_tokens` 下发
+  `max_tokens` 就**必得 400**；且该 400 原先按账号错误累计——三次即把华为账号冷却
+  10 分钟，整个 codearts 家族变 `no_healthy_account`（一个客户端参数错误打掉整条渠道）。
+- 处置（两层）：
+  1. **发送侧钳制**：`upstream.Client.ChatStream` 按 `CodeartsMaxOutputTokens=65536`
+     钳制 body 的 `max_tokens`，钳制时记日志
+     `codearts max_tokens clamped model=… from=… to=…`（便于与上游对账）；
+  2. **广告对齐**：`advertisedMaxOut(family, v)` 让 codearts 家族对外广告的
+     `max_output_tokens` 一并收敛（静态表与活体目录两条路径都过），腾讯侧不动。
+- **错误分类**：`InferHub.001001005` / "the request param is invalid" 判为**请求侧**错误
+  （`isRequestParamError`）——不计账号错误、不冷却、**不换号**（同家族必然同样拒绝），
+  直接把上游原话按 400 `invalid_request_error` 回给客户端（流式在错误帧路径只记日志，
+  因响应头已发出）。与"传输层错误瞬时化"同一原则：**别把客户端的问题记到账号账上**。
+
 **取证工具**：`tools/extract-client-request.py <客户端日志>` 抽官方真实请求体；
 `cmd/probe "…" rawdump <model>` 抓上游原样响应（§33.1 第 1 步）。
 

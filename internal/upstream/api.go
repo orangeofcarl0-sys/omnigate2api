@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 )
 
@@ -35,4 +36,49 @@ func applyGen(body map[string]any, gen map[string]any) {
 		}
 		body[k] = v
 	}
+}
+
+// CodeartsMaxOutputTokens 华为（CodeArts / InferHub）**单次请求**接受的
+// `max_tokens` 硬上限。
+//
+// 实测（2026-09-26，两个模型边界一致，每步清冷却避免连锁）：
+// glm-5.3-flash `max_tokens=65536` → 200，`65537` → 400
+// `InferHub.001001005 The request param is invalid`；
+// deepseek-v4-flash-0731 同为 `65536` ✓ / `65537` ✗。
+//
+// 而上游自己的模型目录（agent detail `model_parameters.max_tokens`）广告的是
+// 131072 / 393216——**上游广告值高于其 API 实际接受值**。客户端（ZCode 等）照广告值
+// 下发 max_tokens 就必得 400，故发送侧按硬上限钳制（钳制时记日志，便于与上游对账）。
+const CodeartsMaxOutputTokens = 65536
+
+// clampCodeartsMaxTokens 把 body 里的 `max_tokens` 钳到华为硬上限（无该键或未超限不动）。
+// 返回 (原值, 钳后值, 是否钳制)，供调用方记日志。
+func clampCodeartsMaxTokens(body map[string]any) (from, to int64, clamped bool) {
+	v, ok := body["max_tokens"]
+	if !ok {
+		return 0, 0, false
+	}
+	n, ok := toInt64(v)
+	if !ok || n <= CodeartsMaxOutputTokens {
+		return 0, 0, false
+	}
+	body["max_tokens"] = int64(CodeartsMaxOutputTokens)
+	return n, CodeartsMaxOutputTokens, true
+}
+
+// toInt64 宽松取整（入站 JSON 解出的是 float64；也可能是 int/int64/json.Number）。
+func toInt64(v any) (int64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int64(t), true
+	case int:
+		return int64(t), true
+	case int64:
+		return t, true
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
 }

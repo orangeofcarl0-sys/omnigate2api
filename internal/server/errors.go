@@ -35,6 +35,25 @@ func isQuotaError(msg string) bool {
 	return false
 }
 
+// paramErrMarkers 上游"请求参数非法"标记（华为 InferHub.001001005）。
+// 这是**请求侧**问题：客户端传了上游不接受的参数（实测 max_tokens>65536 必得此错），
+// 换账号、等冷却都不会好——所有同家族账号必然同样拒绝。
+var paramErrMarkers = []string{"inferhub.001001005", "the request param is invalid"}
+
+// isRequestParamError 判定请求参数非法。这类错误**不得计入账号错误、不得冷却账号**：
+// 否则一个客户端传错参数，三次就能把整个华为渠道打成 10 分钟 no_healthy_account
+// （2026-09-26 实测复现：ZCode 按 /v1/models 广告的 max_output_tokens=131072 下发
+// max_tokens，华为只接受 ≤65536）。处置 = 只记日志 + 把上游原话回给客户端。
+func isRequestParamError(msg string) bool {
+	low := strings.ToLower(msg)
+	for _, m := range paramErrMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // modelRateLimitHorizon 模型级限流冷却上限：上游给出的解封时刻可能很远（甚至误报），
 // 钳住以免一对 (账号,模型) 被长期废掉——到期自然重试，真限流会再次触发。
 const modelRateLimitHorizon = 24 * time.Hour
@@ -74,6 +93,14 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 			h.settleModelRateLimit(acct, model, ae.Message)
 			return
 		}
+	}
+	// 请求参数非法（华为 InferHub.001001005）是客户端侧问题：只记日志、不计错误、
+	// 不冷却账号（换号也没用——同家族账号必然同样拒绝）。调用方在聊天循环里
+	// 已按 isRequestParamError 直接回 400 给客户端，这里是兜底。
+	if isRequestParamError(ae.Error()) {
+		log.Printf("upstream request param error (client-side, no penalty) account=%s model=%s err=%s",
+			acct.Name, model, truncateText(ae.Error(), 200))
+		return
 	}
 	switch {
 	case ae.Status == 401 || ae.Code == 401:

@@ -44,6 +44,18 @@ type staticModelSpec struct {
 	modes                            []string
 }
 
+// advertisedMaxOut 对外广告的 max_output_tokens。华为（codearts）侧上游目录广告的
+// 值高于其 API 实际接受值（实测 glm-5.3-flash / deepseek-v4-flash-0731 都是
+// max_tokens ≤ 65536 才通过，见 upstream.CodeartsMaxOutputTokens）——按硬上限收敛，
+// 否则客户端照广告值下发 max_tokens 必得 400 InferHub.001001005。
+// 腾讯侧不受影响（实测其广告值可被接受）。
+func advertisedMaxOut(family string, v int64) int64 {
+	if family == "codearts" && v > upstream.CodeartsMaxOutputTokens {
+		return upstream.CodeartsMaxOutputTokens
+	}
+	return v
+}
+
 // entry 转为对外条目（/v1/models 与面板共用形状）。
 func (s staticModelSpec) entry(family string) map[string]any {
 	e := map[string]any{
@@ -56,7 +68,7 @@ func (s staticModelSpec) entry(family string) map[string]any {
 		e["context_length"] = s.context
 	}
 	if s.maxOut > 0 {
-		e["max_output_tokens"] = s.maxOut
+		e["max_output_tokens"] = advertisedMaxOut(family, s.maxOut)
 	}
 	if s.vendor != "" {
 		e["vendor"] = s.vendor
@@ -401,7 +413,7 @@ func infoEntry(family string, mi upstream.ModelInfo, id string) map[string]any {
 		e["context_length"] = 131072 // 兜底
 	}
 	if mi.MaxTokens > 0 {
-		e["max_output_tokens"] = mi.MaxTokens
+		e["max_output_tokens"] = advertisedMaxOut(family, mi.MaxTokens)
 	}
 	if mi.Vendor != "" {
 		e["vendor"] = mi.Vendor
