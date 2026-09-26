@@ -141,6 +141,21 @@ select option{ background:#fff; color:var(--text); }
 .badge[data-fam="workbuddy"]{background:color-mix(in srgb,var(--ok) 14%,transparent);border-color:color-mix(in srgb,var(--ok) 42%,transparent);color:color-mix(in srgb,var(--ok) 84%,#0F172A)}
 .badge[data-fam="codearts"]{background:color-mix(in srgb,var(--info) 12%,transparent);border-color:color-mix(in srgb,var(--info) 40%,transparent);color:color-mix(in srgb,var(--info) 82%,#0F172A)}
 
+/* ── 模型级限流（429/code 6004）：只影响个别模型，同账号其它模型仍可用 ──────
+   之前是一行 11px 灰字（"模型限流 dsv41f(154m)"），混在状态列里几乎看不见；
+   现改为琥珀色 chip：模型名加粗 + 等宽倒计时，剩余 ≤15 分钟转红，到期自动隐藏。 */
+.coolrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:5px}
+.coolrow .lbl{font-size:11px;font-weight:700;color:#b45309;letter-spacing:.02em;white-space:nowrap}
+.coolchip{display:inline-flex;align-items:center;gap:6px;padding:2px 4px 2px 10px;border-radius:999px;font-size:11px;
+  font-family:var(--font-mono);background:color-mix(in srgb,var(--warn) 13%,#fff);
+  border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);color:#92400e;white-space:nowrap}
+.coolchip b{font-weight:700}
+.coolchip .t{font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--warn) 20%,#fff);
+  border-radius:999px;padding:1px 7px;min-width:34px;text-align:center}
+.coolchip.soon{background:color-mix(in srgb,var(--bad) 11%,#fff);border-color:color-mix(in srgb,var(--bad) 45%,transparent);color:#b91c1c}
+.coolchip.soon .t{background:color-mix(in srgb,var(--bad) 18%,#fff)}
+.coolchip.gone{display:none}
+
 /* ── 模型与路由（SPEC §29.7）：单表联合目录 + 渠道归属裁决 ─────────────── */
 .mroute-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .mroute-src{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
@@ -539,6 +554,41 @@ function fmtDur(mins){
   return (d ? d+"d" : "") + (h || d ? h+"h" : "") + m + "m";
 }
 
+// coolChips 模型级限流（429/code 6004）的显式 chip：模型名加粗 + 剩余时间。
+// 时间用 until 现算（不是服务端的 in_min 快照），由 tickCoolChips 每 20s 自走；
+// 到期先隐藏，等下一次刷新由服务端 prune 掉（避免面板上留"已到期的限流"）。
+function coolChips(a){
+  const list = a.model_cooling || [];
+  if (!list.length) return "";
+  const chips = list.map(m => {
+    const until = Date.parse(m.until || "");
+    const mins = isNaN(until) ? (m.in_min || 0) : Math.max(0, Math.round((until - Date.now())/60000));
+    const tip = `上游模型级限流（429/code 6004）——只影响该模型，同账号其它模型仍可用；重置于 ${fmtTime(m.until)}（上游声明值）`;
+    return `<span class="coolchip${mins <= 15 ? " soon" : ""}${mins <= 0 ? " gone" : ""}" data-until="${escapeAttr(m.until || "")}" title="${escapeAttr(tip)}">` +
+      `<b>${escapeHtml(m.model)}</b><span class="t">${fmtDur(mins)}</span></span>`;
+  }).join("");
+  return `<div class="coolrow"><span class="lbl">模型限流</span>${chips}</div>`;
+}
+
+// tickCoolChips 让限流倒计时自己走（面板原本只在你点「刷新」时才更新）。
+function tickCoolChips(){
+  document.querySelectorAll(".coolrow").forEach(row => {
+    let alive = 0;
+    row.querySelectorAll(".coolchip[data-until]").forEach(el => {
+      const until = Date.parse(el.dataset.until || "");
+      if (isNaN(until)) { alive++; return; }
+      const mins = Math.round((until - Date.now())/60000);
+      if (mins <= 0) { el.classList.add("gone"); return; }
+      alive++;
+      const t = el.querySelector(".t");
+      if (t) t.textContent = fmtDur(mins);
+      el.classList.toggle("soon", mins <= 15);
+    });
+    row.classList.toggle("hidden", alive === 0);
+  });
+}
+setInterval(tickCoolChips, 20000);
+
 // renewalLine 续期能力 + 到期倒计时。把"这号还能不能自动续、什么时候到期"直接摆在
 // 状态列：refresh_token/ticket 可静默续期；「无」= 到期必须重新登录。
 // 2026-09-27 事故教训：账号过期 12 小时面板仍显示"健康"（字段有、没人看）。
@@ -600,11 +650,7 @@ function render(data){
         <td>${a.quota_updated_at
           ? `<strong>${Number(a.credits||0).toLocaleString()}</strong>${a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()}${a.quota_used ? ` · 用 ${Number(a.quota_used).toLocaleString()}` : ""}</div>` : ""}`
           : `<span class="muted" title="尚未查询过余额（额度快照不持久化，重启后需重新查询；调度器每日也会刷新）">未查询</span>`}</td>
-        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${renewalLine(a)}${
-          (a.model_cooling && a.model_cooling.length)
-            ? `<div class="muted" style="font-size:11px" title="上游模型级限流（429/code 6004）：只影响这些模型，同账号其它模型仍可用">模型限流 ${a.model_cooling.map(m => `${escapeHtml(m.model)}(${m.in_min}m)`).join(" ")}</div>`
-            : ""
-        }</td>
+        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${coolChips(a)}${renewalLine(a)}</td>
         <td><div class="muted"${reasonTip?` title="${escapeAttr(reasonTip)}"`:""}>${escapeHtml(reason)}</div><div class="mono muted" style="font-size:11px">${escapeHtml(until)}</div></td>
         <td><div class="row-actions">
           <button class="btn" data-act="credits" data-uid="${escapeAttr(a.uid)}">积分</button>

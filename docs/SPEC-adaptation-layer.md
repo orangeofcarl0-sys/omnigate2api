@@ -1286,7 +1286,7 @@ sequenceDiagram
 | 记账 | 账号池 `Account.modelCool map[model]until`：`CoolModel` / `ModelCooled` / `ModelCools`；`PickForModel(family, model, tried)` 跳过"该模型在该账号冷却中"的账号；**账号级健康不受影响**，面板「模型限流」列可见 |
 | 轮换 | 选号走 `PickForModel`；续接会话的黏性账号若该模型正被限流则**解绑重分配**（换模型后继续用同账号是允许的）。全部账号该模型都在冷却时退化返回兜底账号（让上游再判一次），不让单模型限流把整个家族打成不可用 |
 | 持久化 | `state.json` 增加 `model_cool`（重启不丢，可能长达数小时） |
-| 面板语义（v1.4 补） | 「原因」列**只表达当前状态**（禁用原因 / 账号级冷却原因）：模型级限流会写账号级 `lastErr`，到期后无人清 → 长错误文案会永远"黏"在面板上（2026-09-27 用户报）。现 `Pool.List()` 的 `reason` 仅在禁用/账号级冷却时非空；历史错误留在 `last_error`（面板放进「原因」列 tooltip：*最近一次错误（已恢复）*），模型级限流只由「模型限流」行表达；`Validate` 顺带 prune 过期 `modelCool` 与陈旧 `lastErr`（housekeeping） |
+| 面板语义（v1.4 补） | 「原因」列**只表达当前状态**（禁用原因 / 账号级冷却原因）：模型级限流会写账号级 `lastErr`，到期后无人清 → 长错误文案会永远"黏"在面板上（2026-09-27 用户报）。现 `Pool.List()` 的 `reason` 仅在禁用/账号级冷却时非空；历史错误留在 `last_error`（面板放进「原因」列 tooltip：*最近一次错误（已恢复）*），模型级限流只由「模型限流」行表达；`Validate` 顺带 prune 过期 `modelCool` 与陈旧 `lastErr`（housekeeping） ；**呈现**：模型级限流是一排琥珀色 chip（模型名加粗 + 等宽倒计时，剩余 ≤15 分钟转红、到期自动隐藏），由面板每 20s 本地 tick（用 `until` 现算，不依赖刷新；此前是一行 11px 灰字，混在状态列里几乎看不见） |
 | 与账号级区分 | `14018 额度已用尽` / `Credits exhausted` 是**账号级**积分耗尽（连免费模型也拒）→ 归 `TencentErrHardCredit`（冷却至次日 04:00）。注意「额度已用尽」并不含子串「额度用尽」（中间隔着「已」），旧标记表会漏判，已逐条补齐 |
 
 **传输层必须有界（同批修复）**：手工构造 `&http.Transport{}` **不继承** `DefaultTransport`
