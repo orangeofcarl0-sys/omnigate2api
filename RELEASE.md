@@ -28,6 +28,10 @@ fork 自 HITZY2002/omnigate2api（华为云 CodeArts Agent / 码道 OpenAI 兼�
   落账上游真实用量，白嫖金额按"正常 API 调用花费"折算（牌价可在 config.json `pricing` 覆盖）；
   「按天」逐日表 + `GET /admin/api/usage?days=N`，`data/usage.json` 保留 90 天
 - 华为通道 roles 化（SPEC §31）+ 双上游图片透传（SPEC §30）；修复原生 tool_calls 与正文流序颠倒
+- **华为续期定论（SPEC §24.4）**：ticket 只在登录窗口内有效（登录后约 21.5h 再轮询得
+  `TM.00001001 无效ticketId`），**不是续期路**——华为 STS 24h，每 ~24h 需重登一次
+  （门户会话留存，重登免密）；换发失败按"无续期路"分型（不提前禁用），面板续期能力
+  **只在实证换发成功后**才标 `ticket`
 
 ## v1.3.0
 

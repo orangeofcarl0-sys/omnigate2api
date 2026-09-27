@@ -590,16 +590,27 @@ function tickCoolChips(){
 setInterval(tickCoolChips, 20000);
 
 // renewalLine 续期能力 + 到期倒计时。把"这号还能不能自动续、什么时候到期"直接摆在
-// 状态列：refresh_token/ticket 可静默续期；「无」= 到期必须重新登录。
+// 状态列：refresh_token（腾讯）可静默续期；ticket 只在**实证换发成功过**时才敢标
+// （2026-09-27 实测华为 ticket 只在登录窗口内有效，换发失败 → 服务端给 ""）。
+// 「无」= 到期必须重新登录（华为号每 ~24h 一次）。颜色只标紧迫度，见下方 cls 注释。
 // 2026-09-27 事故教训：账号过期 12 小时面板仍显示"健康"（字段有、没人看）。
 function renewalLine(a){
   const exp = (a.expires_at && !a.expires_at.startsWith("0001-")) ? new Date(a.expires_at) : null;
   const mins = (exp && !isNaN(exp.getTime())) ? Math.round((exp.getTime() - Date.now())/60000) : null;
   const kind = a.renewal || "";
+  const huawei = (a.family === "codearts");
   const kindTxt = kind === "refresh_token" ? "refresh_token" : (kind === "ticket" ? "ticket" : "无（到期需重登）");
-  const cls = !kind ? "bad" : (mins !== null && mins <= 0 ? "bad" : (mins !== null && mins <= 120 ? "warn" : "info"));
+  // 颜色只表达**紧迫度**（bad=已过期 / warn=≤2h / info），能力语义交给徽章文字：
+  // 华为号天然"无续期路"，若一律标红就会变成常态噪音、真到点时反而没人看。
+  const cls = (mins !== null && mins <= 0) ? "bad" : ((mins !== null && mins <= 120) ? "warn" : "info");
   const expTxt = mins === null ? "" : (mins <= 0 ? "已过期 " + fmtDur(-mins) : "剩余 " + fmtDur(mins));
-  const tip = "自动续期能力：refresh_token/ticket 可在到期时静默换发；「无」= 没有续期路径，STS 到期后必须重新登录（面板/CLI 授权登录）";
+  const tip = kind === "refresh_token"
+    ? "refresh_token 可静默续期：STS/token 到期时自动换发，无需人工介入"
+    : (kind === "ticket"
+      ? "ticket 通道已实证换发成功：到期时由网关静默换发新 STS"
+      : (huawei
+        ? "无自动续期路径：华为 STS 有效期约 24h，到期必须重新登录（门户会话留存，30 天内重登免密、一般免输密码）。实测 ticket 只在登录窗口内有效，不能静默换发"
+        : "无自动续期路径：到期必须重新登录（面板/CLI 授权登录）"));
   return `<div style="font-size:11px;margin-top:3px"><span class="badge ${cls}" title="${escapeAttr(tip)}">续期 ${escapeHtml(kindTxt)}</span>` +
     (expTxt ? `<span class="muted" style="margin-left:5px">${escapeHtml(expTxt)}</span>` : "") + `</div>`;
 }

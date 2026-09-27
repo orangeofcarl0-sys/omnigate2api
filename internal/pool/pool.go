@@ -307,9 +307,10 @@ func (p *Pool) List() []map[string]any {
 }
 
 // renewalKind 凭证的**自动续期能力**（面板显示 + 排障）：有 refresh_token → "refresh_token"；
-// 只有 ticket 会话（华为 ticket 通道不下发 refresh_token，见 HANDOFF §6.5.1）→ "ticket"；
-// 两者皆无 → ""（到期只能人工重登）。2026-09-27 事故教训：账号过期 12 小时、面板仍显示
-// "健康"，就是因为这个能力既没被记录也没被展示。
+// 华为 ticket 通道 → "ticket"，但**必须实证过换发成功**（TicketVerifiedAt > 0）——
+// 2026-09-27 实测 ticket 只在登录窗口内有效，未实证就宣称可续期等于骗人（HANDOFF §6.5.1
+// 教训：2026-09-27 账号过期 12 小时、面板仍显示"健康"，就是因为这个能力既没被记录也没被展示）；
+// 其余（含只有 ticket 但从未换发成功）→ ""（到期只能人工重登）。
 func renewalKind(a *auth.Auth) string {
 	if a == nil {
 		return ""
@@ -317,7 +318,7 @@ func renewalKind(a *auth.Auth) string {
 	if strings.TrimSpace(a.RefreshToken) != "" {
 		return "refresh_token"
 	}
-	if id, secret := a.TicketCreds(); id != "" && secret != "" {
+	if id, secret := a.TicketCreds(); id != "" && secret != "" && a.TicketVerified() {
 		return "ticket"
 	}
 	return ""
@@ -903,7 +904,7 @@ func (p *Pool) RefreshToken(name string) error {
 	return nil
 }
 
-// ticketPoller 华为 ticket 30 天免登录换发（仅 codearts 客户端实现，腾讯无此通道）。
+// ticketPoller 华为 ticket 登录通道换发（仅 codearts 客户端实现，腾讯无此通道）。
 type ticketPoller interface {
 	PollTicket(ctx context.Context, cfg upstream.LoginConfig, ticketID, secret string) (*upstream.TokenResponse, error)
 }
@@ -916,9 +917,12 @@ var (
 	errSaveFailed    = errors.New("save failed")
 )
 
-// refreshAuthCreds 续期账号凭证：优先 refresh_token；缺失时走华为 ticket 30 天
-// 免登录通道静默换发新 STS（华为文档「配置账号30天免登录」：客户端 26.5.1+ 的
-// 登录会话 30 天内有效，ticket+secret 可重复换发）。两条路都没有 → errNoRenewalPath。
+// refreshAuthCreds 续期账号凭证：优先 refresh_token；缺失时试华为 ticket 登录通道
+// 换发 STS。**ticket 换发失败一律按 errNoRenewalPath 分型**——2026-09-27 实测该通道
+// 只在登录窗口内有效（登录后约 21.5h 再轮询 → `TM.00001001 无效ticketId`），所以
+// "换发失败"与"没有续期路"对调用方是同一件事：STS 到期必须重登。华为文档的「30 天
+// 免登录」实测只体现为**重登免密**（门户会话留存），不体现为网关可静默续期；
+// 客户端版本门槛（26.5.1+）是否影响该通道仍待实测（OMNIGATE_LOGIN_PLUGIN_VERSION）。
 func refreshAuthCreds(acct *Account, pollerOverride ticketPoller) error {
 	authz := acct.Auth
 	cfg := upstream.DefaultLoginConfig()
@@ -942,8 +946,14 @@ func refreshAuthCreds(acct *Account, pollerOverride ticketPoller) error {
 		if id, secret := authz.TicketCreds(); id != "" && secret != "" {
 			resp, err := tr.PollTicket(context.Background(), cfg, id, secret)
 			if err != nil {
-				return fmt.Errorf("ticket re-poll failed: %w", err)
+				// 分型到 errNoRenewalPath，让 Validate 走"无续期路"的两分支：已过期 →
+				// 禁用并写明"需重登"；仅临近过期 → 告警且保持可用（不提前判死）。
+				// 落进 default 会让账号在 STS 还没过期时被"refresh failed: …"禁用，
+				// 且面板原因指向不了动作。
+				log.Printf("pool ticket re-poll unusable account=%s err=%v (treated as no renewal path)", acct.Name, err)
+				return fmt.Errorf("%w: ticket re-poll failed: %w", errNoRenewalPath, err)
 			}
+			authz.MarkTicketVerified() // 换发成功才允许面板宣称"续期 ticket"
 			if err := applyAuthCreds(authz, resp); err != nil {
 				return fmt.Errorf("%w: %w", errSaveFailed, err)
 			}

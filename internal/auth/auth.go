@@ -25,11 +25,18 @@ type Auth struct {
 	Expiration      string `json:"expiration"` // RFC3339
 	RefreshToken    string `json:"refresh_token"`
 	CodeVerifier    string `json:"code_verifier"` // PKCE verifier，refresh 需要
-	// 华为 ticket 30 天免登录通道（HANDOFF §6.5 / 华为文档「配置账号30天免登录」）：
-	// ticket+secret 在会话期（约 30 天）内可静默换发新 STS，替代不可用的 refresh_token。
+	// 华为 ticket 登录通道（HANDOFF §6.5 / 华为文档「配置账号30天免登录」）：
+	// 登录时由门户下发，用于轮询登录结果。
+	//
+	// **2026-09-27 实测更正**：ticket 只在登录窗口内有效——登录后约 21.5h 用同一
+	// ticket_id 再轮询 → `TM.00001001 无效ticketId`。它**不是续期路**：STS 24h 到期
+	// 仍需人工重登（"30 天档"只让重登免密，不让网关静默换发）。
 	TicketID     string `json:"ticket_id,omitempty"`
 	TicketSecret string `json:"ticket_secret,omitempty"`
-	UpdatedAt    int64  `json:"updated_at"`
+	// TicketVerifiedAt 最近一次 ticket 静默换发**成功**的时间戳（0 = 从未成功）。面板
+	// 只据此标注"续期 ticket"——能力必须实证过才允许宣称（HANDOFF §6.5.1 教训）。
+	TicketVerifiedAt int64 `json:"ticket_verified_at,omitempty"`
+	UpdatedAt        int64 `json:"updated_at"`
 	// 腾讯专用（华为留空）
 	EnterpriseID string `json:"enterprise_id,omitempty"`
 	Domain       string `json:"domain,omitempty"`
@@ -98,11 +105,27 @@ func (a *Auth) TicketCreds() (string, string) {
 	return a.TicketID, a.TicketSecret
 }
 
-// SetTicketCreds 登录成功后更新 ticket 免登录凭证。
+// SetTicketCreds 登录成功后更新 ticket 登录通道凭证（新 ticket 未实证换发能力，
+// 一并清零 TicketVerifiedAt：上一轮会话的实证结论不适用于新会话）。
 func (a *Auth) SetTicketCreds(id, secret string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.TicketID, a.TicketSecret = id, secret
+	a.TicketVerifiedAt = 0
+}
+
+// TicketVerified 报告该 ticket 通道是否**实证**换发过 STS（面板据此标注续期能力）。
+func (a *Auth) TicketVerified() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.TicketVerifiedAt > 0
+}
+
+// MarkTicketVerified 记录一次成功的 ticket 静默换发（换发成功才允许宣称可续期）。
+func (a *Auth) MarkTicketVerified() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.TicketVerifiedAt = time.Now().Unix()
 }
 
 // ExpiresAt 返回 token 过期时间。
