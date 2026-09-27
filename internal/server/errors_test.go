@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"omnigate2api/internal/adapt"
 	"omnigate2api/internal/auth"
 	"omnigate2api/internal/upstream"
 )
@@ -152,5 +154,94 @@ func TestIntegrationRequestParamErrorFrameTerminal(t *testing.T) {
 	}
 	if list := p.List(); list[0]["err_count"] != 0 || list[0]["cooling"] != false {
 		t.Fatalf("account must stay healthy: %+v", list[0])
+	}
+}
+
+// 11140 request illegal = 上游授权封禁：**禁用账号并写明"需重新登录"**（社区两个同目标
+// 项目一致实测"到期不自愈"），而不是当成可自愈的限流反复送死——2026-09-27 事故前我们
+// 按通用错误累计，每 10 分钟一轮假冷却，三个全球号被打成"全池不可用"。
+func TestTencentAccountBannedDisables(t *testing.T) {
+	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	_, p, _, h := buildTestServer(t, fake.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	acct := p.Get("u2")
+	body := `{"code":11140,"msg":"request illegal","requestId":"x","displayMsg":{"zh":"内容未通过安全审核，请调整后重试"}}`
+	h.handleUpstreamError(acct, "deepseek-v4.1-flash", &upstream.ApiError{Status: http.StatusForbidden, Message: body})
+
+	list := p.List()
+	if len(list) != 1 || list[0]["disabled"] != true {
+		t.Fatalf("account ban must disable the account: %+v", list[0])
+	}
+	if reason, _ := list[0]["reason"].(string); !strings.Contains(reason, "重登无效") {
+		t.Fatalf("reason must carry the measured fact (re-login does NOT clear it): %v", list[0]["reason"])
+	}
+	if list[0]["err_count"] != 0 || list[0]["cooling"] != false {
+		t.Fatalf("ban must not be counted as a generic error/cooldown: %+v", list[0])
+	}
+}
+
+// 11140 的限流变体（rate-limiting 文案 + 「将在…重置」）：软冷却到上游声明的墙钟，
+// **不禁用**账号——与封禁形态严格分野。
+func TestTencentSoftRateVariantCoolsToReset(t *testing.T) {
+	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	_, p, _, h := buildTestServer(t, fake.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	acct := p.Get("u2")
+	reset := time.Now().In(statsCST).Add(2 * time.Hour).Format("2006-01-02 15:04:05")
+	body := `{"code":11140,"msg":"The model provider is rate-limiting requests. It will reset at ` + reset + ` UTC+8."}`
+	h.handleUpstreamError(acct, "deepseek-v4.1-flash", &upstream.ApiError{Status: http.StatusOK, Message: body})
+
+	list := p.List()
+	if list[0]["disabled"] == true {
+		t.Fatalf("rate-limit variant must not disable: %+v", list[0])
+	}
+	if list[0]["cooling"] != true {
+		t.Fatalf("rate-limit variant must cool: %+v", list[0])
+	}
+	until, _ := list[0]["until"].(string)
+	got, err := time.Parse(time.RFC3339, until) // 面板字段是 RFC3339（UTC 表示）
+	if err != nil {
+		t.Fatalf("until not RFC3339: %q err=%v", until, err)
+	}
+	want, err := time.ParseInLocation("2006-01-02 15:04:05", reset, statsCST)
+	if err != nil {
+		t.Fatalf("bad reset fixture: %v", err)
+	}
+	if d := got.Sub(want); d > time.Minute || d < -time.Minute {
+		t.Fatalf("cooldown must follow the upstream reset wall-clock: got=%s want=%s", got, want)
+	}
+}
+
+// 请求侧拒绝（内容策略/参数类）：不罚账号（社区拍板：单次违规请求不该毒化号池）。
+func TestTencentClientSideNoPenalty(t *testing.T) {
+	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	_, p, _, h := buildTestServer(t, fake.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	acct := p.Get("u2")
+	for i := 0; i < 5; i++ {
+		h.handleUpstreamError(acct, "deepseek-v4.1-flash",
+			&upstream.ApiError{Status: http.StatusBadRequest, Message: `{"code":11132,"msg":"request blocked by security policy"}`})
+	}
+	list := p.List()
+	if list[0]["err_count"] != 0 || list[0]["cooling"] != false || list[0]["disabled"] != false {
+		t.Fatalf("client-side rejection must not penalize the account: %+v", list[0])
+	}
+}
+
+// 端到端（流式错误帧形态）：全局号被封禁时，账号按"需重新登录"禁用，而不是累计错误。
+func TestIntegrationTencentBannedFrameDisables(t *testing.T) {
+	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		sseFrame(w, "", `{"error_code":"11140","error_msg":"request illegal"}`)
+		sseFrame(w, "", `[DONE]`)
+	}})
+	t.Setenv("OMNIGATE_TENCENT_BASE", fake.URL)
+	srv, p, _, h := buildTestServer(t, fake.URL, []*auth.Auth{tencentFakeAuth("u2", "tok2")})
+	h.cfg.Profiles = adapt.NewRegistry(&adapt.Codearts, &adapt.Workbuddy)
+
+	postChat(t, srv, `{"model":"deepseek-v4.1-flash","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	list := p.List()
+	if list[0]["disabled"] != true {
+		t.Fatalf("frame-form ban must disable the account: %+v", list[0])
+	}
+	if reason, _ := list[0]["reason"].(string); !strings.Contains(reason, "重登无效") {
+		t.Fatalf("reason must carry the measured fact: %v", list[0]["reason"])
 	}
 }

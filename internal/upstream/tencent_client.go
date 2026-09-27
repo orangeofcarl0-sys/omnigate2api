@@ -105,6 +105,26 @@ func (c *TencentClient) tencentDo(acct *auth.Auth, o tencentHTTPOpts) ([]byte, i
 	return raw, resp.StatusCode, nil
 }
 
+// tencentChatUAGlobal chat 出站 UA（global 域）：官方**国际版**桌面端三段式，
+// 平台段必须是 `WorkBuddy AI`——送错平台段（`WorkBuddy`）会被上游判 403 code 11140
+// "request illegal" 风控（社区三个同目标项目一致实证：linguo headers.go 注释点名、
+// ithtelab realm.py 按 realm 切品牌段、hub wb_accounts.py 的 chat_ua 常量；见 HANDOFF §11.11）。
+// 版本沿用我们已实证的桌面端值（5.5.6 / 2.137.1），只换平台段——最小改动。
+const tencentChatUAGlobal = "WorkBuddy/5.5.6 WorkBuddy AI/5.5.6 CLI/2.137.1"
+
+// tencentChatUA chat 路径生效的出站 UA：OMNIGATE_TENCENT_UA 显式覆盖 > 按区域默认。
+// CN 暂维持既有 CLI 形态（`CLI/2.63.2 CodeBuddy/2.63.2`，当前实测可用）；global 用
+// 国际版桌面形态。CN 是否也要切桌面形态待观察（上游收紧是渐进的，见 HANDOFF §11.11）。
+func tencentChatUA(domain string) string {
+	if v := strings.TrimSpace(os.Getenv("OMNIGATE_TENCENT_UA")); v != "" {
+		return v
+	}
+	if TencentRegion(domain) {
+		return tencentChatUAGlobal
+	}
+	return TencentClientUA
+}
+
 // desktopUserAgent 桌面客户端 UA（SPEC §32.8：服务端按 UA 归因桌面任务的硬门控）。
 const desktopUserAgent = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 
@@ -155,12 +175,27 @@ func tencentCommonHeaders(req *http.Request, origin string) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", TencentClientUA)
+	// X-CodeBuddy-Request 是官方客户端的**风控闸门头**（社区实证：上游 2026-09-14
+	// 给自家出站加上的那批头之一，注释原文「所有 API 请求必带」）。
+	req.Header.Set("X-CodeBuddy-Request", "1")
+	// Accept-Language 按区域切（同一批改动 D5）：国际站 en-US、国内 zh-CN。
+	req.Header.Set("Accept-Language", tencentAcceptLanguage(origin))
+}
+
+// tencentAcceptLanguage 按 Origin 判区域返回 Accept-Language（global → en-US）。
+func tencentAcceptLanguage(origin string) string {
+	if strings.Contains(origin, "workbuddy.ai") {
+		return "en-US"
+	}
+	return "zh-CN"
 }
 
 // tencentChatHeaders chat 请求头：Bearer + 账号标识 + 产品约定；空字段按官方
 // CLI 约定发 X-No-*: 1 占位（保持请求形态完整，SPEC §28.4 决策 C）。
 func tencentChatHeaders(req *http.Request, cred SignCredential, origin string) {
 	tencentCommonHeaders(req, origin)
+	// chat 出站 UA 按区域切（global 必须国际版平台段，否则 403/11140）
+	req.Header.Set("User-Agent", tencentChatUA(cred.Domain))
 	if cred.SecurityToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cred.SecurityToken)
 	} else {
@@ -182,6 +217,12 @@ func tencentChatHeaders(req *http.Request, cred SignCredential, origin string) {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
 	req.Header.Set("X-Product", "SaaS")
+	// 账号级设备指纹头（社区实证：上游 2026-09-13 起要求设备风控标识；值按 uid
+	// 稳定派生——随机机器码反而会被判异常，见 HANDOFF §11.11）。
+	if cred.UserID != "" {
+		req.Header.Set("X-Machine-ID", deriveDeviceID(cred.UserID, "machine"))
+		req.Header.Set("X-Session-ID", deriveDeviceID(cred.UserID, "session"))
+	}
 }
 
 // ChatStream 发送 /v2/chat/completions：roles 消息保真透传（tools 原样拼入 body），
@@ -327,7 +368,41 @@ const (
 	TencentErrHardCredit                    // 402 / 积分不足 / 14018 额度已用尽：冷却至次日 04:00
 	TencentErrSessionDead                   // 12153 / Offline user session not found：永久禁用
 	TencentErrModelRateLimit                // 429 + code 6004：**按模型**限流，解封时刻由上游给出
+	// TencentErrAccountBanned 上游授权封禁（`11140` + msg `request illegal`）：账号级、
+	// 换号无用、**不会自愈**——必须禁用并提示重新登录（见 tencentAccountBannedMarkers）。
+	TencentErrAccountBanned
+	// TencentErrSoftRate 限流文案（含 `11140` 的 rate-limiting 变体、无模型级证据的裸 429）：
+	// 带「将在…重置」就冷却到该时刻，否则按配置的软冷却。
+	TencentErrSoftRate
+	// TencentErrClientSide 请求侧拒绝（内容策略/参数类）：不罚账号、原样透传
+	// （社区拍板：单次违规请求不该毒化整个号池）。
+	TencentErrClientSide
 )
+
+// tencentAccountBannedMarkers 上游授权封禁文案。
+//
+// **只能按文案判、不能按 code 判**：同一个 `11140` 还承载限流文案
+// （见 tencentSoftRate11140Markers），按 code 会把两种语义混为一谈。
+//
+// 实测（2026-09-27，本机三个全球号）：`403 {"code":11140,"msg":"request illegal",
+// "displayMsg":{"zh":"内容未通过安全审核，请调整后重试"}}` —— displayMsg 只是通用文案，
+// 真语义是"请求非法"：同一条无害内容换到国内号能过、全局号全拒，且**任何模型都拒**
+// （而签到/任务/埋点等其它端点正常）→ 账号级而非内容级。
+// 社区两个同目标项目一致：`request illegal` 判账号级授权封禁，且**到期不自愈、
+// 必须重新授权登录**（ithtelab CHANGELOG：「上游对 11140 request illegal 是硬禁用」）。
+var tencentAccountBannedMarkers = []string{"request illegal"}
+
+// tencentSoftRate11140Markers `11140` 的**限流**变体文案（社区实测形态，勿与封禁混判）：
+//
+//	{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}
+var tencentSoftRate11140Markers = []string{"rate-limiting requests", "rate limiting requests"}
+
+// tencentClientSideMarkers 请求侧拒绝文案（内容策略误杀/非法调用形态）：不罚账号。
+// 取自社区同目标项目的实测表（内容审核误报、非官方渠道、非法调用）。
+var tencentClientSideMarkers = []string{
+	"blocked by security policy", "unapproved channel", "illegal api invocation",
+	"unmarshal chat params failed", "prompt is too long",
+}
 
 // tencentHardCreditMarkers 额度耗尽标记（中英双通道，对齐参考实现）。
 var tencentHardCreditMarkers = []string{
@@ -346,10 +421,24 @@ var tencentSessionDeadMarkers = []string{"12153", "offline user session not foun
 // 需要专属动作；429/5xx 由通用映射继续处理）。
 func ClassifyTencent(status int, body string) TencentErrKind {
 	low := strings.ToLower(body)
+	// 账号级授权封禁最先判（`11140 request illegal`）：换号无用、且**不会自愈**，
+	// 必须先于一切"限流/额度"分支——否则会被当成可自愈的限流反复送死
+	// （2026-09-27 事故：每 10 分钟一轮假冷却，客户端 12s 重试一轮，号池形同虚设）。
+	for _, m := range tencentAccountBannedMarkers {
+		if strings.Contains(low, m) {
+			return TencentErrAccountBanned
+		}
+	}
 	// 模型级限流优先于通用 429：上游明确「您也可以切换其他模型继续使用」，
 	// 按整账号冷却会白白减少可用容量（见 tencent_limits.go）。
 	if IsModelRateLimit(body) {
 		return TencentErrModelRateLimit
+	}
+	// 11140 的限流变体（rate-limiting 文案）与裸限流文案：按软冷却处理
+	for _, m := range tencentSoftRate11140Markers {
+		if strings.Contains(low, m) {
+			return TencentErrSoftRate
+		}
 	}
 	if status == http.StatusPaymentRequired {
 		return TencentErrHardCredit
@@ -362,6 +451,12 @@ func ClassifyTencent(status int, body string) TencentErrKind {
 	for _, m := range tencentSessionDeadMarkers {
 		if strings.Contains(low, m) {
 			return TencentErrSessionDead
+		}
+	}
+	// 请求侧拒绝（内容策略/参数类）：不罚账号（放在最后，避免抢走上面更具体的语义）
+	for _, m := range tencentClientSideMarkers {
+		if strings.Contains(low, m) {
+			return TencentErrClientSide
 		}
 	}
 	return TencentErrOther

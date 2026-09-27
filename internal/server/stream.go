@@ -158,6 +158,8 @@ func (h *Handler) streamOut(sink streamSink, acct *pool.Account, model string, p
 	if terminal {
 		log.Printf("chat stream account=%s upstream error frame: %s", acct.Name, lastUpErr)
 		switch {
+		case acct.ProfileID == "workbuddy" && h.settleTencentKind(acct, model, lastUpErr):
+			// 腾讯专属三态（封禁 / 限流文案 / 请求侧）已在 settleTencentKind 内结算
 		case isRequestParamError(lastUpErr):
 			// 请求参数非法（客户端侧）：只记日志，不计错误、不冷却账号
 			log.Printf("upstream request param error (client-side, no penalty) account=%s model=%s err=%s",

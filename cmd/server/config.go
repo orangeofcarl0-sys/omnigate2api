@@ -36,8 +36,11 @@ type Config struct {
 		KeepaliveInterval int  `json:"keepalive_interval_minutes"` // 保活心跳间隔（新增）
 	} `json:"watch"`
 
-	MaxConcurrent   int    `json:"max_concurrent"`   // 单账号最大并发数（新增）
-	KeepaliveWindow string `json:"keepalive_window"` // 保活窗口（新增）
+	MaxConcurrent int `json:"max_concurrent"` // 单账号最大并发数（新增）
+	// MaxConcurrentGlobal 全球域（workbuddy.ai）单账号并发上限（缺省 2）：上游对国际版
+	// 有更严的风控档位（社区实证「官方默认压到 2，并发过高被判异常流量」，HANDOFF §11.11）。
+	MaxConcurrentGlobal int    `json:"max_concurrent_global"`
+	KeepaliveWindow     string `json:"keepalive_window"` // 保活窗口（新增）
 
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"`
@@ -135,6 +138,11 @@ func applyEnv(c *Config) {
 			c.MaxConcurrent = n
 		}
 	}
+	if v := os.Getenv("OMNIGATE_MAX_CONCURRENT_GLOBAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.MaxConcurrentGlobal = n
+		}
+	}
 	if v := os.Getenv("OMNIGATE_KEEPALIVE_WINDOW"); v != "" {
 		c.KeepaliveWindow = v
 	}
@@ -175,6 +183,9 @@ func (c *Config) normalize() error {
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 1 // 上游并发会话释放慢，单账号串行最稳
 	}
+	if c.MaxConcurrentGlobal <= 0 {
+		c.MaxConcurrentGlobal = 2 // 国际版官方默认档（风控更严）
+	}
 	return nil
 }
 
@@ -189,11 +200,12 @@ func (c *Config) ToPoolConfig() pool.Config {
 		dur = 10 * time.Minute
 	}
 	return pool.Config{
-		ErrThreshold:    c.Cooldown.ErrThresh,
-		ErrCooldown:     c.ErrCooldownDur,
-		SoftCooldown:    c.SoftRateDur,
-		RefreshSkew:     time.Duration(c.Watch.RefreshSkewM) * time.Minute,
-		MaxConcurrent:   c.MaxConcurrent,
-		KeepaliveWindow: dur,
+		ErrThreshold:        c.Cooldown.ErrThresh,
+		ErrCooldown:         c.ErrCooldownDur,
+		SoftCooldown:        c.SoftRateDur,
+		RefreshSkew:         time.Duration(c.Watch.RefreshSkewM) * time.Minute,
+		MaxConcurrent:       c.MaxConcurrent,
+		MaxConcurrentGlobal: c.MaxConcurrentGlobal,
+		KeepaliveWindow:     dur,
 	}
 }

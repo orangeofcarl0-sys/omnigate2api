@@ -68,6 +68,41 @@ func (h *Handler) settleModelRateLimit(acct *pool.Account, model, msg string) {
 		acct.Name, model, until.Format(time.RFC3339), truncateText(msg, 140))
 }
 
+// settleTencentKind 腾讯专属错误结算（chat 与流式错误帧两条路径共用）。
+// 返回 true = 已处理，调用方不要再走通用分支。
+//
+// 只认三类新语义（其余仍由 handleUpstreamError 既有分支处理）：
+//   - `TencentErrAccountBanned`（11140 request illegal）：上游授权封禁——**换号无用且
+//     不自愈**（社区两个同目标项目一致实测），故禁用该账号并把原因写清，让面板显式提示
+//     "需重新登录"。2026-09-27 事故前我们把它当通用错误累计，结果每 10 分钟一轮假冷却、
+//     客户端 12s 一轮重试，三个全球号被打成"全池不可用"。
+//   - `TencentErrSoftRate`（11140 rate-limiting 变体等限流文案）：带「将在…重置」就
+//     冷却到该墙钟，否则按配置软冷却。
+//   - `TencentErrClientSide`（内容策略/参数类）：请求侧问题，不罚账号、原样透传。
+func (h *Handler) settleTencentKind(acct *pool.Account, model, msg string) bool {
+	switch upstream.ClassifyTencent(0, msg) {
+	case upstream.TencentErrAccountBanned:
+		// 提示语按 2026-09-27 实测校正：**重登无效**（三个全球号换全新凭证后，同内容同模型
+		// 仍 11140）→ 该封禁不是凭证/授权状态，而是账号级（或账号组/区域）风控。社区
+		// "需重登"的口径在此不适用，故给用户的是可执行的出口：换号 / 点「启用」试探。
+		h.cfg.Pool.DisableSticky(acct.Name, "上游封禁（11140 request illegal）——重登无效（实测），可点「启用」重试或换号")
+		log.Printf("upstream account banned account=%s model=%s msg=%s",
+			acct.Name, model, truncateText(msg, 140))
+		return true
+	case upstream.TencentErrSoftRate:
+		until := upstream.ModelRateLimitUntil(msg, time.Now(), h.cfg.SoftCooldown, modelRateLimitHorizon)
+		h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, time.Until(until), msg)
+		log.Printf("upstream soft rate account=%s model=%s until=%s msg=%s",
+			acct.Name, model, until.Format(time.RFC3339), truncateText(msg, 140))
+		return true
+	case upstream.TencentErrClientSide:
+		log.Printf("upstream client-side rejection (no penalty) account=%s model=%s msg=%s",
+			acct.Name, model, truncateText(msg, 140))
+		return true
+	}
+	return false
+}
+
 // handleUpstreamError 按上游错误分类结算账号：401 禁用、429 软冷却、
 // 并发会话上限仅记日志（瞬时）、5xx 硬冷却、其余累计错误计数。
 // 腾讯家族先按实证语义分类（SPEC §28.4 决策 B）：硬额度/会话死亡专属动作。
@@ -82,6 +117,10 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 		return
 	}
 	if acct.ProfileID == "workbuddy" {
+		// 先过腾讯专属三态（封禁/限流文案/请求侧）：它们必须先于"模型级 6004"与通用分支
+		if h.settleTencentKind(acct, model, ae.Message) {
+			return
+		}
 		switch upstream.ClassifyTencent(ae.Status, ae.Message) {
 		case upstream.TencentErrHardCredit:
 			h.cfg.Pool.CooldownUntilTomorrow4AM(acct.Name, ae.Error())

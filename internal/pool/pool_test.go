@@ -353,3 +353,39 @@ func TestListReasonReflectsCurrentStateOnly(t *testing.T) {
 		t.Fatalf("expired model cooling must be pruned: %+v", row["model_cooling"])
 	}
 }
+
+// 上游封禁的硬禁用必须**粘住**（2026-09-27）：Validate 的「凭证有效即复位」规则本意是
+// "重登后旧禁用不该拦请求"，但对上游封禁不成立——社区实测 11140 request illegal 到期
+// 也不自愈。若用普通 Disable，下一次 Tick（≤30 分钟）就会清掉，号池又去撞同一面墙
+// （本机实测：重启后三个被封号又变"健康"）。
+func TestStickyDisableSurvivesValidate(t *testing.T) {
+	p := newTestPool(t, "", testAuth("t1", "workbuddy"))
+	const reason = "上游封禁（11140 request illegal）——重登无效（实测），可点「启用」重试或换号"
+	p.DisableSticky("t1", reason)
+
+	if ok, err := p.Validate(p.Get("t1")); err != nil || !ok {
+		t.Fatalf("凭证本身有效，Validate 应返回 ok：ok=%v err=%v", ok, err)
+	}
+	row := p.List()[0]
+	if row["disabled"] != true {
+		t.Fatalf("硬禁用必须扛过 Validate（否则号池每 30 分钟又去撞墙）: %+v", row)
+	}
+	if got, _ := row["reason"].(string); !strings.Contains(got, "11140") {
+		t.Fatalf("原因必须保留: %v", row["reason"])
+	}
+
+	// 出口一：面板「启用」（用户判断风控已过时可试）
+	if !p.Enable("t1") {
+		t.Fatal("enable must succeed")
+	}
+	if p.List()[0]["disabled"] == true {
+		t.Fatal("「启用」必须解除硬禁用")
+	}
+
+	// 出口二：重新登录（AddAccount 换新凭证）
+	p.DisableSticky("t1", reason)
+	p.AddAccount(testAuth("t1", "workbuddy"))
+	if p.List()[0]["disabled"] == true {
+		t.Fatal("重新登录必须解除硬禁用")
+	}
+}

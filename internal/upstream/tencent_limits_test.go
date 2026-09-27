@@ -2,6 +2,7 @@
 package upstream
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -80,5 +81,38 @@ func TestModelRateLimitUntil(t *testing.T) {
 	far := `{"code":6004,"msg":"将在 2030-01-01 00:00:00 UTC+8 重置"}`
 	if got := ModelRateLimitUntil(far, now, time.Minute, 24*time.Hour); got.Sub(now) != 24*time.Hour {
 		t.Fatalf("horizon must clamp absurd reset times: %v", got.Sub(now))
+	}
+}
+
+// 11140 的两种形态必须**按文案**分野（不能按 code）：`request illegal` = 账号级授权
+// 封禁（不自愈、需重登）；`rate-limiting` = 限流（软冷却）。口径与社区两个同目标项目一致。
+func TestClassifyTencent11140Variants(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   TencentErrKind
+	}{
+		{"封禁：request illegal（本机 2026-09-27 实测形态；displayMsg 只是通用文案）",
+			http.StatusForbidden,
+			`{"code":11140,"msg":"request illegal","requestId":"22e3ed52","displayMsg":{"en":"The content did not pass the safety review. Please adjust and retry.","zh":"内容未通过安全审核，请调整后重试"}}`,
+			TencentErrAccountBanned},
+		{"限流：rate-limiting 变体（社区实测形态）",
+			http.StatusOK,
+			`{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`,
+			TencentErrSoftRate},
+		{"模型级限流仍是 6004",
+			http.StatusTooManyRequests,
+			`{"code":6004,"msg":"您的使用量已超出频率限制，将在 2026-09-22 09:46:39 UTC+8 重置，您也可以切换其他模型继续使用。"}`,
+			TencentErrModelRateLimit},
+		{"请求侧：内容策略拦截", http.StatusBadRequest, `{"code":11132,"msg":"request blocked by security policy"}`, TencentErrClientSide},
+		{"请求侧：prompt too long", http.StatusBadRequest, `{"code":11115,"msg":"prompt is too long"}`, TencentErrClientSide},
+		{"会话死亡", http.StatusUnauthorized, `{"code":12153,"msg":"Offline user session not found"}`, TencentErrSessionDead},
+		{"其余归 Other", http.StatusBadRequest, `{"code":12345,"msg":"whatever"}`, TencentErrOther},
+	}
+	for _, c := range cases {
+		if got := ClassifyTencent(c.status, c.body); got != c.want {
+			t.Fatalf("%s: kind=%v want %v", c.name, got, c.want)
+		}
 	}
 }

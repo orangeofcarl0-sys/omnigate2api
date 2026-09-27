@@ -48,8 +48,12 @@ type Account struct {
 	// modelCool 按 (账号, 模型) 的冷却截止时刻（SPEC §28.4 决策 B 补充）：
 	// 上游的 429+code 6004 是**模型级**限流（文案自证"可切换其他模型继续使用"），
 	// 把整账号冷却会平白丢掉该账号对其余模型的容量，故按模型维度记账。
-	modelCool         map[string]time.Time
-	disabled          bool
+	modelCool map[string]time.Time
+	disabled  bool
+	// disabledSticky 硬禁用（上游封禁类）：Validate 的「凭证有效即复位」对它不成立——
+	// 社区实测 11140 request illegal 到期不自愈、必须重新登录；只有重新登录（AddAccount）
+	// 或面板「启用」能解除（2026-09-27）。
+	disabledSticky    bool
 	disabledReason    string
 	lastErr           string
 	activeConcurrent  int       // 当前活跃并发请求数
@@ -74,12 +78,16 @@ func (a *Account) SetQuota(q AccountQuota) {
 
 // Config 池配置。
 type Config struct {
-	ErrThreshold    int
-	ErrCooldown     time.Duration
-	SoftCooldown    time.Duration
-	RefreshSkew     time.Duration // token 到期前多久自动刷新
-	MaxConcurrent   int           // 单账号最大并发数（默认 5）
-	KeepaliveWindow time.Duration // 保活心跳窗口，超过此时间无活动则发送心跳
+	ErrThreshold  int
+	ErrCooldown   time.Duration
+	SoftCooldown  time.Duration
+	RefreshSkew   time.Duration // token 到期前多久自动刷新
+	MaxConcurrent int           // 单账号最大并发数（默认 5）
+	// MaxConcurrentGlobal 全球域（workbuddy.ai）单账号并发上限（默认 2）。社区实证：
+	// 上游为国际版单独设了这一档，「国际版风控更严，官方默认压到 2，并发过高被判为
+	// 异常流量」（ithtelab 1.0.40 / linguo `pool.max_in_flight_global=2`，HANDOFF §11.11）。
+	MaxConcurrentGlobal int
+	KeepaliveWindow     time.Duration // 保活心跳窗口，超过此时间无活动则发送心跳
 }
 
 // Pool 账号池。
@@ -109,15 +117,28 @@ func New(auths []*auth.Auth, cfg Config, stateFile string) (*Pool, error) {
 		// 串行（1）最稳，避免撞限。可按多账号情况调高。
 		cfg.MaxConcurrent = 1
 	}
+	if cfg.MaxConcurrentGlobal <= 0 {
+		cfg.MaxConcurrentGlobal = 2 // 国际版官方默认档（见 Config 注释）
+	}
 	if cfg.KeepaliveWindow <= 0 {
 		cfg.KeepaliveWindow = 10 * time.Minute // 10 分钟无活动则保活
 	}
 	p := &Pool{cfg: cfg, state: stateFile}
 	for _, a := range auths {
-		p.accounts = append(p.accounts, newAccount(a, cfg.MaxConcurrent))
+		p.accounts = append(p.accounts, newAccount(a, p.maxConcurrentFor(a)))
 	}
 	p.loadState()
 	return p, nil
+}
+
+// maxConcurrentFor 该账号生效的单账号并发上限：全球域用独立档位（默认 2），其余用通用档。
+// 为什么分档：上游对国际版有更严的风控档位（官方默认 2），并发过高会被判为异常流量
+// ——社区两个项目都为此单开了配置项（见 Config.MaxConcurrentGlobal 注释）。
+func (p *Pool) maxConcurrentFor(a *auth.Auth) int {
+	if a != nil && upstream.TencentRegion(a.Domain) {
+		return p.cfg.MaxConcurrentGlobal
+	}
+	return p.cfg.MaxConcurrent
 }
 
 // newAccount 按凭证 Profile 构造账号：客户端按上游家族分发
@@ -190,13 +211,14 @@ func (p *Pool) Get(name string) *Account {
 
 // AddAccount 动态添加账号（WebUI 登录成功后调用）。
 func (p *Pool) AddAccount(a *auth.Auth) *Account {
-	acct := newAccount(a, p.cfg.MaxConcurrent)
+	acct := newAccount(a, p.maxConcurrentFor(a))
 	p.mu.Lock()
 	for i, existing := range p.accounts {
 		if existing.Name == acct.Name {
 			existing.mu.Lock()
 			existing.Auth = a
 			existing.disabled = false
+			existing.disabledSticky = false // 重新登录解除硬禁用
 			existing.disabledReason = ""
 			existing.lastErr = ""
 			existing.mu.Unlock()
@@ -317,6 +339,7 @@ func (p *Pool) Enable(name string) bool {
 		if a.Name == name || a.UID == name {
 			a.mu.Lock()
 			a.disabled = false
+			a.disabledSticky = false // 面板「启用」是硬禁用的出口（用户判断风控已过时可试）
 			a.disabledReason = ""
 			a.lastErr = ""
 			a.clearModelCools()
@@ -433,7 +456,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 			next = append(next, existing)
 			delete(byUID, a.UserID)
 		} else {
-			next = append(next, newAccount(a, p.cfg.MaxConcurrent))
+			next = append(next, newAccount(a, p.maxConcurrentFor(a)))
 		}
 	}
 	p.accounts = next
@@ -552,8 +575,19 @@ func (p *Pool) Validate(a *Account) (bool, error) {
 	a.lastValidated = time.Now()
 	// 凭证有效即视为可用：复位历史的 disabled/冷却持久化状态。
 	// 用户重新登录换新凭证后，旧 disabled 状态不应继续拦截请求。
-	if a.disabled || time.Now().Before(a.coolUntil) {
+	// **例外**：disabledSticky（上游封禁）不复位——它不是凭证问题，重登前必须一直拦住
+	// （社区实测 11140 request illegal 不自愈）。
+	if a.disabled && a.disabledSticky {
+		// 保持禁用与原因；只做过期痕迹清理
+		now := time.Now()
+		for m, until := range a.modelCool {
+			if !now.Before(until) {
+				delete(a.modelCool, m)
+			}
+		}
+	} else if a.disabled || time.Now().Before(a.coolUntil) {
 		a.disabled = false
+		a.disabledSticky = false
 		a.coolUntil = time.Time{}
 		a.coolKind = CoolNone
 		a.lastErr = ""
@@ -653,6 +687,29 @@ func (p *Pool) Disable(name, reason string) {
 			a.mu.Unlock()
 			log.Printf("pool disable account=%s reason=%s", name, reason)
 		}
+	}
+	p.saveState()
+}
+
+// DisableSticky 硬禁用（上游封禁类）。与普通 Disable 的唯一区别：**Validate 不会复位**。
+// 为什么需要它：Validate 的「凭证有效即视为可用」复位规则本意是"重登后旧禁用不该拦请求"，
+// 但对"上游封禁"这类状态不成立——社区两个同目标项目一致实测：11140 request illegal
+// 到期也不自愈，必须重新登录。若用普通 Disable，下一次 Tick（≤30 分钟）就会把它清掉，
+// 号池又去撞同一面墙（本机 2026-09-27 实测：重启后三个被封号又变"健康"）。
+func (p *Pool) DisableSticky(name, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.Name != name {
+			continue
+		}
+		a.mu.Lock()
+		a.disabled = true
+		a.disabledSticky = true
+		a.disabledReason = reason
+		a.lastErr = reason
+		a.mu.Unlock()
+		log.Printf("pool disable (sticky) account=%s reason=%s", name, reason)
 	}
 	p.saveState()
 }
@@ -908,6 +965,7 @@ func (p *Pool) loadState() {
 		ErrCount  int                  `json:"err_count"`
 		CoolUntil time.Time            `json:"cool_until"`
 		Disabled  bool                 `json:"disabled"`
+		Sticky    bool                 `json:"disabled_sticky,omitempty"`
 		Reason    string               `json:"reason"`
 		LastErr   string               `json:"last_error"`
 		ModelCool map[string]time.Time `json:"model_cool,omitempty"`
@@ -922,6 +980,7 @@ func (p *Pool) loadState() {
 				a.errCount = s.ErrCount
 				a.coolUntil = s.CoolUntil
 				a.disabled = s.Disabled
+				a.disabledSticky = s.Sticky
 				a.disabledReason = s.Reason
 				a.lastErr = s.LastErr
 				a.modelCool = s.ModelCool
@@ -940,6 +999,7 @@ func (p *Pool) saveState() {
 		ErrCount  int                  `json:"err_count"`
 		CoolUntil time.Time            `json:"cool_until"`
 		Disabled  bool                 `json:"disabled"`
+		Sticky    bool                 `json:"disabled_sticky,omitempty"`
 		Reason    string               `json:"reason"`
 		LastErr   string               `json:"last_error"`
 		ModelCool map[string]time.Time `json:"model_cool,omitempty"`
@@ -952,6 +1012,7 @@ func (p *Pool) saveState() {
 			ErrCount:  a.errCount,
 			CoolUntil: a.coolUntil,
 			Disabled:  a.disabled,
+			Sticky:    a.disabledSticky,
 			Reason:    a.disabledReason,
 			LastErr:   a.lastErr,
 			ModelCool: a.modelCool,
