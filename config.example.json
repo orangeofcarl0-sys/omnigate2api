@@ -11,6 +11,7 @@
   },
   "max_concurrent": 5,
   "max_concurrent_global": 2,
+  "max_concurrent_codearts": 2,
   "keepalive_window": "10m",
   "pricing": {
     "credit_cny": 0.014,

@@ -361,6 +361,7 @@ export OMNIGATE_API_KEY=你的随机密钥
 | `OMNIGATE_ACTIVITY_PLATFORM` | 活动域请求 `X-Client-Platform` 头覆盖（实证用，一般不设） | 不发送 |
 | `OMNIGATE_MAX_CONCURRENT` | 单账号最大并发 | `5` |
 | `OMNIGATE_MAX_CONCURRENT_GLOBAL` | **全球域**单账号并发上限（国际版风控更严，官方默认档 2） | `2` |
+| `OMNIGATE_MAX_CONCURRENT_CODEARTS` | **华为**单账号并发上限（上游会话上限 3、槽位释放慢，留余量） | `2` |
 | `OMNIGATE_DEBUG_PROMPTS` | 折叠提示词落盘目录（可观测） | 关闭 |
 | `OMNIGATE_DEBUG_CONFIG` | `/v3/config` 原始响应按区域落盘目录（上游审计：改解析前先列全部键路径，SPEC §33.3） | 关闭 |
 | `OMNIGATE_SESSION_MODE` | 会话模式：`native`（默认，全量折叠）/ `incremental`（指纹增量 opt-in） | 空 → Profile 声明 |

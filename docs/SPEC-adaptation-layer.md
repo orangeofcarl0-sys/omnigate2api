@@ -1331,6 +1331,22 @@ sequenceDiagram
   流式错误帧。客户端最终看到的是上游原话（`no_healthy_account: … code=11140 request illegal`），
   不再是"consecutive errors"这种看不出原因的措辞。
 
+### 28.4.2 单账号并发分档与瞬时错误语义（v1.4 补）
+
+**单账号并发上限按家族/区域分档**（`Pool.maxConcurrentFor`，config `max_concurrent*`）：
+
+| 家族/区域 | 默认 | 依据 |
+|---|---|---|
+| 华为（codearts） | **2** | 上游**硬上限 3 个并发会话**（TM.00001041 原文「并发会话数已达上限(3个)」）且槽位释放慢 → 留一个余量。实测配 5 时一天 18 次风暴：超出的请求打到上游被拒 → 网关等 5s 重试（最多 50s）拖住请求，随后一条 504 又把**唯一**的华为号冷却 10 分钟 |
+| 腾讯·全球（workbuddy.ai） | **2** | 上游为国际版单设更严的风控档位（社区实证「官方默认压到 2」，HANDOFF §11.11） |
+| 腾讯·国内 | `max_concurrent`（默认 5） | 无特殊风控档记载 |
+
+**上游网关"后端超时"是瞬时**（`isUpstreamBackendTimeout`：`APIG.0203` / `Backend timeout`）：
+语义是网关等不到后端（模型）在超时内返回——**上游侧慢**，与账号健康无关，故按短软冷却处理
+（`soft_rate`），而**不**走 5xx 默认的硬冷却。影响面理由：对"单账号家族"（如只有一个华为号），
+一次后端超时 = 整条渠道停 10 分钟；其余 5xx 仍按硬冷却（回归断言在
+`TestUpstreamBackendTimeoutSoftCooldown`）。
+
 **传输层必须有界（同批修复）**：手工构造 `&http.Transport{}` **不继承** `DefaultTransport`
 的默认值——`DialContext` 为 nil 即无超时拨号、`TLSHandshakeTimeout` 为 0 即无限等握手。
 实测后果：某区域不可达时流式请求会一直挂在建连/握手阶段，**既不报错也不换号**，直到客户端

@@ -245,3 +245,39 @@ func TestIntegrationTencentBannedFrameDisables(t *testing.T) {
 		t.Fatalf("reason must carry the measured fact: %v", list[0]["reason"])
 	}
 }
+
+// 上游网关"后端超时"（华为 APIG.0203 Backend timeout）按瞬时处理：短软冷却，**不是**
+// 5xx 默认的 10 分钟硬冷却——否则一个华为号 + 一次后端超时 = 整条渠道停 10 分钟
+// （2026-09-27 实测事故）。其余 5xx 仍按硬冷却（回归断言）。
+func TestUpstreamBackendTimeoutSoftCooldown(t *testing.T) {
+	fake := fakeUpstream(t, map[string]func(w http.ResponseWriter){"*": okStream(false)})
+	_, p, _, h := buildTestServer(t, fake.URL, []*auth.Auth{fakeAuth("u1", "tok1")})
+	acct := p.Get("u1")
+	h.handleUpstreamError(acct, "glm-5.3-flash", &upstream.ApiError{Status: http.StatusGatewayTimeout,
+		Message: `{"error_msg":"Backend timeout","error_code":"APIG.0203","request_id":"x"}`})
+
+	row := p.List()[0]
+	if row["cooling"] != true {
+		t.Fatalf("must cool: %+v", row)
+	}
+	until, _ := row["until"].(string)
+	got, err := time.Parse(time.RFC3339, until)
+	if err != nil {
+		t.Fatalf("until not RFC3339: %q", until)
+	}
+	if d := time.Until(got); d > 3*time.Minute {
+		t.Fatalf("backend timeout must use a short soft cooldown, got %s", d)
+	}
+	if row["disabled"] == true {
+		t.Fatalf("must not disable: %+v", row)
+	}
+
+	// 回归：普通 500 仍走 10 分钟硬冷却
+	h.cfg.Pool.ClearCooldown(acct.Name)
+	h.handleUpstreamError(acct, "glm-5.3-flash", &upstream.ApiError{Status: http.StatusInternalServerError, Message: `{"error_msg":"internal error"}`})
+	until, _ = p.List()[0]["until"].(string)
+	got, _ = time.Parse(time.RFC3339, until)
+	if d := time.Until(got); d < 5*time.Minute {
+		t.Fatalf("plain 5xx must keep the hard cooldown, got %s", d)
+	}
+}

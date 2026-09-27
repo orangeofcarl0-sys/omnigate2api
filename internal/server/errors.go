@@ -151,6 +151,14 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 		// 并发会话上限（TM.00001041）是瞬时错误：上游会话槽位会被其他请求释放，
 		// 不冷却账号——池的并发锁已防止过载，冷却反而误伤后续请求。
 		log.Printf("upstream concurrent limit (transient) account=%s msg=%s", acct.Name, truncateText(ae.Message, 80))
+	case ae.Status >= 500 && isUpstreamBackendTimeout(ae.Error()):
+		// 上游网关的"后端超时"（华为 APIG.0203 Backend timeout）是**上游侧慢**，不是账号
+		// 故障——按瞬时处理：短软冷却，不判账号死。对"单账号家族"尤其重要：一次后端超时
+		// 不该让整条渠道停 10 分钟（2026-09-27 实测：一个华为号 + 一次 504 = 10 分钟
+		// no_healthy_account；其前因是并发超上游会话上限导致的压力）。
+		h.cfg.Pool.Cooldown(acct.Name, pool.CoolSoft, h.cfg.SoftCooldown, ae.Error())
+		log.Printf("upstream backend timeout (transient, soft cooldown) account=%s model=%s msg=%s",
+			acct.Name, model, truncateText(ae.Message, 120))
 	case ae.Status >= 500:
 		h.cfg.Pool.Cooldown(acct.Name, pool.CoolErr, h.cfg.ErrCooldown, ae.Error())
 	default:
@@ -168,6 +176,15 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 		h.cfg.Pool.NoteError(acct.Name, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 	}
 }
+
+// isUpstreamBackendTimeout 上游网关的"后端超时"文案（华为 APIG.0203 / Backend timeout）。
+// 语义：网关等不到后端（模型）在超时内返回——**上游侧慢**，与账号健康无关。
+// 故按瞬时处理（短软冷却），而不是 5xx 默认的硬冷却。
+func isUpstreamBackendTimeout(msg string) bool {
+	low := strings.ToLower(msg)
+	return strings.Contains(low, "apig.0203") || strings.Contains(low, "backend timeout")
+}
+
 func isConcurrentLimitError(msg string) bool {
 	low := strings.ToLower(msg)
 	return strings.Contains(low, "tm.00001041") || strings.Contains(low, "并发会话")

@@ -87,7 +87,12 @@ type Config struct {
 	// 上游为国际版单独设了这一档，「国际版风控更严，官方默认压到 2，并发过高被判为
 	// 异常流量」（ithtelab 1.0.40 / linguo `pool.max_in_flight_global=2`，HANDOFF §11.11）。
 	MaxConcurrentGlobal int
-	KeepaliveWindow     time.Duration // 保活心跳窗口，超过此时间无活动则发送心跳
+	// MaxConcurrentCodearts 华为（codearts）单账号并发上限（默认 2）。**上游硬上限是 3 个
+	// 并发会话**（TM.00001041 原文「并发会话数已达上限(3个)」），且会话槽位释放慢——
+	// 留一个槽位余量最稳。2026-09-27 实测：配 5 时一天 18 次 TM.00001041 风暴（我们等 5s
+	// 重试、请求被拖住），随后一条 504 又把唯一的华为号冷却 10 分钟。
+	MaxConcurrentCodearts int
+	KeepaliveWindow       time.Duration // 保活心跳窗口，超过此时间无活动则发送心跳
 }
 
 // Pool 账号池。
@@ -120,6 +125,9 @@ func New(auths []*auth.Auth, cfg Config, stateFile string) (*Pool, error) {
 	if cfg.MaxConcurrentGlobal <= 0 {
 		cfg.MaxConcurrentGlobal = 2 // 国际版官方默认档（见 Config 注释）
 	}
+	if cfg.MaxConcurrentCodearts <= 0 {
+		cfg.MaxConcurrentCodearts = 2 // 上游上限 3，留一个槽位给释放慢的旧会话
+	}
 	if cfg.KeepaliveWindow <= 0 {
 		cfg.KeepaliveWindow = 10 * time.Minute // 10 分钟无活动则保活
 	}
@@ -135,10 +143,17 @@ func New(auths []*auth.Auth, cfg Config, stateFile string) (*Pool, error) {
 // 为什么分档：上游对国际版有更严的风控档位（官方默认 2），并发过高会被判为异常流量
 // ——社区两个项目都为此单开了配置项（见 Config.MaxConcurrentGlobal 注释）。
 func (p *Pool) maxConcurrentFor(a *auth.Auth) int {
-	if a != nil && upstream.TencentRegion(a.Domain) {
-		return p.cfg.MaxConcurrentGlobal
+	if a == nil {
+		return p.cfg.MaxConcurrent
 	}
-	return p.cfg.MaxConcurrent
+	if a.Profile == "workbuddy" { // 腾讯：国际版走独立档位（风控更严）
+		if upstream.TencentRegion(a.Domain) {
+			return p.cfg.MaxConcurrentGlobal
+		}
+		return p.cfg.MaxConcurrent
+	}
+	// 华为（codearts，Profile 为空）：上游会话上限 3、槽位释放慢 → 独立低档
+	return p.cfg.MaxConcurrentCodearts
 }
 
 // newAccount 按凭证 Profile 构造账号：客户端按上游家族分发
