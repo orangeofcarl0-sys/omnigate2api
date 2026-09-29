@@ -1040,6 +1040,61 @@ type ChatAPI interface {
   与 `port` 要一起改写），或让浏览器停在
   `http://127.0.0.1:PORT/oauth/callback?code=…` 时手动把整条地址贴回面板（社区通行做法）。
 
+### 28.5 (账号, 模型) 窗口用量观测 —— 把"模型限流阈值"从猜变成量（v1.4）
+
+**问题**：上游 `6004` 只给一句人话 + 一个 reset 墙钟时刻，**报文里没有任何数字**
+（无 limit/used/remaining）；而用量账本 `data/usage.json` 是按 `family|realm|model` 聚合的——
+国际版 6 个号共用一个桶，**无法归因到账号**。于是"到底多少次请求/多少 token 触发限流"只能猜。
+
+**做法**：`internal/server/modelusage.go` 按 **(账号, 模型)** 记当前窗口的请求数与 token 数；
+撞限时把**当时的计数快照**存下来 —— 那就是阈值观测值（首次撞限即答案）。
+- 窗口边界按上游声明的 reset 推进：过了 reset 就开新窗口（计数归零），**快照保留**（观测值不丢）。
+- 只观测不惩罚；进程内存态（重启清空），但关键结论同时写日志行，长期留痕：
+  `upstream model rate limit account=… model=… window_requests=N window_tokens=M window_start=…`。
+- 观测面：`GET /admin/api/model-usage`（全量行）；`/admin/api/overview` 的账号行带 `model_window`，
+  面板「模型限流」chip 的提示里直接给出"撞限时本窗口 N 次 / M tokens（窗口起点 …）"。
+- **局限**：token 观测依赖上游返回真实 usage（`u.Any()`）；缺 usage 的成功回合只计请求不计 token。
+
+**已知的限流语义（2026-09-29 实测，可复核）**：
+
+| 性质 | 结论 | 依据 |
+|---|---|---|
+| 作用域 | **(账号, 模型)** | 同账号 `hy3` 正常、`deepseek-v4.1-flash` 429/6004 |
+| 性质 | **免费档限流 + 付费逃生** | 上游配置 `productFeaturesConfig.ModelRateLimitCap`：`freeId`（如 `deepseek-v4.1-flash`）→ `paidId`（`deepseek-v4.1-flash-sg`，`allowPaidSwitch:true`）；实测付费孪生**未被限**、可正常出话 |
+| 窗口 | 约 **24h、锚定**（重击不后移） | 同一 reset 时刻隔 7 小时看三次不变；同账号同模型连续两天的 reset 为 09-28T19:50:17 / 09-29T19:50:20（相隔 24h、同分钟） |
+| 数字配额 | **未知**（上游不给） | 需本节的按账号计数 + 首次撞限快照才能定出 |
+
+### 28.6 国际版账号试用自动激活（v1.4）
+
+新加的国际版账号能登录、能签权，但任何模型都 `429 code=14017 The trial version is not yet
+activated`、余额接口 500 —— 因为站点侧的开通步骤没做。上游文案让人"退出登录再登录"，
+**实测重登无效**；人工做法是在网页上填一次国家/地区（「完善你的资料」）。
+
+**照官方前端实现自动补全**。形状来源：官方**登录前端** bundle 的 billing chunk
+（`download.codebuddy.ai/web/login/<hash>/assets/billing-<hash>.js`，该 chunk 全文只有这两条路径），
+原文即：
+
+```js
+a = async () => n.post("/billing/ide/trial")                        // 幂等：14051 = 已领
+w = async e => { const t = await n.get("/auth/realms/copilot/overseas/user/register", {params:{userId:e}});
+                 if (t?.code !== 200 && t?.code !== 0) throw ... }
+o = async (uid, uin, type) => { if (!uin && (!type || type !== PERSONAL)) { await w(uid); await sleep(1500) } }
+S = uid => o(uid).then(ok => ok && a())                             // 登录后自动跑（不 await）
+```
+
+即 **register → 等 1.5s → trial**（`TencentClient.EnsureGlobalTrial`，接在账号初始化里，
+每次登录后 best-effort 跑一次；两个端点都幂等，实测已激活账号返回
+`{"code":200,"msg":"register success"}` 与 `{"code":14051,"msg":"has applied trial"}`）。
+
+- **需补地区时**：上游以错误码形式要求补国家（"region required"），此时先**判语义再判错**
+  （先当硬失败返回就永远补不上），再照官方前端写
+  `POST /console/login/account {attributes:{countryCode:[..],countryFullName:[..],countryName:[..]}}`，
+  取值用 `OMNIGATE_TRIAL_COUNTRY`（默认 `SG:Singapore:新加坡`，与我方全球账号实证一致），
+  随后重跑 register + trial。
+- **仍未实证**：`/billing/area/get-country-code`（国家表）要求特定的 url/User-Agent，我们取不到，
+  故国家取值来自配置而非上游表；命中"需补地区"时原始响应会进错误信息，等真实样本回来再收紧。
+- 华为账号无此通道（`Skipped`）。
+
 ### 24.7 传输层抖动：原地重试 + 面板可见 + 代理支持（v1.4，2026-09-29 事故驱动）
 
 **事故**：用户报「某个账号似乎模型限流但 dashboard 无反应」。查下来两件事：

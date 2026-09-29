@@ -37,7 +37,7 @@ func (h *Handler) adminOverview(w http.ResponseWriter, r *http.Request) {
 			"disabled": disabled,
 			"cooling":  cooling,
 		},
-		"accounts": h.cfg.Pool.List(),
+		"accounts": h.attachModelWindows(h.cfg.Pool.List()),
 		"models":   ids,
 		"schedule": map[string]any{
 			"watch": h.cfg.WatchInfo,
@@ -500,4 +500,29 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, h.cfg.Usage.SnapshotDays(days))
+}
+
+// attachModelWindows 给账号行挂上 (账号, 模型) 窗口用量观测（SPEC §28.5）——
+// 面板的「模型限流」chip 据此显示"撞限时窗口内 N 次 / M tokens"，把阈值摆到限流旁边。
+func (h *Handler) attachModelWindows(rows []map[string]any) []map[string]any {
+	if h.modelUsage == nil {
+		return rows
+	}
+	for _, row := range rows {
+		name, _ := row["uid"].(string)
+		if name == "" {
+			name, _ = row["name"].(string)
+		}
+		if w := h.modelUsage.ForAccount(name); len(w) > 0 {
+			row["model_window"] = w
+		}
+	}
+	return rows
+}
+
+// adminModelUsage (账号, 模型) 窗口用量观测（SPEC §28.5）。
+// 用途：模型限流阈值 = **首次撞限时该窗口的请求数/token 数**（上游报文不含任何数字，
+// 账本又是按 family|realm|model 聚合的，只有这里能按账号归因）。
+func (h *Handler) adminModelUsage(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rows": h.modelUsage.Snapshot()})
 }

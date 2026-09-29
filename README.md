@@ -359,6 +359,7 @@ export OMNIGATE_API_KEY=你的随机密钥
 | `OMNIGATE_AUTH_DIR` | 凭证目录 | `./auths` |
 | `OMNIGATE_STATE_FILE` | 状态文件 | `./data/state.json` |
 | `OMNIGATE_DEFAULT_MODEL` | 默认模型 | `glm-5.2` |
+| `OMNIGATE_TRIAL_COUNTRY` | 国际版账号自动开通试用时补写的国家（`<code>:<EnName>:<本地名>`，SPEC §28.6） | `SG:Singapore:新加坡` |
 | `HTTPS_PROXY` / `NO_PROXY` | 出网代理（SPEC §24.7）：国内直连国际域名极不稳，填 HTTP 代理即可；NO_PROXY 排除国内域 | 空（直连） |
 | `OMNIGATE_LOGIN_MIN_INTERVAL_SECONDS` | 登录授权频次闸：同渠道两次发起的最小间隔（SPEC §24.6） | `60` |
 | `OMNIGATE_LOGIN_MAX_PER_HOUR` | 登录授权频次闸：滚动窗口内每渠道上限 | `10` |

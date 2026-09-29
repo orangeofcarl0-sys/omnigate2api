@@ -568,11 +568,22 @@ function coolChips(a){
   const chips = list.map(m => {
     const until = Date.parse(m.until || "");
     const mins = isNaN(until) ? (m.in_min || 0) : Math.max(0, Math.round((until - Date.now())/60000));
-    const tip = `上游模型级限流（429/code 6004）——只影响该模型，同账号其它模型仍可用；重置于 ${fmtTime(m.until)}（上游声明值）`;
+    const tip = `上游模型级限流（429/code 6004）——只影响该模型，同账号其它模型仍可用；重置于 ${fmtTime(m.until)}（上游声明值）` + winHint(a, m.model);
     return `<span class="coolchip${mins <= 15 ? " soon" : ""}${mins <= 0 ? " gone" : ""}" data-until="${escapeAttr(m.until || "")}" title="${escapeAttr(tip)}">` +
       `<b>${escapeHtml(m.model)}</b><span class="t">${fmtDur(mins)}</span></span>`;
   }).join("");
   return `<div class="coolrow"><span class="lbl">模型限流</span>${chips}</div>`;
+}
+
+// winHint 「模型限流」chip 的补充说明：撞限时**本窗口**的请求数/token 数（SPEC §28.5）。
+// 上游 6004 报文不含任何数字，这个计数快照就是 ModelRateLimitCap 阈值的观测值。
+function winHint(a, model){
+  const w = (a.model_window || {})[model];
+  if (!w) return "";
+  if (!w.hits) return `（窗口内已 ${w.requests} 次 / ${w.tokens} tokens，尚未撞限）`;
+  return `；撞限时本窗口 ${w.hit_requests} 次 / ${w.hit_tokens} tokens`
+    + (w.hit_reset_at ? `，重置于 ${fmtTime(w.hit_reset_at)}` : "")
+    + `（窗口起点 ${fmtTime(w.hit_start)}）`;
 }
 
 // transientNote 瞬时传输错误（EOF / TLS 握手超时等网络抖动）的观测条。

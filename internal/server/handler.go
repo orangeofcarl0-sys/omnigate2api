@@ -138,6 +138,15 @@ func (h *Handler) turnFailure(profile *adapt.UpstreamProfile, matchedKey string)
 //     按"不免费"处理——宁可少报。为什么不用 credit==0：微小请求积分取整为 0）；
 //   - codearts：福利模型（maas_type benefit，每日 token 额度）。
 func (h *Handler) recordUsage(profile *adapt.UpstreamProfile, acct *pool.Account, model string, u *upstream.Usage) {
+	// 窗口用量观测（SPEC §28.5）放在最前、且不看 u：阈值要的是"窗口内发生了几次请求"，
+	// 少计一次阈值就偏低。token 拿得到才累加。
+	if acct != nil {
+		var in, out int64
+		if u != nil {
+			in, out = int64(u.PromptTokens), int64(u.CompletionTokens)
+		}
+		h.modelUsage.NoteRequest(acct.Name, model, in, out, time.Now())
+	}
 	if h.cfg.Usage == nil || u == nil || !u.Any() {
 		return
 	}
@@ -230,6 +239,8 @@ type Handler struct {
 	oauth *oauthStore
 	// loginGuard 登录授权频次闸（SPEC §24.6）：防止面板连点把账号推向上游风控。
 	loginGuard *loginGuard
+	// modelUsage (账号, 模型) 窗口用量观测（SPEC §28.5）：撞限时的计数快照就是阈值观测值。
+	modelUsage *modelUsageStats
 
 	convMu sync.Mutex
 	chats  map[string]string // account → 最近 chat_id
@@ -269,6 +280,7 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{
 		cfg: cfg, mux: http.NewServeMux(), oauth: newOAuthStore(),
 		loginGuard:    newLoginGuard(defaultLoginGuardConfig()),
+		modelUsage:    newModelUsageStats(),
 		chats:         map[string]string{},
 		convAcct:      map[string]string{},
 		tencentStates: map[string]tencentState{},
@@ -303,6 +315,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/accounts/enable", h.withAuth(h.adminEnable))
 	h.mux.HandleFunc("GET /admin/api/growth", h.withAuth(h.adminGrowth))
 	h.mux.HandleFunc("GET /admin/api/usage", h.withAuth(h.adminUsage))
+	h.mux.HandleFunc("GET /admin/api/model-usage", h.withAuth(h.adminModelUsage))
 	h.mux.HandleFunc("GET /admin/api/routes", h.withAuth(h.adminRoutesGet))
 	h.mux.HandleFunc("PUT /admin/api/routes", h.withAuth(h.adminRoutesPut))
 	h.mux.HandleFunc("GET /admin/api/routes/overview", h.withAuth(h.adminRoutesOverview))

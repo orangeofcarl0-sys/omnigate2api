@@ -111,10 +111,14 @@ func TestIsBenefitModel(t *testing.T) {
 
 // promoFree：按区域促销缓存判定免费（付费模型 credit 取整为 0 也不误判）。
 func TestPromoFree(t *testing.T) {
+	// 窗口**相对当前时间**构造（±1 天）：写死日期会变成定时炸弹——2026-09-30 零点一过，
+	// "hy3 免费"就不再成立，测试在真实时间下无故变红（实测：09-30 00:46 起失败）。
+	from := time.Now().Add(-24 * time.Hour).Format(time.RFC3339)
+	until := time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 	raw := `{"models":[{"id":"hy3","credits":"x0.00"},{"id":"glm-5.3","credits":"x0.79"}],
 	  "modelPromotions":[{"id":"hy3-free","enabled":true,"kind":"discount","modelIds":["hy3"],
 	    "badge":{"label":"Free now"},"discount":{"factor":0,"discountedCredits":"0x","displayMode":"replace"},
-	    "schedule":{"timezone":"Asia/Shanghai","validFrom":"2026-08-06T00:00:00+08:00","validUntil":"2026-09-30T00:00:00+08:00"}}]}`
+	    "schedule":{"timezone":"Asia/Shanghai","validFrom":"` + from + `","validUntil":"` + until + `"}}]}`
 	var cfg upstream.ModelConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		t.Fatal(err)

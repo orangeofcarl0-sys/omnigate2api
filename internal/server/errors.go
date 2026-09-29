@@ -62,10 +62,14 @@ const modelRateLimitHorizon = 24 * time.Hour
 // 不动账号级健康——上游文案自证"可切换其他模型继续使用"，整账号冷却会平白丢掉该账号
 // 对其余模型的容量；解封时刻优先取上游声明值。
 func (h *Handler) settleModelRateLimit(acct *pool.Account, model, msg string) {
-	until := upstream.ModelRateLimitUntil(msg, time.Now(), h.cfg.SoftCooldown, modelRateLimitHorizon)
+	now := time.Now()
+	until := upstream.ModelRateLimitUntil(msg, now, h.cfg.SoftCooldown, modelRateLimitHorizon)
 	h.cfg.Pool.CoolModel(acct.Name, model, until, msg)
-	log.Printf("upstream model rate limit account=%s model=%s until=%s msg=%s",
-		acct.Name, model, until.Format(time.RFC3339), truncateText(msg, 140))
+	// 阈值观测（SPEC §28.5）：把"撞限时本窗口的请求数/token 数"连同窗口起点一并打进日志 ——
+	// 上游报文不含任何数字，这个计数快照就是阈值本身的观测值（首次撞限即答案）。
+	reqs, toks, since := h.modelUsage.NoteLimit(acct.Name, model, until, now)
+	log.Printf("upstream model rate limit account=%s model=%s until=%s window_requests=%d window_tokens=%d window_start=%s msg=%s",
+		acct.Name, model, until.Format(time.RFC3339), reqs, toks, since.Format(time.RFC3339), truncateText(msg, 140))
 }
 
 // settleTencentKind 腾讯专属错误结算（chat 与流式错误帧两条路径共用）。

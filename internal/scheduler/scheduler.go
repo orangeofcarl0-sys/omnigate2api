@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"omnigate2api/internal/auth"
 	"omnigate2api/internal/pool"
 	"omnigate2api/internal/upstream"
 )
@@ -324,6 +325,14 @@ func (s *Scheduler) InitAccount(ctx context.Context, acct *pool.Account) {
 	case "codearts":
 		msg, err = s.claimBenefitFor(ctx, acct)
 	case "workbuddy":
+		// 国际版账号：先补全**试用激活**（SPEC §28.6）——新号没做完这一步，任何模型都 429/14017，
+		// 余额接口也 500。官方前端就是"register → 等 1.5s → trial"这三步（幂等，已开通的号
+		// 拿到 14051），所以放在每日动作之前、且失败只记日志（不阻塞入池与后续动作）。
+		if trialMsg, terr := s.ensureGlobalTrialFor(acct); terr != nil {
+			log.Printf("account init account=%s trial activation failed err=%v", acct.Name, terr)
+		} else if trialMsg != "" {
+			log.Printf("account init account=%s %s", acct.Name, trialMsg)
+		}
 		msg, err = s.claimTencentCheckinFor(acct)
 	default:
 		return
@@ -478,4 +487,29 @@ func (s *Scheduler) petTravel(ctx context.Context) {
 			log.Printf("tencent pet account=%s state=%s action=none", acct.Name, st.State)
 		}
 	}
+}
+
+// ensureGlobalTrialFor 国际版账号试用激活（SPEC §28.6）：交给客户端的 EnsureGlobalTrial 跑
+// register → trial（幂等）。非国际账号直接跳过（客户端的 TrialActivation.Skipped）。
+func (s *Scheduler) ensureGlobalTrialFor(acct *pool.Account) (string, error) {
+	if acct == nil || acct.Client == nil {
+		return "", nil
+	}
+	trier, ok := acct.Client.(trialActivator)
+	if !ok {
+		return "", nil // 华为客户端没有这条通道
+	}
+	act, err := trier.EnsureGlobalTrial(acct.Auth)
+	if err != nil {
+		return "", err
+	}
+	if act == nil {
+		return "", nil
+	}
+	return act.Note, nil
+}
+
+// trialActivator 试用激活能力（仅腾讯客户端实现）。
+type trialActivator interface {
+	EnsureGlobalTrial(acct *auth.Auth) (*upstream.TrialActivation, error)
 }
