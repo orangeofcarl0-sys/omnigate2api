@@ -21,11 +21,14 @@ import (
 // 早前 body 只拼 model/stream/messages/tools，客户端设的 temperature/max_tokens
 // 全部无效。实现约定：gen 先铺底，**model/stream/messages 等权威字段随后覆盖**，
 // 客户端无法通过这些键篡改路由或流形态。
+//
+// dpopKeyJSON：华为 DPoP 私钥（JWK JSON，SPEC §24.5）。授权码登录时生成并随凭证落盘，
+// refresh 必须复用同一把（换新密钥 → 上游 `InvalidDPoPHeader`）；腾讯忽略该参数。
 type ChatAPI interface {
 	ChatStream(ctx context.Context, chatID string, messages []ChatMessage,
 		traceID string, cred SignCredential, userName, model string,
 		tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error)
-	RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain string) (*TokenResponse, error)
+	RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain, dpopKeyJSON string) (*TokenResponse, error)
 }
 
 // applyGen 把生成参数铺进 body（nil 值不落键；调用方随后覆盖权威字段）。

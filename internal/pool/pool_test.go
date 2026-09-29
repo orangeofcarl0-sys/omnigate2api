@@ -389,3 +389,36 @@ func TestStickyDisableSurvivesValidate(t *testing.T) {
 		t.Fatal("重新登录必须解除硬禁用")
 	}
 }
+
+// 瞬时传输错误只观测、不惩罚，但必须在 List() 里可见（面板据此显示"瞬时错误 N 次"）。
+// 2026-09-29 实测反馈：客户端报 503 而面板一片干净，用户误判成"模型限流但 dashboard 无反应"。
+func TestNoteTransientObservableWithoutPenalty(t *testing.T) {
+	a := auth.New("t1", "n1", "d1", "tok", "ak", "sk", "2099-01-01T00:00:00Z", "", "v")
+	p, err := New([]*auth.Auth{a}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NoteTransient("t1", `Post "https://x/v2/chat/completions": net/http: TLS handshake timeout`)
+	p.NoteTransient("t1", `Post "https://x/v2/chat/completions": EOF`)
+	row := p.List()[0]
+	if row["transient_err"] != 2 {
+		t.Fatalf("transient_err=%v，应累计 2", row["transient_err"])
+	}
+	if msg, _ := row["transient_msg"].(string); !strings.Contains(msg, "EOF") {
+		t.Fatalf("应保留最近一次错误信息: %v", row["transient_msg"])
+	}
+	if at, _ := row["transient_at"].(string); at == "" {
+		t.Fatal("应记录最近一次时间（面板据此算「x 分钟前」）")
+	}
+	// 关键：只观测，不惩罚——不计错误数、不冷却、不禁用
+	if row["err_count"] != 0 || row["cooling"] != false || row["disabled"] != false {
+		t.Fatalf("瞬时抖动不该罚账号: %+v", row)
+	}
+	p.ClearTransient("t1")
+	if got := p.List()[0]["transient_err"]; got != 0 {
+		t.Fatalf("清除后应为 0，实际 %v", got)
+	}
+}

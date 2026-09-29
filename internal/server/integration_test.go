@@ -111,9 +111,20 @@ func buildTestServer(t *testing.T, upstreamURL string, authes []*auth.Auth) (*ht
 	}
 	cfg := Config{Pool: p, Upstream: upstream.New(10 * time.Second), APIKey: "test-key", DefaultModel: "glm-5.2"}
 	h := NewHandler(cfg)
+	// 测试里连续登录是常态（每个用例自己控制节奏），频次闸会拦住第二次 —— 换成宽松档。
+	// 闸门自身的判定由 loginguard_test.go 单独覆盖（用真实默认档）。
+	h.loginGuard = permissiveLoginGuard()
 	srv := httptest.NewServer(h.mux)
 	t.Cleanup(srv.Close)
 	return srv, p, stateFile, h
+}
+
+// permissiveLoginGuard 测试用宽松闸门：不设间隔、窗口上限极大（只保留失败冷却语义）。
+func permissiveLoginGuard() *loginGuard {
+	return newLoginGuard(loginGuardConfig{
+		MinInterval: 0, Window: time.Hour, MaxPerWindow: 10000,
+		FailureThreshold: 3, FailureCooldown: time.Minute,
+	})
 }
 
 func fakeAuth(id, token string) *auth.Auth {

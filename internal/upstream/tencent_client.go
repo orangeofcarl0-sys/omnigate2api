@@ -249,12 +249,17 @@ func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages 
 	}
 	raw, _ := json.Marshal(body)
 	base, origin := c.resolve(cred.Domain)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v2/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	tencentChatHeaders(req, cred, origin)
-	resp, err := c.streamHTTP.Do(req)
+	// 传输层抖动（EOF / TLS 握手超时）原地重试一次：换账号没用（同一条网络），
+	// 而重试一次几乎总能成功（见 doWithRetry 与 SPEC §28.4 决策 C 补充）。
+	resp, err := doWithRetry(ctx, c.streamHTTP, func(fresh bool) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v2/chat/completions", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		tencentChatHeaders(req, cred, origin)
+		req.Close = fresh // 重试强制新连接，别让池子把死连接递回来
+		return req, nil
+	}, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +281,8 @@ func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages 
 // 无 body，对齐参考实现）。响应为 {code,msg,data:{accessToken,refreshToken,
 // expiresIn,domain}} envelope（code==0 成功）；data 缺省时回退扁平结构以兼容
 // 测试上游。返回 TokenResponse：SecurityToken=accessToken、Expiration=now+expiresIn。
-func (c *TencentClient) RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain string) (*TokenResponse, error) {
+func (c *TencentClient) RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain, dpopKeyJSON string) (*TokenResponse, error) {
+	_ = dpopKeyJSON // 腾讯不需要 DPoP（该参数只为华为契约统一，SPEC §24.5）
 	if strings.TrimSpace(refreshToken) == "" {
 		return nil, fmt.Errorf("no refresh_token available")
 	}
@@ -377,6 +383,10 @@ const (
 	// TencentErrClientSide 请求侧拒绝（内容策略/参数类）：不罚账号、原样透传
 	// （社区拍板：单次违规请求不该毒化整个号池）。
 	TencentErrClientSide
+	// TencentErrTrialInactive 账号的免费试用**尚未激活**（14017）：账号能登录、凭证有效，
+	// 但在激活前**任何模型都不可用**，且**不会自愈**（需要人去站点登录激活）——所以既不能
+	// 当限流反复冷却，也不能当普通错误累计，只能禁用并给出可执行提示。
+	TencentErrTrialInactive
 )
 
 // tencentAccountBannedMarkers 上游授权封禁文案。
@@ -414,6 +424,20 @@ var tencentHardCreditMarkers = []string{
 	"额度已用尽", "credits exhausted", "quota exhausted", "usage quota exceeded",
 }
 
+// tencentTrialInactiveMarkers 未激活免费试用（14017）。
+// 2026-09-29 实测（新加的国际版账号 新加的国际版账号）：
+//
+//	429 {"error":{"data":{"code":14017,"msg":"The trial version is not yet activated.
+//	Please log out of your current account and log in again to activate it immediately
+//	and start your free trial."}}}
+//
+// 同一账号的余额查询（get-user-resource）也 500 code=10000——两者同源：账号在站点侧
+// 还没建立试用资源记录。国内号未激活时文案不同，故中英都收。
+var tencentTrialInactiveMarkers = []string{
+	"trial version is not yet activated", "not yet activated", "14017",
+	"试用未激活", "未激活试用", "试用版尚未激活",
+}
+
 // tencentSessionDeadMarkers 会话死亡标记（离线会话/账号失效）。
 var tencentSessionDeadMarkers = []string{"12153", "offline user session not found"}
 
@@ -427,6 +451,13 @@ func ClassifyTencent(status int, body string) TencentErrKind {
 	for _, m := range tencentAccountBannedMarkers {
 		if strings.Contains(low, m) {
 			return TencentErrAccountBanned
+		}
+	}
+	// 试用未激活（14017）必须先于一切"限流"分支：它同样是 429，但重试/冷却/换模型都无用，
+	// 只有人去站点登录激活才解——被当成软限流的话，号池会拿一个永远不可用的号反复试。
+	for _, m := range tencentTrialInactiveMarkers {
+		if strings.Contains(low, m) {
+			return TencentErrTrialInactive
 		}
 	}
 	// 模型级限流优先于通用 429：上游明确「您也可以切换其他模型继续使用」，

@@ -25,6 +25,10 @@ type Auth struct {
 	Expiration      string `json:"expiration"` // RFC3339
 	RefreshToken    string `json:"refresh_token"`
 	CodeVerifier    string `json:"code_verifier"` // PKCE verifier，refresh 需要
+	// DpopKey 华为 DPoP 私钥（JWK JSON，SPEC §24.5）。授权码登录时生成、随凭证落盘：
+	// `refresh_token` 与 DPoP 公钥绑定，刷新必须复用同一把，换新密钥会被上游拒
+	// （`STS5.1806 … InvalidDPoPHeader`）。腾讯留空。
+	DpopKey string `json:"dpop_key,omitempty"`
 	// 华为 ticket 登录通道（HANDOFF §6.5 / 华为文档「配置账号30天免登录」）：
 	// 登录时由门户下发，用于轮询登录结果。
 	//
@@ -96,6 +100,30 @@ func (a *Auth) Verifier() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.CodeVerifier
+}
+
+// Dpop 返回落盘的 DPoP 私钥（JWK JSON；空 = 该凭证没有固定密钥，refresh 时临时生成）。
+func (a *Auth) Dpop() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.DpopKey
+}
+
+// SetCredentials 授权码登录/刷新成功后写回凭证三件套（SPEC §24.5）：
+// refresh_token（**一次性轮换**，必须回写新值）、PKCE verifier、DPoP 私钥。
+// 空值不清空既有字段（refresh 响应可能只轮换 refresh_token）。
+func (a *Auth) SetCredentials(refreshToken, codeVerifier, dpopKey string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if refreshToken != "" {
+		a.RefreshToken = refreshToken
+	}
+	if codeVerifier != "" {
+		a.CodeVerifier = codeVerifier
+	}
+	if dpopKey != "" {
+		a.DpopKey = dpopKey
+	}
 }
 
 // TicketCreds 返回 ticket 免登录通道凭证（ticket_id + secret）。

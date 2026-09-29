@@ -129,9 +129,27 @@ func New(timeout time.Duration) *Client {
 // 认证
 // ---------------------------------------------------------------------------
 
+// CodeChallengeMethod authorize 的 PKCE 方法名。官方客户端写 `SHA-256`（非 RFC 的 `S256`）：
+// 错值会让门户回退旧 ticket 流程 ⇒ 拿不到授权码 ⇒ 拿不到 refresh_token（SPEC §24.5）。
+const CodeChallengeMethod = "SHA-256"
+
+// CallbackURL 本地回调地址。authorize 的 `auth_callback_url` 与换码的 `redirect_uri`
+// **必须完全一致**，否则上游拒绝换码。
+func (c *Client) CallbackURL(cfg LoginConfig, port int) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", port, cfg.RedirectPath)
+}
+
 // BuildAuthorizeURL 构造 portal 登录链接（PKCE）。
-// ticketID 客户端生成的随机 hex；port 为本地回调端口。
-func (c *Client) BuildAuthorizeURL(cfg LoginConfig, ticketID, codeChallenge, codeChallengeMethod string, port int) string {
+// ticketID 客户端生成的随机 hex；port 为本地回调端口；state 用于定位会话/防 CSRF。
+//
+// **两个参数决定门户走"授权码"还是"旧 ticket"通道**（SPEC §24.5，2026-09-27 四次登录
+// 对照实测）：`code_challenge_method` 必须是官方的 `SHA-256`（写 RFC 的 `S256` 会被门户判为
+// 旧客户端、只回 secret+redirect 而**永不回带 code**），并且必须显式给 `auth_callback_url`
+// （门户据此把 `?code=…` 回投到本地回调）。只有授权码换发的响应里才有 `refresh_token`。
+func (c *Client) BuildAuthorizeURL(cfg LoginConfig, ticketID, codeChallenge, codeChallengeMethod, state string, port int) string {
+	if codeChallengeMethod == "" {
+		codeChallengeMethod = CodeChallengeMethod
+	}
 	q := url.Values{}
 	q.Set("theme", "dark")
 	q.Set("locale", "zh-cn")
@@ -141,38 +159,62 @@ func (c *Client) BuildAuthorizeURL(cfg LoginConfig, ticketID, codeChallenge, cod
 	q.Set("code_challenge", codeChallenge)
 	q.Set("code_challenge_method", codeChallengeMethod)
 	q.Set("ticket_id", ticketID)
+	q.Set("auth_callback_url", c.CallbackURL(cfg, port))
+	if state != "" {
+		q.Set("state", state)
+	}
 	q.Set("plugin-name", cfg.PluginName)
 	q.Set("plugin-version", cfg.PluginVersion)
 	return cfg.PortalHost + "/authorize?" + q.Encode()
 }
 
 // ExchangeCode 用授权码换 token（OAuth2 authorization_code）。
-func (c *Client) ExchangeCode(ctx context.Context, cfg LoginConfig, code, codeVerifier string, port int) (*TokenResponse, error) {
+// redirectURI 必须与 authorize 时的 `auth_callback_url` 一致；dpopKeyJSON 为落盘的 DPoP
+// 私钥（与 refresh_token 绑定，必须复用同一把）。
+//
+// 该响应**不带身份**（实测 user_id/user_name/domain_id 全空），所以这里补一次身份解析：
+// 解 refresh_token 里的 user_profile，失败再打 /v1/current/user（见 identity.go）。
+func (c *Client) ExchangeCode(ctx context.Context, cfg LoginConfig, code, codeVerifier, redirectURI, dpopKeyJSON string) (*TokenResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", cfg.ClientID)
 	form.Set("code", code)
 	form.Set("code_verifier", codeVerifier)
 	form.Set("grant_type", "authorization_code")
-	form.Set("redirect_uri", fmt.Sprintf("http://127.0.0.1:%d%s", port, cfg.RedirectPath))
-	return c.requestToken(ctx, cfg, form)
+	form.Set("redirect_uri", redirectURI)
+	tok, err := c.requestToken(ctx, cfg, form, dpopKeyJSON)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.enrichIdentity(ctx, cfg, tok); err != nil {
+		return nil, err
+	}
+	return tok, nil
 }
 
-// RefreshToken 用 refresh_token 换新凭证。
-func (c *Client) RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain string) (*TokenResponse, error) {
+// RefreshToken 用 refresh_token 换新凭证。官方契约（HANDOFF §6.5.2）要求同一把 DPoP 私钥 +
+// 原 PKCE verifier；且 refresh_token **一次性轮换**——调用方必须回写新值、同账号串行刷新
+// （并发刷同一个 token 会互相作废：`the refresh token has been used`）。
+func (c *Client) RefreshToken(ctx context.Context, cfg LoginConfig, refreshToken, codeVerifier, domain, dpopKeyJSON string) (*TokenResponse, error) {
 	form := url.Values{}
 	form.Set("client_id", cfg.ClientID)
 	form.Set("code_verifier", codeVerifier)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
-	return c.requestToken(ctx, cfg, form)
+	return c.requestToken(ctx, cfg, form, dpopKeyJSON)
 }
 
-// requestToken 向 STS 令牌端点发 form + DPoP 请求。
-func (c *Client) requestToken(ctx context.Context, cfg LoginConfig, form url.Values) (*TokenResponse, error) {
+// requestToken 向 STS 令牌端点发 form + DPoP 请求。dpopKeyJSON 非空时必须能解析出私钥
+// （落盘损坏要立刻报错，而不是换把临时密钥去撞 `InvalidDPoPHeader`）。
+func (c *Client) requestToken(ctx context.Context, cfg LoginConfig, form url.Values, dpopKeyJSON string) (*TokenResponse, error) {
 	url := cfg.STSHost + EpOAuthTokens
-	kp, err := newDpopKeyPair()
+	kp, err := dpopKeyFromJSON(dpopKeyJSON)
 	if err != nil {
-		return nil, fmt.Errorf("dpop keypair: %w", err)
+		return nil, err
+	}
+	if kp == nil {
+		if kp, err = newDpopKeyPair(); err != nil {
+			return nil, fmt.Errorf("dpop keypair: %w", err)
+		}
 	}
 	proof, err := signDpopProof(kp, url)
 	if err != nil {
@@ -558,20 +600,24 @@ func (c *Client) ChatStream(ctx context.Context, chatID string, messages []ChatM
 // 鉴权：x-auth-token（STS security token）+ 华为云 SDK-HMAC-SHA256 AK/SK 签名。
 func (c *Client) SendChatV2(ctx context.Context, body map[string]any, traceID string, cred SignCredential, userToken string) (io.ReadCloser, error) {
 	raw, _ := json.Marshal(body)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseHost+EpChatV2, bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range ChatHeadersV2(userToken, traceID, "zh-cn") {
-		httpReq.Header.Set(k, v)
-	}
-	// 活动（福利）模型走同一端点同一鉴权，仅多一个 maas_type 头——后端据此
-	// 路由到 MaaS 福利网关；缺失则报 InferHub.002002009.404 model not registered。
-	if IsBenefitModel(fmt.Sprint(body["model"])) {
-		httpReq.Header.Set("maas_type", "benefit")
-	}
-	signRequest(httpReq, raw, cred)
-	resp, err := c.streamHTTP.Do(httpReq)
+	// 传输层抖动（EOF / TLS 握手超时）原地重试一次：换账号走同一条网络没用（同腾讯侧）。
+	resp, err := doWithRetry(ctx, c.streamHTTP, func(fresh bool) (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseHost+EpChatV2, bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range ChatHeadersV2(userToken, traceID, "zh-cn") {
+			httpReq.Header.Set(k, v)
+		}
+		// 活动（福利）模型走同一端点同一鉴权，仅多一个 maas_type 头——后端据此
+		// 路由到 MaaS 福利网关；缺失则报 InferHub.002002009.404 model not registered。
+		if IsBenefitModel(fmt.Sprint(body["model"])) {
+			httpReq.Header.Set("maas_type", "benefit")
+		}
+		signRequest(httpReq, raw, cred)
+		httpReq.Close = fresh
+		return httpReq, nil
+	}, 2)
 	if err != nil {
 		return nil, err
 	}

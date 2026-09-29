@@ -228,6 +228,8 @@ type Handler struct {
 	cfg   Config
 	mux   *http.ServeMux
 	oauth *oauthStore
+	// loginGuard 登录授权频次闸（SPEC §24.6）：防止面板连点把账号推向上游风控。
+	loginGuard *loginGuard
 
 	convMu sync.Mutex
 	chats  map[string]string // account → 最近 chat_id
@@ -266,6 +268,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{
 		cfg: cfg, mux: http.NewServeMux(), oauth: newOAuthStore(),
+		loginGuard:    newLoginGuard(defaultLoginGuardConfig()),
 		chats:         map[string]string{},
 		convAcct:      map[string]string{},
 		tencentStates: map[string]tencentState{},
@@ -551,6 +554,8 @@ func (h *Handler) serveWithAccounts(w http.ResponseWriter, r *http.Request, prot
 		}
 
 		w.Header().Set("X-Codearts-Chat-Id", chatID)
+		// 请求成功 = 网络已恢复：清零该账号的瞬时错误观测计数（面板显示的是"自上次成功以来"）。
+		h.cfg.Pool.ClearTransient(acct.Name)
 
 		storeChat := func() {
 			// 仅缓存显式会话，便于同 conversation_id 续聊；不把一次性测连写进账号默认会话。

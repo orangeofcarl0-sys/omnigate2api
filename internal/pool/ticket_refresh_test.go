@@ -89,6 +89,13 @@ func TestRefreshAuthCredsTicketFailure(t *testing.T) {
 type stubCodeartsClient struct {
 	pollErr  error
 	pollResp *upstream.TokenResponse
+
+	// refresh 路径：记录入参（证明 DPoP 私钥与 PKCE verifier 被透传），并可注入响应
+	refreshErr   error
+	refreshResp  *upstream.TokenResponse
+	lastRefresh  string
+	lastVerifier string
+	lastDpop     string
 }
 
 func (s *stubCodeartsClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage,
@@ -98,7 +105,14 @@ func (s *stubCodeartsClient) ChatStream(ctx context.Context, chatID string, mess
 }
 
 func (s *stubCodeartsClient) RefreshToken(ctx context.Context, cfg upstream.LoginConfig,
-	refreshToken, codeVerifier, domain string) (*upstream.TokenResponse, error) {
+	refreshToken, codeVerifier, domain, dpopKeyJSON string) (*upstream.TokenResponse, error) {
+	s.lastRefresh, s.lastVerifier, s.lastDpop = refreshToken, codeVerifier, dpopKeyJSON
+	if s.refreshErr != nil {
+		return nil, s.refreshErr
+	}
+	if s.refreshResp != nil {
+		return s.refreshResp, nil
+	}
 	return nil, errors.New("no refresh token")
 }
 
@@ -275,5 +289,115 @@ func TestSetTicketCredsClearsVerified(t *testing.T) {
 	a.SetTicketCreds("tid2", "tsec2")
 	if a.TicketVerified() {
 		t.Fatal("新 ticket 未实证，不得继承上一轮的实证标记")
+	}
+}
+
+// 授权码通道的续期链（SPEC §24.5）：refresh_token 路径必须把**同一把 DPoP 私钥 + 原 PKCE
+// verifier** 透传给客户端，并把响应里**轮换后的新 refresh_token** 回写凭证——漏任一条，
+// 第二次刷新就会被上游拒（`InvalidDPoPHeader` / `the refresh token has been used`）。
+func TestRefreshAuthCredsRefreshTokenRotatesWithDpop(t *testing.T) {
+	exp := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	a := auth.New("h1", "hid_x", "d", "sts-old", "ak", "sk", exp, "rt-old", "verifier-1")
+	a.SetCredentials("rt-old", "verifier-1", `{"kty":"EC","crv":"P-256","x":"x","y":"y","d":"d"}`)
+	dir := t.TempDir()
+	if err := auth.SaveNew(dir, a); err != nil {
+		t.Fatal(err)
+	}
+	acct := &Account{Name: "h1", Auth: a}
+	stub := &stubCodeartsClient{refreshResp: &upstream.TokenResponse{
+		UserID: "h1", UserName: "hid_x", RefreshToken: "rt-new",
+		Credentials: upstream.Credentials{
+			SecurityToken: "sts-new", AccessKeyID: "ak2", SecretAccessKey: "sk2",
+			Expiration: time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		},
+	}}
+	acct.Client = stub
+	if err := refreshAuthCreds(acct, stub); err != nil {
+		t.Fatal(err)
+	}
+	if stub.lastRefresh != "rt-old" || stub.lastVerifier != "verifier-1" {
+		t.Fatalf("必须带原 refresh_token/verifier: %q %q", stub.lastRefresh, stub.lastVerifier)
+	}
+	if stub.lastDpop == "" {
+		t.Fatal("必须带落盘的 DPoP 私钥（换密钥会被上游拒 InvalidDPoPHeader）")
+	}
+	if a.Refresh() != "rt-new" {
+		t.Fatalf("rotate 后的新 refresh_token 必须回写（否则下次刷新即 the refresh token has been used）: %q", a.Refresh())
+	}
+	if a.CloudDragonTok != "sts-new" || a.AccessKeyID != "ak2" {
+		t.Fatalf("新凭证未落回: %v", a)
+	}
+	if a.Dpop() == "" {
+		t.Fatal("DPoP 私钥不得被 refresh 清空")
+	}
+}
+
+// 有 refresh_token 的账号：面板必须显示 refresh_token 续期能力（不是 ticket、也不是"无"）。
+func TestRenewalKindRefreshTokenForCodeFlow(t *testing.T) {
+	a := auth.New("h2", "hid_y", "d", "sts", "ak", "sk", "2099-01-01T00:00:00Z", "rt", "v")
+	a.SetCredentials("rt", "v", `{"kty":"EC"}`)
+	a.SetTicketCreds("tid", "tsec") // 授权码登录也保留 ticket 凭证；但续期能力应以 refresh_token 为准
+	p, err := New([]*auth.Auth{a}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.List()[0]["renewal"]; got != "refresh_token" {
+		t.Fatalf("renewal=%v，授权码通道应显示 refresh_token", got)
+	}
+}
+
+// refresh_token **终态失效**必须归到 errNoRenewalPath（面板显示"需重登"），而网络/5xx 这类
+// 瞬时错必须保持"refresh failed"（账号继续可用、下次再试）。依据是上游报错文案（社区实测）：
+// STS5.1806 / invalid refresh token / the refresh token has been used / InvalidDPoPHeader /
+// invalid client id —— 这几种重试无用。
+func TestRefreshTokenTerminalClassification(t *testing.T) {
+	terminal := []string{
+		"codearts api code=400 msg={\"error_code\":\"STS5.1806\",\"error_description\":\"invalid refresh token\"}",
+		"refresh failed: STS5.1806: the refresh token has been used",
+		"STS5.1806 InvalidDPoPHeader",
+		"STS5.1806: invalid client id: vscode-codebot",
+		"oauth error invalid_grant",
+		"http 401 unauthorized",
+	}
+	for _, msg := range terminal {
+		if !isRefreshTokenTerminal(errors.New(msg)) {
+			t.Fatalf("应判终态: %s", msg)
+		}
+	}
+	transient := []string{
+		"dial tcp: i/o timeout",
+		"codearts api code=504 msg=Backend timeout",
+		"http 502 bad gateway",
+		"connection reset by peer",
+	}
+	for _, msg := range transient {
+		if isRefreshTokenTerminal(errors.New(msg)) {
+			t.Fatalf("不该判终态（瞬时错要保留可用、下次再试）: %s", msg)
+		}
+	}
+	// 端到端：终态 refresh 失败 + 未过期 → 保持可用，且续期能力降为"无"
+	soon := time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)
+	a := auth.New("h9", "hid_z", "d", "tok", "ak", "sk", soon, "rt", "v")
+	a.SetCredentials("rt", "v", `{"kty":"EC"}`)
+	if err := auth.SaveNew(t.TempDir(), a); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New([]*auth.Auth{a}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := p.Get("h9")
+	acct.Client = &stubCodeartsClient{refreshErr: errors.New("STS5.1806 invalid refresh token")}
+	if ok, _ := p.Validate(acct); !ok {
+		t.Fatal("未过期 + refresh_token 失效：应保持可用（重登需要时间窗），不提前判死")
+	}
+	if p.List()[0]["disabled"] == true {
+		t.Fatalf("未过期不得禁用: %+v", p.List()[0])
 	}
 }

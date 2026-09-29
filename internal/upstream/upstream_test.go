@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +120,10 @@ func TestExchangeCodeEndpoint(t *testing.T) {
 		if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") != "code" {
 			t.Fatalf("form=%v", r.PostForm)
 		}
+		// redirect_uri 必须与 authorize 时的 auth_callback_url 逐字一致（SPEC §24.5）。
+		if got := r.PostForm.Get("redirect_uri"); got != "http://127.0.0.1:9999/oauth/callback" {
+			t.Fatalf("redirect_uri=%q", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"user_id":"u1","user_name":"n1","domain_id":"d1","refresh_token":"rt","credentials":{"access_key_id":"ak","secret_access_key":"sk","security_token":"st","expiration":"2026-08-04T00:00:00Z"}}`))
 	}))
@@ -126,12 +131,35 @@ func TestExchangeCodeEndpoint(t *testing.T) {
 	c := New(5 * time.Second)
 	cfg := DefaultLoginConfig()
 	cfg.STSHost = srv.URL
-	resp, err := c.ExchangeCode(context.Background(), cfg, "code", "verifier", 9999)
+	resp, err := c.ExchangeCode(context.Background(), cfg, "code", "verifier", c.CallbackURL(cfg, 9999), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.UserID != "u1" || resp.Credentials.SecurityToken != "st" || resp.RefreshToken != "rt" {
 		t.Fatalf("resp=%+v", resp)
+	}
+}
+
+// 授权链接必须带官方的 SHA-256 与 auth_callback_url——这两个参数决定门户回
+// **授权码**（只有授权码换发的响应里有 refresh_token）而不是旧 ticket 握手（SPEC §24.5）。
+func TestBuildAuthorizeURLCodeFlowParams(t *testing.T) {
+	c := New(5 * time.Second)
+	cfg := DefaultLoginConfig()
+	got := c.BuildAuthorizeURL(cfg, "ticket123", "challenge123", CodeChallengeMethod, "state456", 7866)
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if q.Get("code_challenge_method") != "SHA-256" {
+		t.Fatalf("code_challenge_method=%q（错值会让门户回退旧 ticket 流程，拿不到 refresh_token）",
+			q.Get("code_challenge_method"))
+	}
+	if q.Get("auth_callback_url") != "http://127.0.0.1:7866/oauth/callback" {
+		t.Fatalf("auth_callback_url=%q（缺它门户不会回投授权码）", q.Get("auth_callback_url"))
+	}
+	if q.Get("port") != "7866" || q.Get("ticket_id") != "ticket123" || q.Get("state") != "state456" {
+		t.Fatalf("query=%v", q)
 	}
 }
 

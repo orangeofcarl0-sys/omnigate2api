@@ -95,6 +95,18 @@ func (h *Handler) settleTencentKind(acct *pool.Account, model, msg string) bool 
 		log.Printf("upstream soft rate account=%s model=%s until=%s msg=%s",
 			acct.Name, model, until.Format(time.RFC3339), truncateText(msg, 140))
 		return true
+	case upstream.TencentErrTrialInactive:
+		// 账号能登录、凭证有效，但站点侧试用未激活 → 任何模型都 429/14017，且不自愈。
+		// 不禁用就会让号池反复挑中一个永远失败的号（客户端表现为随机报错）。
+		// 非 sticky 禁用：站点激活后重新登录（面板「授权登录」）或点「启用」即可恢复。
+		// 真正的修法（2026-09-29 实测）：账号**没走完站点入驻资料**（「完善你的资料」确认国家/地区，
+		// 仅需填一次），所以站点侧从未发放试用额度。上游那句"退出登录再登录"并不够——
+		// 实测重登后仍 14017；必须去站点补完资料页，试用立刻到账（350 积分）。
+		h.cfg.Pool.Disable(acct.Name,
+			"未激活免费试用（上游 14017）——该账号还没走完站点入驻：请用浏览器打开 workbuddy.ai 完成「完善你的资料」（确认国家/地区，仅需一次），完成后回来重登此账号即可")
+		log.Printf("upstream trial not activated account=%s model=%s msg=%s",
+			acct.Name, model, truncateText(msg, 140))
+		return true
 	case upstream.TencentErrClientSide:
 		log.Printf("upstream client-side rejection (no penalty) account=%s model=%s msg=%s",
 			acct.Name, model, truncateText(msg, 140))
@@ -111,9 +123,12 @@ func (h *Handler) settleTencentKind(acct *pool.Account, model, msg string) bool 
 func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err error) {
 	var ae *upstream.ApiError
 	if !errors.As(err, &ae) {
-		// 传输层错误（tls bad record MAC / 连接重置等）是瞬时网络抖动：
-		// 只记日志并轮换账号，不计错误数、不冷却。
+		// 传输层错误（EOF / TLS 握手超时 / 连接重置）是瞬时网络抖动：只记日志并轮换账号，
+		// 不计错误数、不冷却（换账号走的是同一条网络，罚它没有意义）。
+		// 但要在池子上留观测痕迹——否则客户端报错而面板一片干净，用户无从判断
+		// （2026-09-29 用户报"似乎限流但 dashboard 无反应"就是这个盲区）。
 		log.Printf("upstream transport error (transient) account=%s err=%v", acct.Name, err)
+		h.cfg.Pool.NoteTransient(acct.Name, err.Error())
 		return
 	}
 	if acct.ProfileID == "workbuddy" {

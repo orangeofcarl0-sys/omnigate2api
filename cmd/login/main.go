@@ -67,8 +67,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("gen pkce: %v", err)
 	}
+	// DPoP 私钥：授权码换发与后续 refresh 必须用同一把（SPEC §24.5），随凭证落盘。
+	dpopKey, err := upstream.NewDpopKeyJSON()
+	if err != nil {
+		log.Fatalf("gen dpop key: %v", err)
+	}
 
-	loginURL := client.BuildAuthorizeURL(cfg, ticketID, challenge, "S256", callbackPort)
+	// code_challenge_method 必须用官方的 SHA-256，且要带 auth_callback_url：这样门户才会
+	// 回**授权码**（只有授权码换发的响应里有 refresh_token，见 SPEC §24.5）。
+	loginURL := client.BuildAuthorizeURL(cfg, ticketID, challenge, upstream.CodeChallengeMethod, "", callbackPort)
 	fmt.Println("============================================================")
 	fmt.Println("  CodeArts Agent 登录（华为云账号）")
 	fmt.Println("============================================================")
@@ -97,7 +104,7 @@ loginLoop:
 		case <-timer.C:
 			log.Fatalf("登录超时（5 分钟）")
 		case code := <-codeCh:
-			tok, err = client.ExchangeCode(ctx, cfg, code, verifier, callbackPort)
+			tok, err = client.ExchangeCode(ctx, cfg, code, verifier, client.CallbackURL(cfg, callbackPort), dpopKey)
 			if err != nil {
 				log.Fatalf("exchange code: %v", err)
 			}
@@ -121,13 +128,20 @@ loginLoop:
 	a := auth.New(tok.UserID, tok.UserName, tok.DomainID,
 		cred.SecurityToken, cred.AccessKeyID, cred.SecretAccessKey,
 		cred.Expiration, tok.RefreshToken, verifier)
+	a.SetTicketCreds(ticketID, secret)
+	a.SetCredentials(tok.RefreshToken, verifier, dpopKey)
 	if err := auth.SaveNew(*authDir, a); err != nil {
 		log.Fatalf("save auth: %v", err)
 	}
 	fmt.Printf("\n✅ 登录成功：user_id=%s name=%s\n", tok.UserID, tok.UserName)
 	fmt.Printf("凭证已保存：%s\n", filepath.Join(*authDir, a.FileName()))
 	if cred.Expiration != "" {
-		fmt.Printf("STS 有效期至：%s（到期前自动 refresh 续期）\n", cred.Expiration)
+		fmt.Printf("STS 有效期至：%s\n", cred.Expiration)
+	}
+	if tok.RefreshToken != "" {
+		fmt.Println("续期：refresh_token（授权码通道）——到期前自动静默续期，无需再开浏览器")
+	} else {
+		fmt.Println("续期：无 refresh_token（走了旧 ticket 通道）——STS 约 24h 后需重登")
 	}
 }
 

@@ -43,7 +43,7 @@ type fakeClient struct {
 func (f *fakeClient) ChatStream(ctx context.Context, chatID string, messages []upstream.ChatMessage, traceID string, cred upstream.SignCredential, userName, model string, tools []map[string]any, toolChoice string, gen map[string]any) (io.ReadCloser, error) {
 	return nil, nil
 }
-func (f *fakeClient) RefreshToken(ctx context.Context, cfg upstream.LoginConfig, refreshToken, codeVerifier, domain string) (*upstream.TokenResponse, error) {
+func (f *fakeClient) RefreshToken(ctx context.Context, cfg upstream.LoginConfig, refreshToken, codeVerifier, domain, dpopKeyJSON string) (*upstream.TokenResponse, error) {
 	return nil, nil
 }
 func (f *fakeClient) DailyCheckin(a *auth.Auth) (*upstream.CheckinResult, error) {

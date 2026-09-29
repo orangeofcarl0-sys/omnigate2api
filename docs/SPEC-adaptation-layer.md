@@ -943,6 +943,167 @@ type ChatAPI interface {
 - 面板账号「状态」列显示 `续期 <能力>` + 到期倒计时（已过期 / ≤2h 高亮），
   「刷新状态」按钮现在对这类账号如实返回 `token invalid`。
 
+### 24.5 华为渠道的长期认证方案（2026-09-27 定论）
+
+**结论：长期方案是 OAuth 授权码 → `refresh_token` 静默续期。** 我们此前一直拿不到
+`refresh_token`，原因不是"华为不给"，而是 authorize URL 有两个参数发错了，导致门户
+**回退到旧 ticket 流程**——修正后本机实测立刻拿到授权码。
+
+**决定性实验（本机，2026-09-27，四次登录对照）**
+
+| authorize URL 形态 | 回调日志 | 含义 |
+|---|---|---|
+| 现状：`code_challenge_method=S256` + `client_id=codearts` | `code_bytes=0 secret_bytes=64 redirect_to=…/portal/login` | 旧 ticket 流程（无 refresh_token） |
+| 只加 `auth_callback_url=…/oauth/callback` | 同上（仍是旧流程） | `auth_callback_url` 单独不够 |
+| **`code_challenge_method=SHA-256` + `auth_callback_url`**（其余不动） | **`code_bytes=32 secret_bytes=0`** | ✅ **门户下发了授权码** |
+| 社区 26.9.x 全形态（`client_id=uri_scheme=vscode-codebot` + `SHA-256` + `auth_callback_url` + `plugin-version=26.9.101`） | **`code_bytes=32`** | ✅ 同样成立 |
+
+即**两个改动就够**：`code_challenge_method` 必须是官方的 `SHA-256`（不是 RFC 的 `S256`，
+错值回退旧流程），并显式给 `auth_callback_url`（门户据此把 `?code=…` 回投到本地回调）。
+
+**为什么这条路是长期方案**：`grant_type=authorization_code` 的响应含 `refresh_token`
+（`parseTokenResponse()` 才读它；ticket 通道的 `parseTicketResponse()` 硬编码
+`refreshToken: ""`），之后 `grant_type=refresh_token` 静默换新凭证——官方客户端正是
+这样"30 天免登录"的：华为文档《配置账号30天免登录》只承诺**客户端重开时自动保持登录**，
+机制未公开；社区项目从真实插件的 OS 加密存储（`HuaweiCloudSession`）里读到的是
+**长期 refresh_token** + 约 1h 的临时凭证，即靠 refresh 而非重登。
+
+**refresh_token 的三重绑定与一次性轮换（必须照做，社区四处独立实现一致）**
+
+- 绑定 **client_id + DPoP 私钥（P-256/ES256）+ PKCE `code_verifier`**：client_id 不符 →
+  `400 STS5.1806 invalid client id`；换新 DPoP 私钥 → `… InvalidDPoPHeader`；旧
+  refresh_token 重放 → `… the refresh token has been used`。
+- 所以凭证必须落盘 `refresh_token` + **DPoP 私钥** + `code_verifier`；刷新成功后回写
+  **轮换后的新 refresh_token**；同一账号的刷新必须**串行加锁**（并发刷同一个 token 会
+  互相废掉）。
+
+**可行性矩阵（负结论同样重要——避免后人重试）**
+
+| 路径 | 结论 | 证据 |
+|---|---|---|
+| ticket 静默换发 | ❌ | 21.5h 后再轮询 → `TM.00001001 无效ticketId`；官方 `parseTicketResponse()` 从不返回 refresh_token |
+| ticket 通道换 refresh_token | ❌ | 该响应结构体里就没有这个字段（官方源码 + 本机实测 `refresh_token` 为空） |
+| **code 通道换 refresh_token** | ✅ **推荐** | 见上表：`SHA-256`+`auth_callback_url` → `code_bytes=32`；社区 4 个项目（HITZY2002/codearts2api、cpa-codearts-plugin、iJetLi/deepseek-harness、CLIProxyAPIPlus fork）都实现了这条续期链 |
+| 永久 AK/SK 直接签名打 chat | ❌ | 实测两次（无 `X-Security-Token`；以及**头存在但为空**+正确签名）→ 均 `401 APIG.0301 decrypt token fail`。该网关**强制要求临时凭证的 security_token** |
+| 永久 AK/SK → 自行换 STS 再打 chat | ⚠️ 未实测 | 官方文档路径：AK/SK **永久**（`usermanual-ca/ca_05_0003.html`），IAM `POST /v3.0/OS-CREDENTIAL/securitytokens` 可换 15min–24h 临时凭证；但"这样换出的 STS 能否被 snap-access 接受"无文档、未实测（需控制台建密钥） |
+| 不开浏览器纯服务端轮询 | ❌ | 实测：只 `oauth/start` 不开浏览器 → 30s 内 0 次回调、poll 恒 pending。授权链接必须有浏览器参与 |
+| 零点击浏览器重登（兜底） | ✅ 可用 | 实测：把授权链接交给默认浏览器即完成，**零点击**、约 15s`done`（门户 Cookie 存活时静默）；`tools/huawei-relogin.sh --auto` |
+
+**落地形态（主路径已实现并实测通过，2026-09-27）**
+
+1. **主路径 ✅ 已实现**：authorize URL 用 `code_challenge_method=SHA-256` + 显式
+   `auth_callback_url` + `state`（= 会话 ID）；回调新增 `?code=` 分支（按 `state` 定位会话，
+   退化到"唯一未完成会话"；code 流程**不带 secret**，不能再用 `getBySecret`）；
+   `ExchangeCode` 的 `redirect_uri` 与 `auth_callback_url` 同源（`Client.CallbackURL`）；
+   **DPoP 私钥在发起授权时生成并随凭证落盘**（`auth.dpop_key`），换码与每次 refresh 复用同一把；
+   凭证三件套 `refresh_token`/`code_verifier`/`dpop_key` 落盘、刷新后回写**轮换后的新 token**；
+   同账号续期由 `Account.refreshMu` 串行化（一次性轮换，并发刷会互相作废）；
+   面板显示 `续期 refresh_token`。
+2. **兜底（已实现）**：`tools/huawei-relogin.sh --auto` + 每 6h 定时任务。refresh_token 被后台
+   吊销（控制台可吊销客户端会话，2 分钟生效）或 30 天到期时用它一键恢复；ticket 轮询通道保留。
+3. **可选（需控制台建密钥）**：永久 AK/SK → 网关用 IAM `securitytokens` 自行换临时凭证，
+   做完全无浏览器的方案；先按上表 ⚠️ 那一行做一次验证再投入。
+
+**实测数值（与旧 ticket 通道对照——这是最容易踩的差异）**
+
+| 项 | 授权码通道（新） | ticket 通道（旧） |
+|---|---|---|
+| STS 有效期 | **约 2h**（实测 `remaining=1h59m/2h0m`） | 24h |
+| refresh_token | **有，JWT，有效期 30 天**（`exp−iat = 2,592,000s`） | 无（响应里就没这个字段） |
+| 换码响应里的身份 | **没有**（`user_id/user_name/domain_id` 全空） | 有 |
+| 续期 | `grant_type=refresh_token` + 同 DPoP 私钥 + 原 verifier，**token 轮换** | 只能重登 |
+
+- **身份必须自己解**：换码响应不带身份，会写出 `codearts-unknown.json` 并在池里多一个空名账号
+  （本轮就踩到了）。解法（`upstream/identity.go`）：离线解 `refresh_token` 的 JWT
+  `user_profile` 声明 —— `principal_id` = 账号 uid、`account_name` = 用户名（hid_ 开头）、
+  `account_id` = 租户 domain_id；兜底再打一次 `/snap-manager/v1/current/user`（官方内核
+  `getUserInfoByCredentials` 同做法）。**两路都拿不到就拒绝落盘**（`saveLoginResult` 校验
+  uid 非空）——宁可这次登录失败让用户重试，也不要在池里留脏账号。
+- **2h STS 的两个连带影响**：① 续期频率从 1 次/天变成 ~12 次/天，`refreshMu` 不是可选项；
+  ② 面板倒计时不能再"≤2h 就变黄"——有 `refresh_token` 的账号不因剩余时间变色（否则长期黄灯
+  会把真警报淹掉），只有**无续期路径**的账号在 ≤2h 时告警。
+- **续期失败的两种性质要分开**（`isRefreshTokenTerminal`）：`STS5.1806`（invalid refresh token /
+  `InvalidDPoPHeader` / invalid client id）、`the refresh token has been used`、`invalid_grant`、
+  HTTP 401/403 → **终态**，归到 `errNoRenewalPath`（面板"需重登"，已过期才禁用）；超时/5xx/
+  连接重置 → 瞬时，保持 `refresh failed` 且账号继续可用、下次再试。
+- **实测链路**（本轮四次登录 + 一次强制续期）：`oauth callback hit: code_bytes=32` →
+  `login token response keys: [credentials refresh_token]` →（补身份）→
+  `webui login success user_id=<uid> name=<hid_账号名> added=false renewal=refresh_token` →
+  强制续期 `pool token refreshed account=<uid>`（新 STS 2h、refresh_token 已轮换、DPoP 私钥保留）
+  → 该账号聊天 200。
+
+- **安全与风控边界**：不抓浏览器 Cookie、不在服务端复刻门户登录页、不直接压上游——主路径
+  就是官方客户端的 OAuth 流程，风控面最小；DPoP 私钥与 refresh_token 属长期凭证，按
+  `auths/` 既有纪律 0600 落盘、不入日志（回调只打参数名与长度）。
+- **无图形环境的服务器**：授权码流程只在那一次登录需要浏览器（之后 refresh，不再需要）；
+  远程场景把回调端口映射到能开浏览器的机器（`oauth_callback_host`，注意 `auth_callback_url`
+  与 `port` 要一起改写），或让浏览器停在
+  `http://127.0.0.1:PORT/oauth/callback?code=…` 时手动把整条地址贴回面板（社区通行做法）。
+
+### 24.7 传输层抖动：原地重试 + 面板可见 + 代理支持（v1.4，2026-09-29 事故驱动）
+
+**事故**：用户报「某个账号似乎模型限流但 dashboard 无反应」。查下来两件事：
+
+1. **那个账号并没有被模型限流**——直接用它自己的凭证连打 4 个模型全部正常；面板该行
+   `model_cooling=null`/`err_count=0` 是对的。真正被限流的是另外三个号（同模型
+   `deepseek-v4.1-flash`，面板**有** chip 显示）。
+2. 但确实存在一个**观测盲区**：本容器 6 小时内发生 **243 次传输层抖动**
+   （168 × `Post .../v2/chat/completions: EOF` + 75 × `net/http: TLS handshake timeout`），
+   最密**一分钟 72 次**；抖动成簇时 4 个可用号接连失败，客户端拿到
+   `503 no_healthy_account「all accounts unavailable」`，而**面板一片干净**
+   （传输错误按设计"不罚账号、不计错误数、不冷却"，于是什么都不显示）。
+
+**根因**：容器**完全没有代理配置**，而 `newTransport()` 也没设 `Proxy` 字段 ⇒ 出网永远直连。
+本机是**国内直连国际域名**（`www.workbuddy.ai`），链路本身就在抖；宿主机上明明开着代理
+（v2rayN 监听 `127.0.0.1:10808`）却完全没被用上。
+
+**三项加固**：
+
+| 加固 | 做法 |
+|---|---|
+| 抖动不如换账号、要**原地重试** | `doWithRetry`：EOF / TLS 超时 / 连接重置 / GOAWAY 等**瞬时**传输错误，**换新连接重试一次**（重试请求置 `req.Close=true`，避免池子把死连接递回来）。华为与腾讯两条 chat 路径都接。业务错误（`ApiError`，上游真回了错误码）**不重试**——重试只会掩盖语义 |
+| 抖动必须**看得见** | `Pool.NoteTransient`：只累加观测计数与最近一次信息，**不计错误数、不冷却、不禁用**；`List()` 暴露 `transient_err/at/msg`，面板状态列渲染「瞬时错误 N 次（最近 Xm 前）」并在成功请求后清零（即"自上次成功以来"）。这样"客户端报错但面板干净"不再发生 |
+| 抖动可以**根本不发生** | `newTransport()` 接上 `Proxy: http.ProxyFromEnvironment`：容器内设 `HTTPS_PROXY` 即走代理，`NO_PROXY` 排除国内域（国内 API 绕道出海只会更慢更不稳）。compose 已透传两个变量 + 声明 `host.docker.internal:host-gateway`。**只支持 HTTP(S) 代理**（标准库能力、零新依赖）；SOCKS5 需额外依赖，未做 |
+
+**当前状态**：代理变量默认为空 ⇒ 行为与改造前一致（直连）。要解决本机的国际链路抖动，
+把 v2rayN 的 HTTP 入站端口填进 `.env` 即可（v2rayN 默认 HTTP 入站为 10809，需在设置里启用）：
+
+```
+HTTPS_PROXY=http://host.docker.internal:10809
+NO_PROXY=copilot.tencent.com,codebuddy.cn,.myhuaweicloud.com,localhost,127.0.0.1
+```
+
+### 24.6 登录授权频次闸（v1.4，2026-09-28 事故驱动）
+
+**事故**：2026-09-28 13:57:52–13:58:51，面板对**同一账号**连续完成 4 次授权登录（面板点一次
+「发起授权」就会开浏览器，而浏览器通常还登着上游站点 → 授权被自动放行，所以连点很容易）。
+随后 WorkBuddy 登录页开始报「与身份提供程序进行身份验证时出现意外错误 / 账号访问受限」，
+**连健康账号也再登不上**（`oauth/start` 正常、设备流 `auth/token` 回标准 `11217 login ing`、
+网关 API 侧聊天 200 —— 说明不是网关坏了，是上游把这个账号/设备的"交互登录"掐了）。
+结论：**上游把"短时间内重复授权"当成异常登录**，必须由网关自己按住手。
+
+**闸门规则**（`internal/server/loginguard.go`；渠道键 `huawei` / `tencent:cn` / `tencent:global` 各自独立计频）：
+
+| 规则 | 默认 | 作用 |
+|---|---|---|
+| 同渠道同时只允许一个未完成授权 | 固定 | **最关键**：否则"发起→没完成→再发起"会覆盖上一个会话，失败永远不被计数，下面的冷却形同虚设 |
+| 同渠道最小间隔 | 60s | 连点无效（事故就是 59 秒 4 次） |
+| 滚动窗口上限 | 10 次/小时/渠道 | 防"连着点几分钟" |
+| 连续未完成 → 冷却 | 连续 3 次 → 20 分钟 | **失败自停**：登录页一旦开始拒绝，继续重试只会加深风控 |
+
+- 判定是**惰性**的：每次 `allow` 先把超过 TTL（华为 15min / 腾讯 10min）仍未完成的会话结算成
+  一次失败，不需要定时器；成功登录（回调换码成功 / 设备流轮询成功）清零连续失败计数。
+- 拒绝时返回 `{"ok":false,"throttled":true,"retry_after_seconds":N,"message":"..."}`，面板据此
+  **锁住「发起授权」按钮并倒计时**，模态里另有一条常驻提示"不要反复重登"。
+- 覆盖两条登录路径：`adminOAuthStart`（华为授权码）与 `adminTencentOAuthStart`（腾讯设备流）；
+  腾讯侧换 token/账号失败会**立即**计入失败（不等 TTL）。
+- 环境变量覆盖：`OMNIGATE_LOGIN_MIN_INTERVAL_SECONDS`（60）、`OMNIGATE_LOGIN_MAX_PER_HOUR`（10）、
+  `OMNIGATE_LOGIN_FAILURE_COOLDOWN_SECONDS`（1200）；连续失败阈值固定 3（调大等于允许重试风暴）。
+- 状态在进程内存、重启即清空——重启不频繁，且清空只会**放宽**不会收紧。
+- **边界**：闸门只约束"网关自己发起的授权"。用户直接在浏览器里反复登录上游站点，闸门管不到；
+  所以把"不要反复重登"同时写进文档与面板显眼处（§24.5 的 refresh_token 让华为侧根本不需要重登；
+  腾讯侧 refresh_token 约一年有效，正常也只需登录一次）。
+
 ---
 
 ## 25. workbuddy Profile 内置声明草案（v0.3）
@@ -1093,6 +1254,7 @@ sequenceDiagram
 | A. 头保真度 | **官方 CLI 全量对齐**（§23.2 表）：UA/Accept/Origin/Referer 抄官方值；空字段发 X-No-\*: 1 占位；区域感知（domain 后缀切换 base 与 Origin/Referer） |
 | B. 错误语义 | **完整迁移**：402 + 积分不足中英关键词 → CoolHard（新原语，冷却至次日 04:00）；`12153`/"Offline user session not found" → Disable；429 → CoolSoft；5xx → CoolErr 计数 |
 | C. 模型清单 | **family 动态拉取**：workbuddy 家族从 `/console/enterprises/personal/models` 拉真实清单（Bearer、取 agent "cli"、maxInput/maxOutput 映射 context/max_output、缓存 1h + 负缓存 5min），失败回落静态；华为路径不变 |
+| C2. 国际版清单回退 | **国际版没有 `/console/enterprises/personal/models`**（2026-09-29 实测：500 + HTML 错误页）→ 面板「扫描各账号」对全部国际账号报错。改为失败即回退 `GET /v3/config`（双域同构 `{models,agents}`，桌面 UA；国际版 cli agent 清单即该账号可用模型）。两个端点共用同一解析器 `parseTencentModels`；两端都失败时错误里同时点出两条路 |
 | D. 工具帧形 | **单帧完整参数**：上游增量按 index 拼装，完成后以 sink.ToolCall 单帧发出（三 writer 零改动，与折叠路径帧序一致） |
 
 ### 28.4 六缺口修复方案（实施基准，阶段 8e）
@@ -1297,6 +1459,8 @@ sequenceDiagram
 | 持久化 | `state.json` 增加 `model_cool`（重启不丢，可能长达数小时） |
 | 面板语义（v1.4 补） | 「原因」列**只表达当前状态**（禁用原因 / 账号级冷却原因）：模型级限流会写账号级 `lastErr`，到期后无人清 → 长错误文案会永远"黏"在面板上（2026-09-27 用户报）。现 `Pool.List()` 的 `reason` 仅在禁用/账号级冷却时非空；历史错误留在 `last_error`（面板放进「原因」列 tooltip：*最近一次错误（已恢复）*），模型级限流只由「模型限流」行表达；`Validate` 顺带 prune 过期 `modelCool` 与陈旧 `lastErr`（housekeeping） ；**呈现**：模型级限流是一排琥珀色 chip（模型名加粗 + 等宽倒计时，剩余 ≤15 分钟转红、到期自动隐藏），由面板每 20s 本地 tick（用 `until` 现算，不依赖刷新；此前是一行 11px 灰字，混在状态列里几乎看不见） |
 | 与账号级区分 | `14018 额度已用尽` / `Credits exhausted` 是**账号级**积分耗尽（连免费模型也拒）→ 归 `TencentErrHardCredit`（冷却至次日 04:00）。注意「额度已用尽」并不含子串「额度用尽」（中间隔着「已」），旧标记表会漏判，已逐条补齐 |
+| 未激活试用区分 | `14017 The trial version is not yet activated`（也带 429）是**账号级未激活**：凭证有效、能登录，但激活前**任何模型都拒**且**不自愈**（要人去站点退出登录→重新登录激活）。归 `TencentErrTrialInactive` → 非 sticky 禁用 + 明确提示；**不能当软限流**（否则号池拿一个永远失败的号反复试）。同账号的 `get-user-resource` 余额查询也 500 `code=10000`，同源。实测：2026-09-29 新加国际版账号 `新加的国际版账号` |
+| 未激活试用的**根因** | 2026-09-29 实测定位：`14017` 不是"没重登"，而是账号**没走完站点入驻资料**（`www.workbuddy.ai/login/register/ai/user/complete`：确认国家/地区，仅需填一次）。补完该页后试用立刻到账（实测 350 积分）、`get-user-resource` 随即 200、聊天正常——而**单纯重登并不会激活**（重登后仍 14017）。故提示语指向"去站点补资料页"，不要只说"退出登录再登录" |
 
 **11140 的两种形态必须按文案分野（v1.4 补，2026-09-27 实测 + 社区对齐）**：同一个业务码
 `11140` 承载两种完全不同的语义，**按 code 判会误伤**：

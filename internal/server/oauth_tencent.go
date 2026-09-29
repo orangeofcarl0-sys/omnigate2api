@@ -42,6 +42,18 @@ func (h *Handler) adminTencentOAuthStart(w http.ResponseWriter, r *http.Request)
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body) // body 空 = 国内
 	realm := normTencentRealm(body.Realm)
+	channel := guardChannelTencent(realm)
+
+	// 频次闸（SPEC §24.6）：2026-09-28 同一账号 59 秒内 4 次授权后，登录页开始报
+	// "账号访问受限"——连点/失败重试必须被拦住，且失败后要自动停手。
+	if d := h.loginGuard.allow(channel, time.Now()); !d.OK {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "throttled": true, "realm": realm,
+			"retry_after_seconds": int(d.RetryAfter.Seconds()) + 1,
+			"message":             d.Reason,
+		})
+		return
+	}
 
 	authURL, state, err := tencentDeviceClient().DeviceFlowState(realm)
 	if err != nil {
@@ -51,7 +63,17 @@ func (h *Handler) adminTencentOAuthStart(w http.ResponseWriter, r *http.Request)
 	h.tencentMu.Lock()
 	h.tencentStates[state] = tencentState{AuthURL: authURL, Expires: time.Now().Add(tencentDeviceFlowTTL).Unix(), Realm: realm}
 	h.tencentMu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "auth_url": authURL, "state": state, "realm": realm})
+	h.loginGuard.recordStart(channel, tencentDeviceFlowTTL, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "auth_url": authURL, "state": state, "realm": realm,
+		"message": h.oauthStartMessage(channel, "请在浏览器打开授权链接并完成登录")})
+}
+
+// guardChannelTencent 区域 → 频次闸渠道键（两区的登录站点/base 不同，分别计频）。
+func guardChannelTencent(realm string) string {
+	if realm == upstream.DeviceFlowRealmGlobal {
+		return guardChanTencGL
+	}
+	return guardChanTencCN
 }
 
 // adminTencentOAuthPoll 轮询授权结果：pending → waiting；成功 → 落盘凭证 +
@@ -79,10 +101,12 @@ func (h *Handler) adminTencentOAuthPoll(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	realm := normTencentRealm(st.Realm)
+	channel := guardChannelTencent(realm)
 
 	c := tencentDeviceClient()
 	tok, done, err := c.DeviceFlowToken(realm, body.State)
 	if err != nil {
+		h.loginGuard.recordFailed(channel, "取令牌失败", time.Now())
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
@@ -132,6 +156,7 @@ func (h *Handler) adminTencentOAuthPoll(w http.ResponseWriter, r *http.Request) 
 	h.tencentMu.Lock()
 	delete(h.tencentStates, body.State)
 	h.tencentMu.Unlock()
+	h.loginGuard.recordDone(channel, uid, time.Now())
 	msg := "登录成功（" + realmLabel(realm) + "）：新增账号 " + nonempty(nickname, shortID(uid)) +
 		"——已触发额度/签到初始化"
 	if existed {

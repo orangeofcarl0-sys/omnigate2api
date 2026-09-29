@@ -59,6 +59,19 @@ type Account struct {
 	activeConcurrent  int       // 当前活跃并发请求数
 	maxConcurrent     int       // 最大允许并发数
 	keepaliveLastPing time.Time // 最后保活心跳时间
+	// 瞬时传输错误（EOF / TLS 握手超时等网络抖动）：**只观测、不惩罚**——不计 errCount、
+	// 不冷却（见 server 侧 transport 分支）。但必须在面板上看得见：2026-09-29 实测
+	// 6 小时 243 次抖动成簇发生（一分钟 72 次），4 个号接连失败后客户端拿到 503
+	// 「all accounts unavailable」，而面板一片干净，用户完全无从判断。
+	transientErr int
+	transientAt  time.Time
+	transientMsg string
+
+	// refreshMu 串行化**续期**（SPEC §24.5）：refresh_token 是一次性轮换的，两个 goroutine
+	// 同时刷同一个 token 会互相作废（上游回 `the refresh token has been used`）——授权码
+	// 通道的 STS 只有约 2h，一天刷十几次，撞车概率不低。注意与 mu 的分工：mu 护状态字段，
+	// refreshMu 只护"换凭证 + 落盘"这段（applyAuthCreds 内部会 Save）。
+	refreshMu sync.Mutex
 }
 
 // AccountQuota 账号额度快照（面板展示用，非持久化状态）。
@@ -299,6 +312,9 @@ func (p *Pool) List() []map[string]any {
 			"token_remaining":   a.Auth.Remaining().Round(time.Minute).String(),
 			"expires_at":        a.Auth.ExpiresAt().Format(time.RFC3339),
 			"renewal":           renewalKind(a.Auth),
+			"transient_err":     a.transientErr,
+			"transient_at":      rfc3339OrEmpty(a.transientAt),
+			"transient_msg":     a.transientMsg,
 		})
 		a.mu.Unlock()
 	}
@@ -625,6 +641,47 @@ func (p *Pool) Validate(a *Account) (bool, error) {
 	return true, nil
 }
 
+// NoteTransient 记一次**瞬时传输错误**（网络抖动）：只累加观测计数与最近一次信息，
+// 不计错误数、不冷却——抖动不是账号的错（换账号走同一条网络）。面板据此显示
+// 「瞬时错误 N 次（最近 …）」，让"客户端报错但面板干净"不再发生。
+func (p *Pool) NoteTransient(name, msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		a.transientErr++
+		a.transientAt = time.Now()
+		a.transientMsg = msg
+		a.mu.Unlock()
+		return
+	}
+}
+
+// ClearTransient 清空瞬时错误观测（面板「清冷却」/成功请求后由调用方决定是否调用）。
+func (p *Pool) ClearTransient(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		a.transientErr, a.transientAt, a.transientMsg = 0, time.Time{}, ""
+		a.mu.Unlock()
+		return
+	}
+}
+
+func rfc3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
 // Cooldown 冷却账号。
 func (p *Pool) Cooldown(name string, kind CoolKind, dur time.Duration, reason string) {
 	p.mu.Lock()
@@ -917,18 +974,32 @@ var (
 	errSaveFailed    = errors.New("save failed")
 )
 
-// refreshAuthCreds 续期账号凭证：优先 refresh_token；缺失时试华为 ticket 登录通道
-// 换发 STS。**ticket 换发失败一律按 errNoRenewalPath 分型**——2026-09-27 实测该通道
-// 只在登录窗口内有效（登录后约 21.5h 再轮询 → `TM.00001001 无效ticketId`），所以
-// "换发失败"与"没有续期路"对调用方是同一件事：STS 到期必须重登。华为文档的「30 天
-// 免登录」实测只体现为**重登免密**（门户会话留存），不体现为网关可静默续期；
+// refreshAuthCreds 续期账号凭证：优先 refresh_token（授权码登录才有，SPEC §24.5）；
+// 缺失时试华为 ticket 登录通道换发 STS。**ticket 换发失败一律按 errNoRenewalPath 分型**——
+// 2026-09-27 实测该通道只在登录窗口内有效（登录后约 21.5h 再轮询 → `TM.00001001
+// 无效ticketId`），所以"换发失败"与"没有续期路"对调用方是同一件事：STS 到期必须重登。
+// 华为文档的「30 天免登录」实测只体现为**重登免密**（门户会话留存），不体现为网关可静默续期；
 // 客户端版本门槛（26.5.1+）是否影响该通道仍待实测（OMNIGATE_LOGIN_PLUGIN_VERSION）。
+//
+// refresh_token 路径必须带**同一把 DPoP 私钥 + 原 PKCE verifier**，并把响应里轮换后的
+// 新 refresh_token 回写（否则第二次刷新必失败：`the refresh token has been used`）。
 func refreshAuthCreds(acct *Account, pollerOverride ticketPoller) error {
+	// 同一账号的续期串行化：refresh_token 一次性轮换，并发刷会互相作废（§24.5）。
+	acct.refreshMu.Lock()
+	defer acct.refreshMu.Unlock()
+
 	authz := acct.Auth
 	cfg := upstream.DefaultLoginConfig()
 	if authz.Refresh() != "" {
-		resp, err := acct.Client.RefreshToken(context.Background(), cfg, authz.Refresh(), authz.Verifier(), authz.Domain)
+		resp, err := acct.Client.RefreshToken(context.Background(), cfg,
+			authz.Refresh(), authz.Verifier(), authz.Domain, authz.Dpop())
 		if err != nil {
+			if isRefreshTokenTerminal(err) {
+				// refresh_token 终态失效（被吊销/写坏/已被用过）→ 归到"无续期路"：
+				// 已过期则禁用并写明需重登，未过期则告警保持可用（§24.4 分型）。
+				log.Printf("pool refresh_token terminal account=%s err=%v (treated as no renewal path)", acct.Name, err)
+				return fmt.Errorf("%w: refresh_token unusable: %w", errNoRenewalPath, err)
+			}
 			return fmt.Errorf("refresh failed: %w", err)
 		}
 		if err := applyAuthCreds(authz, resp); err != nil {
@@ -962,6 +1033,31 @@ func refreshAuthCreds(acct *Account, pollerOverride ticketPoller) error {
 		}
 	}
 	return errNoRenewalPath
+}
+
+// isRefreshTokenTerminal 判定 refresh_token 是否**终态失效**（重试无用，只能重登）。
+// 依据上游报错文案与标准 OAuth 错误（社区四处实现实测一致，SPEC §24.5）：
+// `STS5.1806`（invalid refresh token / InvalidDPoPHeader / invalid client id）、
+// `the refresh token has been used`（一次性轮换被重放）、`invalid_grant`、HTTP 401/403。
+// 其余（超时、5xx、连接重置）当瞬时错——保持"refresh failed"，账号继续可用、下次再试。
+func isRefreshTokenTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *upstream.ApiError
+	if errors.As(err, &apiErr) && (apiErr.Status == 401 || apiErr.Status == 403) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, m := range []string{
+		"sts5.1806", "invalid refresh token", "refresh token has been used",
+		"invaliddpopheader", "invalid client id", "invalid_grant", "http 401", "http 403",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyAuthCreds 刷新结果落回凭证并保存（Validate 内联刷新与 RefreshToken 共用）。

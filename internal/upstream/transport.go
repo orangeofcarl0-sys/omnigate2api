@@ -11,8 +11,12 @@
 package upstream
 
 import (
+	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -26,8 +30,24 @@ const (
 )
 
 // newTransport 上游统一传输层（华为/腾讯共用）。
+//
+// Proxy：**走标准环境变量**（HTTPS_PROXY / HTTP_PROXY / NO_PROXY）。默认不设时行为与以前
+// 完全一致（直连）；一旦设了就按环境变量走代理。为什么必须补上这一条（2026-09-29 实测）：
+// 本机是**国内直连国际域名**，到 `www.workbuddy.ai` 的连接极不稳定——6 小时内 243 次
+// 传输层抖动（168 × EOF + 75 × TLS handshake timeout，最密一分钟 72 次），4 个可用号
+// 接连失败后客户端拿到 503「all accounts unavailable」。而宿主机上就开着代理（v2rayN），
+// 容器先前既不读 proxy 变量、Transport 也没有 Proxy 字段 ⇒ 永远直连。
+//
+// 用法（容器内）：`HTTPS_PROXY=http://host.docker.internal:10809`（v2rayN 的 HTTP 入站），
+// 并把国内域放进 `NO_PROXY`——国内 API 绕道出海只会更慢更不稳：
+//
+//	NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,snap-access.cn-north-4.myhuaweicloud.com,
+//	         codearts.huaweicloud.com,iam.myhuaweicloud.com,sts.cn-north-4.myhuaweicloud.com,localhost,127.0.0.1
+//
+// 只支持 HTTP(S) 代理（标准库能力，零新依赖）；SOCKS5（v2rayN 默认 10808）需要额外依赖，未做。
 func newTransport() *http.Transport {
 	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          20,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       90 * time.Second,
@@ -38,4 +58,71 @@ func newTransport() *http.Transport {
 		}).DialContext,
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
+}
+
+// doWithRetry 发请求；遇**传输层抖动**（EOF / 连接被上游断开 / TLS 握手超时 / 连接重置）
+// 时**换新连接重试一次**，返回最后一次的错误。
+//
+// 为什么必须重试（2026-09-29 实测）：
+//
+//	① 上游对空闲连接关得很快，而我们复用连接池——复用一条已被对端关掉的连接做 POST 必然
+//	   `EOF`（本容器 6 小时内 168 次）；
+//	② 本机到 www.workbuddy.ai 的握手偶发超时（同期 75 次）。
+//
+// 这两种都是**网络抖动而非账号问题**：`net/http: TLS handshake timeout` / `EOF`。
+// 上游那侧"换账号"完全没用（走的是同一条网络），结果 4 个可用号接连失败 → 客户端拿到
+// 503「all accounts unavailable」，而面板一片干净（传输错误按设计不罚账号、不改状态）。
+// 重试一次几乎总能成功（实测紧随其后的请求就 200）。
+//
+// 重试的那次把 `Close` 置真，强制新建连接——否则连接池很可能又把那条死连接递回来。
+func doWithRetry(ctx context.Context, c *http.Client, build func(fresh bool) (*http.Request, error), attempts int) (*http.Response, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		req, err := build(i > 0)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if !isTransientTransportErr(err) {
+			return nil, err
+		}
+		lastErr = err
+		// 请求上下文已结束（客户端取消/整体超时）时重试毫无意义，直接返回。
+		if ctx != nil && ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// isTransientTransportErr 传输层抖动判定：值得原地重试一次、且**不该**罚账号或冷却。
+// 与 ApiError（上游真的回了错误码）严格区分：后者是业务语义，不能重试掩盖。
+func isTransientTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, m := range []string{
+		"eof", "connection reset", "broken pipe", "tls handshake timeout",
+		"server closed idle connection", "use of closed network connection",
+		"http2: server sent goaway", "connection refused", "no such host",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }

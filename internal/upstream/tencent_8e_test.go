@@ -27,7 +27,7 @@ func TestTencentRefreshEnvelope(t *testing.T) {
 	defer srv.Close()
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
-	tok, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "vv", "www.codebuddy.cn")
+	tok, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "vv", "www.codebuddy.cn", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestTencentRefreshEnvelopeBusinessError(t *testing.T) {
 	defer srv.Close()
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
-	_, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "v", "")
+	_, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "v", "", "")
 	if err == nil || !strings.Contains(err.Error(), "login expired") {
 		t.Fatalf("business error must surface: %v", err)
 	}
@@ -227,5 +227,70 @@ func TestAggregateRawNativeToolCalls(t *testing.T) {
 	}
 	if len(rc.ToolCalls) != 1 || rc.ToolCalls[0].ID != "c1" || rc.ToolCalls[0].Arguments != `{"a":1}` {
 		t.Fatalf("aggregate: %+v", rc.ToolCalls)
+	}
+}
+
+// 国际版没有 /console/enterprises/personal/models（实测 2026-09-29：500 + HTML 错误页），
+// 必须回退 /v3/config —— 否则面板「扫描各账号」对**全部国际账号**报错，只有国内号能扫。
+func TestTencentFetchModelsFallsBackToConfig(t *testing.T) {
+	var consoleHit, configHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/console/enterprises/personal/models":
+			consoleHit = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, "<html><head><title>500 Internal Server Error</title></head></html>")
+		case "/v3/config":
+			configHit = true
+			if ua := r.Header.Get("User-Agent"); ua == "" {
+				t.Error("回退请求应带桌面 UA（与促销解析同一形状）")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"code":0,"msg":"","data":{
+  "models":[
+    {"id":"hy3","name":"Hy3","maxInputTokens":192000,"maxOutputTokens":64000,"supportsImages":true,"supportsToolCall":true,"vendor":"h"},
+    {"id":"retired","name":"Old","disabled":true}
+  ],
+  "agents":[{"name":"cli","models":["hy3","retired","missing-detail"]},{"name":"ide","models":["other"]}]
+}}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c := NewTencent(5 * time.Second)
+	c.base = srv.URL
+
+	infos, err := c.FetchModels(&auth.Auth{UserID: "u", CloudDragonTok: "tok", Domain: "www.workbuddy.ai"})
+	if err != nil {
+		t.Fatalf("国际账号必须靠 /v3/config 回退成功: %v", err)
+	}
+	if !consoleHit || !configHit {
+		t.Fatalf("两个端点都应被访问: console=%v config=%v", consoleHit, configHit)
+	}
+	if len(infos) != 1 || infos[0].ID != "hy3" {
+		t.Fatalf("应只暴露 cli agent 里未停用且有明细的模型: %+v", infos)
+	}
+	if infos[0].ContextWindow != 192000 || infos[0].MaxTokens != 64000 || !infos[0].SupportsImages {
+		t.Fatalf("字段映射不对: %+v", infos[0])
+	}
+}
+
+// 两个端点都失败时，错误信息要能说清是哪条路的问题（排障用）。
+func TestTencentFetchModelsBothPathsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "boom")
+	}))
+	defer srv.Close()
+	c := NewTencent(5 * time.Second)
+	c.base = srv.URL
+	_, err := c.FetchModels(&auth.Auth{UserID: "u", CloudDragonTok: "tok", Domain: "www.workbuddy.ai"})
+	if err == nil {
+		t.Fatal("两端都失败必须报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "console/enterprises/personal/models") || !strings.Contains(msg, "/v3/config") {
+		t.Fatalf("错误里应同时点出两条路: %v", msg)
 	}
 }

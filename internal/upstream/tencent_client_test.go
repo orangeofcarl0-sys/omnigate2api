@@ -149,7 +149,7 @@ func TestTencentRefreshToken(t *testing.T) {
 	defer srv.Close()
 	c := NewTencent(5 * time.Second)
 	c.base = srv.URL
-	tok, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "vv", "www.codebuddy.cn")
+	tok, err := c.RefreshToken(context.Background(), LoginConfig{}, "rt", "vv", "www.codebuddy.cn", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,27 @@ func TestTencentRefreshToken(t *testing.T) {
 
 func TestTencentRefreshNoToken(t *testing.T) {
 	c := NewTencent(5 * time.Second)
-	if _, err := c.RefreshToken(context.Background(), LoginConfig{}, "", "v", ""); err == nil {
+	if _, err := c.RefreshToken(context.Background(), LoginConfig{}, "", "v", "", ""); err == nil {
 		t.Fatal("empty refresh token must error")
+	}
+}
+
+// 14017「试用未激活」必须与限流分开判：它同样是 429，但重试/冷却/换模型都无用，
+// 只有人去站点登录激活才解（2026-09-29 新加国际版账号实测文案）。
+func TestClassifyTencentTrialInactive(t *testing.T) {
+	body := `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated. Please log out of your current account and log in again to activate it immediately and start your free trial.","requestId":"x"}}}`
+	if got := ClassifyTencent(429, body); got != TencentErrTrialInactive {
+		t.Fatalf("got %v，必须判为 TencentErrTrialInactive（否则会被当软限流反复冷却）", got)
+	}
+	// 中文变体
+	if got := ClassifyTencent(429, `{"code":14017,"msg":"试用版尚未激活"}`); got != TencentErrTrialInactive {
+		t.Fatalf("中文文案 got %v", got)
+	}
+	// 不能抢走别的语义：真正的内容风控/封禁仍按原样分类
+	if got := ClassifyTencent(403, `{"code":11140,"msg":"request illegal"}`); got != TencentErrAccountBanned {
+		t.Fatalf("封禁被误判: %v", got)
+	}
+	if got := ClassifyTencent(429, `{"code":6004,"msg":"usage exceeds frequency limit, your usage will reset at 2026-09-29 19:50:20 UTC+8"}`); got != TencentErrModelRateLimit {
+		t.Fatalf("模型级限流被误判: %v", got)
 	}
 }

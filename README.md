@@ -281,11 +281,15 @@ bash start.sh          # 引擎没起就先起 Docker Desktop → 按需重建�
 # 凭证落盘 auths/codearts-{user_id}.json
 ```
 
-> **华为 STS 有效期约 24h，到期需重登**（2026-09-27 实测定论，SPEC §24.4）：登录时门户下发的
-> `ticket_id` **只在登录窗口内有效**（约 21.5h 后再轮询返回 `TM.00001001 无效ticketId`），
-> 所以网关**不能**静默续期。好在门户会话留存 ~30 天，重登基本免密（点一次授权即可）：
-> `tools/huawei-relogin.sh --restart`，或面板「授权登录 → 华为云 CodeArts」。
-> 面板账号「状态」列出现 `续期 无（到期需重登）` + 倒计时（≤2h 高亮）即指此事。
+> **华为长期认证已解决：授权码 → refresh_token 静默续期**（2026-09-27 实测落地，SPEC §24.5）。
+> 网关现在走官方客户端的授权码流程：authorize URL 带 `code_challenge_method=SHA-256` +
+> `auth_callback_url`（写 RFC 的 `S256` 会让门户回退到旧 ticket 流程），回调收 `?code=` →
+> 换出 **30 天有效的 `refresh_token`** → 之后到期前自动静默续期，**不再需要浏览器**。
+> 注意授权码通道的 STS 只有约 **2h**（旧 ticket 通道是 24h），所以网关每天自动刷十几次——
+> 这是正常的，面板会一直显示 `续期 refresh_token`。
+>
+> 兜底：`tools/huawei-relogin.sh --auto`（剩余 > 8h 就跳过，否则零点击重登一次；refresh_token
+> 被吊销或 30 天到期时用它恢复）。面板「授权登录 → 华为云 CodeArts」等价于手动跑一次。
 
 > **Windows 注意**：`-print-only` 模式生成的授权链接 `port=0`，浏览器回流必然断链；
 > 本机有浏览器时务必用**回调模式**（不带 `-print-only`，工具会在 `127.0.0.1:随机端口`
@@ -355,6 +359,10 @@ export OMNIGATE_API_KEY=你的随机密钥
 | `OMNIGATE_AUTH_DIR` | 凭证目录 | `./auths` |
 | `OMNIGATE_STATE_FILE` | 状态文件 | `./data/state.json` |
 | `OMNIGATE_DEFAULT_MODEL` | 默认模型 | `glm-5.2` |
+| `HTTPS_PROXY` / `NO_PROXY` | 出网代理（SPEC §24.7）：国内直连国际域名极不稳，填 HTTP 代理即可；NO_PROXY 排除国内域 | 空（直连） |
+| `OMNIGATE_LOGIN_MIN_INTERVAL_SECONDS` | 登录授权频次闸：同渠道两次发起的最小间隔（SPEC §24.6） | `60` |
+| `OMNIGATE_LOGIN_MAX_PER_HOUR` | 登录授权频次闸：滚动窗口内每渠道上限 | `10` |
+| `OMNIGATE_LOGIN_FAILURE_COOLDOWN_SECONDS` | 连续 3 次授权未完成后的冷却时长 | `1200` |
 | `OMNIGATE_WATCH_ENABLED` | 调度器开关（续期/保活/福利领取/腾讯签到任务） | `true` |
 | `OMNIGATE_WATCH_POLL_MINUTES` | 调度器轮询周期（分钟） | `30` |
 | `OMNIGATE_WATCH_REFRESH_SKEW` | token 刷新提前量（分钟） | `30` |

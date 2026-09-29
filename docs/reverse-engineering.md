@@ -173,3 +173,50 @@ Body：
 **原始推断（保留备查）**：authorize URL 携带 `uri_scheme=codearts`，门户的授权确认可能依赖**自定义协议回传**（官方客户端注册了 `codearts://`，纯浏览器无该处理器故停在失败页）。若成立，可行的根治路径是：在 Windows 注册 `codearts://` 协议 → 指向本地小工具 → 由它拿 code 走 `authorization_code` 换取（该响应按老记录含 `refresh_token`）→ 接入现有 `RefreshToken` 自动续期。
 
 **已落地的可诊断性改进**：`OMNIGATE_LOGIN_DEBUG=1`（compose 透传）打印 ticket 响应是否含 refresh_token；首次回调日志记录 `redirect_to={host}{path}`（去查询串，防 secret 泄露），用于判断门户把浏览器引向何处。
+
+## 附二：登录续期结案（2026-09-27，推翻上节两条推断）
+
+**素材升级**：本机装有官方客户端 `~/.codeartsdoer/CodeArts_Agent/`（26.8.203），其
+`AgentKernel_Vscode_26_8_203_1_0_0-*.exe` 是 Bun 打包但**内嵌 JS 源码可读**，
+直接读出了认证模块（`src/custom-hw/**/auth`）——比 2026-08-03 只读 `resources/app` 更硬。
+
+**推翻 ①「code 通道依赖 Webview 上下文/自定义协议」**：真正的原因是**门户会话 Cookie**。
+2026-09-24 三轮失败的当口，浏览器并没有 codearts.huaweicloud.com 的登录态（日志自证
+`redirect_to=…/portal/login`）。2026-09-27 复测（浏览器已有登录态）：回调仍在第一阶段
+`secret_bytes=64 redirect_to=…/portal/login`，但**没有人做任何操作**，约 15 秒后 ticket 轮询
+就成功了。即：浏览器这一步是必须的（第一阶段下发 `secret` 要靠它），但**只要门户 Cookie
+在，这一步就不需要人**。判定实验：同一天另起会话**不打开浏览器** → 30s 内 0 次回调、
+poll 恒 pending。
+
+**更正 ②（同日第二轮实测，**推翻上面这段结论**）**："门户从不回带 code"是**错的**——不是门户
+不发，是**我们 authorize URL 的两个参数发错了**。四次登录对照（每次只改一处）：
+
+1. 现状 `code_challenge_method=S256` + `client_id=codearts` → `code_bytes=0 secret_bytes=64`
+2. 只加 `auth_callback_url=…/oauth/callback` → 同上（单独加不够）
+3. **`code_challenge_method=SHA-256` + `auth_callback_url`**（其余不动）→ **`code_bytes=32`** ✅
+4. 社区 26.9.x 全形态（`client_id=uri_scheme=vscode-codebot` + `SHA-256` + `auth_callback_url`
+   + `plugin-version=26.9.101`）→ `code_bytes=32` ✅
+
+与"官方常量 `PKCEGenerator.CODE_CHALLENGE_METHOD = "SHA-256"`，错值回退旧 ticket 流程"
+（社区多项目注释，称对齐真实插件）完全吻合。官方源码 `parseTicketResponse()` 仍硬编码
+`return { refreshToken: "", expiresAt: data.credential.expires_at, credentials: {...} }`
+——**ticket 通道确实不发 refresh_token**；refresh_token 只在 code 通道的 `parseTokenResponse()`
+里读。**长期方案 = 授权码 → refresh_token**（绑定 client_id + DPoP 私钥 + `code_verifier`，
+一次性轮换，详见 SPEC §24.5）。
+
+**其余源码事实**（对齐全用得上）：`CLIENT_ID = "CodeArts_Tui"`；authorize URL 只带
+`locale/client_id/port/code_challenge/code_challenge_method="SHA-256"/ticket_id`；
+`OAUTH_CALLBACK_PATH = "/oauth/callback"`（与我们一致）；`CALLBACK_TIMEOUT_MS = 5min`；
+`TOKEN_EXPIRY_BUFFER_MS = 10min`（我们 30min 更保守）；`refreshToken()` 需要
+`client_id/refresh_token/grant_type=refresh_token` + `DPoP` + `x-agent-user-account`；
+`ensureValidToken()` 可用 `CODEARTS_CLI_AK/SK` 短路（CLI 模式）——但实测该 AK/SK 形态直接
+打 `snap-access` chat 会被拒（**两次实测**：头完全缺失；以及头存在但为空 + 正确签名 →
+均 `APIG.0301 decrypt token fail`）。该网关**强制要求临时凭证的 security_token**；
+官方 CLI 文档的"永久 AK/SK"要走 IAM `POST /v3.0/OS-CREDENTIAL/securitytokens` 自换
+15min–24h 临时凭证（此路未实测，需控制台建密钥）。
+
+**结论**：长期方案 = **OAuth 授权码 → `refresh_token` 静默续期**（authorize URL 用
+`code_challenge_method=SHA-256` + `auth_callback_url`；凭证落盘 refresh_token + DPoP 私钥 +
+`code_verifier`，刷新后回写轮换 token、同账号加锁）。兜底 = 零人工周期性重登
+（`tools/huawei-relogin.sh --auto` + 每 6h 定时任务）。细节与可行性矩阵见
+`docs/SPEC-adaptation-layer.md` §24.5 与 `HANDOFF.md` §6.5.2。

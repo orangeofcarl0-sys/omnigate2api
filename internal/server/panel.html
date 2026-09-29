@@ -491,6 +491,11 @@ select option{ background:#fff; color:var(--text); }
         <div class="urlbox" id="oauthUrl">（发起后显示）</div>
       </div>
       <div class="status-line muted" id="oauthStatus">尚未开始</div>
+      <div class="muted" style="font-size:11px;margin-top:8px;line-height:1.5">
+        ⚠ 上游把「短时间内重复授权」判为异常登录：<b>同一个账号不要反复重登</b>。
+        授权一次成功就够了；失败时系统会自动暂停一段时间（连续 3 次未完成 = 冷却 20 分钟），
+        请等冷却结束或换时间再试——反复重试只会加深风控。
+      </div>
     </div>
     <div class="modal-f">
       <button class="btn" id="oauthCopy" type="button" disabled>复制链接</button>
@@ -570,6 +575,23 @@ function coolChips(a){
   return `<div class="coolrow"><span class="lbl">模型限流</span>${chips}</div>`;
 }
 
+// transientNote 瞬时传输错误（EOF / TLS 握手超时等网络抖动）的观测条。
+// 只观测不惩罚（不计错误数、不冷却），但必须显示——否则客户端偶发 5xx/503 而面板一片干净，
+// 用户无从判断（2026-09-29 实测反馈"似乎限流但 dashboard 无反应"，实为传输抖动）。
+// 计数是"自上次成功请求以来"的累计（成功即清零）。
+function transientNote(a){
+  const n = a.transient_err || 0;
+  if (!n) return "";
+  const t = a.transient_at ? Date.parse(a.transient_at) : NaN;
+  const mins = isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t)/60000));
+  const tip = "传输层抖动（EOF / TLS 握手超时 / 连接重置），不计错误数、不冷却账号——换账号走同一条网络也没用，网关已自动换新连接重试一次。"
+    + "最近一次：" + (a.transient_msg || "—")
+    + (mins === null ? "" : "（" + fmtDur(mins) + " 前）")
+    + "。若频繁出现，先查本机网络/代理。";
+  return `<div style="font-size:11px;margin-top:3px"><span class="badge info" title="${escapeAttr(tip)}">瞬时错误 ${n} 次`
+    + (mins === null ? "" : "（最近 " + fmtDur(mins) + "前）") + `</span></div>`;
+}
+
 // tickCoolChips 让限流倒计时自己走（面板原本只在你点「刷新」时才更新）。
 function tickCoolChips(){
   document.querySelectorAll(".coolrow").forEach(row => {
@@ -600,9 +622,10 @@ function renewalLine(a){
   const kind = a.renewal || "";
   const huawei = (a.family === "codearts");
   const kindTxt = kind === "refresh_token" ? "refresh_token" : (kind === "ticket" ? "ticket" : "无（到期需重登）");
-  // 颜色只表达**紧迫度**（bad=已过期 / warn=≤2h / info），能力语义交给徽章文字：
-  // 华为号天然"无续期路"，若一律标红就会变成常态噪音、真到点时反而没人看。
-  const cls = (mins !== null && mins <= 0) ? "bad" : ((mins !== null && mins <= 120) ? "warn" : "info");
+  // 颜色只表达**要你做什么**：已过期 → bad；无自动续期路径且 ≤2h → warn（该点授权登录了）。
+  // 有续期能力（refresh_token）的不因剩余时间变黄——授权码通道的 STS 只有约 2h，它每 1.5h
+  // 自己刷一次，长期黄灯只会把真警报淹掉。
+  const cls = (mins !== null && mins <= 0) ? "bad" : ((!kind && mins !== null && mins <= 120) ? "warn" : "info");
   const expTxt = mins === null ? "" : (mins <= 0 ? "已过期 " + fmtDur(-mins) : "剩余 " + fmtDur(mins));
   const tip = kind === "refresh_token"
     ? "refresh_token 可静默续期：STS/token 到期时自动换发，无需人工介入"
@@ -661,7 +684,7 @@ function render(data){
         <td>${a.quota_updated_at
           ? `<strong>${Number(a.credits||0).toLocaleString()}</strong>${a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()}${a.quota_used ? ` · 用 ${Number(a.quota_used).toLocaleString()}` : ""}</div>` : ""}`
           : `<span class="muted" title="尚未查询过余额（额度快照不持久化，重启后需重新查询；调度器每日也会刷新）">未查询</span>`}</td>
-        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${coolChips(a)}${renewalLine(a)}</td>
+        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${coolChips(a)}${renewalLine(a)}${transientNote(a)}</td>
         <td><div class="muted"${reasonTip?` title="${escapeAttr(reasonTip)}"`:""}>${escapeHtml(reason)}</div><div class="mono muted" style="font-size:11px">${escapeHtml(until)}</div></td>
         <td><div class="row-actions">
           <button class="btn" data-act="credits" data-uid="${escapeAttr(a.uid)}">积分</button>
@@ -881,6 +904,7 @@ function stopOAuthPoll(){
   if (oauthTimer){ clearInterval(oauthTimer); oauthTimer = null; }
 }
 function openOAuthModal(){
+  stopOAuthCooldown();   // 重新打开 = 重新开始，别带着上一轮的冷却
   $("oauthModal").classList.remove("hidden");
   oauthSessionId = "";
   oauthTencentState = "";
@@ -895,14 +919,38 @@ function openOAuthModal(){
 }
 function closeOAuthModal(){
   stopOAuthPoll();
+  stopOAuthCooldown();   // 关掉模态 = 结束这轮操作，冷却计时也停
   oauthSessionId = "";
   oauthTencentState = "";
   oauthActiveChan = "";
   $("oauthModal").classList.add("hidden");
 }
 
+// oauthCooldown 频次闸被触发时的冷却倒计时（SPEC §24.6）。
+// 上游把"短时间内重复授权"当异常登录：2026-09-28 同一账号 59 秒内 4 次授权之后，
+// 登录页开始报「身份提供程序…意外错误 / 账号访问受限」，健康账号也再登不上。
+// 所以这里不只看错误文案，而是把按钮**锁住**，让"失败就再点"这条路走不通。
+let oauthCoolTimer = null;
+function oauthCooldown(seconds, msg){
+  stopOAuthCooldown();
+  let left = Math.max(1, seconds|0);
+  const btn = $("oauthStart");
+  const tick = () => {
+    if (left <= 0) { stopOAuthCooldown(); btn.disabled = false; setOAuthStatus("可以重新发起授权了", null); return; }
+    btn.disabled = true;
+    setOAuthStatus(`<b>已暂停授权发起</b>（还需 ${fmtDur(Math.ceil(left/60))}）——${msg}`, false);
+    left -= 1;
+  };
+  tick();
+  oauthCoolTimer = setInterval(tick, 1000);
+}
+function stopOAuthCooldown(){
+  if (oauthCoolTimer){ clearInterval(oauthCoolTimer); oauthCoolTimer = null; }
+}
+
 async function startOAuth(){
   if (oauthBusy) return;
+  stopOAuthCooldown();
   oauthBusy = true;
   $("oauthStart").disabled = true;
   setOAuthStatus('<span class="spin"></span>正在向服务端申请授权链接…', null);
@@ -912,6 +960,14 @@ async function startOAuth(){
     const data = chan === "tencent"
       ? await api("/admin/api/oauth/tencent/start", {method:"POST", body: JSON.stringify({realm: realm})})
       : await api("/admin/api/oauth/start", {method:"POST", body:"{}"});
+    // 频次闸：服务端拒绝发起（连点/失败重试）——锁住按钮倒计时，别再去点上游
+    if (data.throttled) {
+      oauthCoolTimer && stopOAuthCooldown();
+      setOAuthStatus("", null);
+      oauthCooldown(data.retry_after_seconds || 60, data.message || "上游对重复授权敏感");
+      toast(data.message || "已暂停授权发起", false);
+      return;
+    }
     if (!data.ok || !data.auth_url) throw new Error(data.message || "发起失败");
     oauthActiveChan = chan; // 轮询按发起时的渠道走（改选渠道不影响进行中的流程）
     oauthSessionId = data.session_id || "";
@@ -920,7 +976,7 @@ async function startOAuth(){
     $("oauthCopy").disabled = false;
     $("oauthOpen").disabled = false;
     $("oauthPoll").disabled = false;
-    setOAuthStatus(`已生成链接${chan === "tencent" ? "（" + realmLabel(realm) + "）" : ""}，请打开授权页完成登录。正在自动检测…`, null);
+    setOAuthStatus((data.message || `已生成链接${chan === "tencent" ? "（" + realmLabel(realm) + "）" : ""}，请打开授权页完成登录。正在自动检测…`), null);
     // 自动打开
     try { window.open(data.auth_url, "_blank", "noopener,noreferrer"); } catch {}
     stopOAuthPoll();
@@ -932,7 +988,7 @@ async function startOAuth(){
     toast(e.message, false);
   } finally {
     oauthBusy = false;
-    $("oauthStart").disabled = false;
+    if (!oauthCoolTimer) $("oauthStart").disabled = false;   // 冷却中保持禁用
   }
 }
 
