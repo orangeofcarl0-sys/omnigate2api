@@ -45,8 +45,14 @@ const (
 //
 // 并把国内域放进 `NO_PROXY`——国内 API 绕道出海只会更慢更不稳：
 //
-//	NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,snap-access.cn-north-4.myhuaweicloud.com,
-//	         codearts.huaweicloud.com,iam.myhuaweicloud.com,sts.cn-north-4.myhuaweicloud.com,localhost,127.0.0.1
+//	NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,workbuddy.ai,
+//	         myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
+//
+// `workbuddy.ai` 也在此列：它解析到 43.160.158.125（腾讯新加坡边缘，AS132203），
+// **国内直连可达且稳定**（宿主机直连 25/25、容器内 40/40）；而 v2rayN 生效的
+// 「V4-绕过大陆(Whitelist)」规则里它不命中 geosite:cn ⇒ 交给代理反而从海外出口绕一圈
+// （实测出口 38.99.248.46 美国洛杉矶），延迟从 ~490ms 翻到 ~1200ms。
+// `huaweicloud.com` 与 `myhuaweicloud.com` 是两个父域，Go 的 NO_PROXY **不做跨父域覆盖**，都要列。
 //
 // 注意：`host.docker.internal` 在本机同时解析出 IPv4（192.168.65.254）与 IPv6
 // （fdc4:f303:9324::254），而 xray 只监听 127.0.0.1 ⇒ **IPv6 那条连不上**。Go 按解析

@@ -1124,10 +1124,10 @@ S = uid => o(uid).then(ok => ok && a())                             // 登录后
 
 ```
 HTTPS_PROXY=http://host.docker.internal:10808
-NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
+NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,workbuddy.ai,myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
 ```
 
-三个复核中确认的要点（都是原先写错或没写到的）：
+四个复核中确认的要点（都是原先写错或没写到的）：
 
 1. **端口是 10808，不是 10809**。v2rayN 的 xray 入站（GUI 记 `Protocol: socks`）是**混合口**：
    实测同时接受 SOCKS5 与 HTTP CONNECT（直发 `CONNECT` 得到 `HTTP/1.1 200 Connection established`），
@@ -1139,13 +1139,36 @@ NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,myhuaweicloud.com,huaweic
 3. **`host.docker.internal` 同时解析出 IPv4/IPv6，而 xray 只监听 `127.0.0.1`**：
    `fdc4:f303:9324::254`（IPv6）连不上 10808，`192.168.65.254`（IPv4）可以。Go 按解析顺序
    拨号并回退，实测落在 IPv4；排障时若代理不通先查这里，可直接把主机名写成 `192.168.65.254` 钉死。
+4. **`workbuddy.ai` 必须留在 `NO_PROXY` 里**（8/9 个 workbuddy 账号的 domain 正是它）。
+   它解析到 `43.160.158.125`——**腾讯新加坡边缘**（AS132203 Tencent Building），
+   国内**直连可达且稳定**：宿主机绕过系统代理直连 25/25、容器内 `NO_PROXY` 直连 40/40；
+   作为对照，同一次测试里直连 `api.ipify.org` / `google.com` 全部失败（curl exit 35）。
+   而 v2rayN 生效的「V4-绕过大陆(Whitelist)」规则里它**不命中 `geosite:cn`**
+   ⇒ 交给代理反而把它送去海外出口绕一圈（实测出口 `38.99.248.46`，美国洛杉矶 Cogent，
+   **不是**节点名里的日本），延迟翻倍：
+
+   | 路径 | 25 次结果 | 延迟（10 次采样） |
+   |---|---|---|
+   | 直连 | 25/25 | 444–1068ms，中位 **~490ms** |
+   | 经 10808 代理 | 25/25 | 1181–1279ms，中位 **~1200ms** |
+
+   两条路**都不断**，差别在延迟：绕出去再回来让每次请求多付 ~700ms。这与本表第一行的原则一致：
+   **国内可达的域不绕道出海**。
+
+   注意这是**按实测可达性判，不是按"是不是腾讯"或域名后缀判**——`copilot.tencent.com`（CN 域）
+   同理直连，而 `www.workbuddy.ai` 虽带 `.ai` 却是新加坡边缘。改动前先按上面的方法实测
+   可达性与出口 IP。
 
 **遗留认知更正**：原文断言"容器完全没有代理配置 ⇒ 出网永远直连"**不准确**。本机 WSL2 为
 `networkingMode=mirrored`，Docker Desktop 会把宿主机的系统代理（`127.0.0.1:10808`）透传给
-容器：容器内直连境外的出口 IP 就是东京节点、TCP 建连仅 2ms、且容器能直抵 `google`
-而宿主机直连不能。也就是说**抖动并非"完全没走代理"，而是那条隐式路径本身不稳**
+容器：容器内**不设任何 proxy 变量**直连境外，出口 IP 是 `38.99.248.46`（美国洛杉矶 Cogent），
+`google/generate_204` 拿到 **204**；而宿主机**绕过系统代理**直连同一目标是 **curl exit 35（SSL
+connect error）**。也就是说**抖动并非"完全没走代理"，而是那条隐式路径本身不稳**
 （6h 243 次、07:30 与 17:00 两波成簇）。显式配置的价值在于路径可见、可排障、可换端口，
 不再依赖 Docker Desktop 的隐式行为。
+
+（注：早前版本此处写"出口 IP 就是东京节点"——那是当时 v2rayN 选中日本节点时的观测；
+出口随所选节点变化，**不要**把具体地理写死，判断标准只看"容器直连能否到、宿主机直连能否到"。）
 
 ### 24.6 登录授权频次闸（v1.4，2026-09-28 事故驱动）
 
