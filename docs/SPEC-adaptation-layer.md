@@ -1118,15 +1118,34 @@ S = uid => o(uid).then(ok => ok && a())                             // 登录后
 |---|---|
 | 抖动不如换账号、要**原地重试** | `doWithRetry`：EOF / TLS 超时 / 连接重置 / GOAWAY 等**瞬时**传输错误，**换新连接重试一次**（重试请求置 `req.Close=true`，避免池子把死连接递回来）。华为与腾讯两条 chat 路径都接。业务错误（`ApiError`，上游真回了错误码）**不重试**——重试只会掩盖语义 |
 | 抖动必须**看得见** | `Pool.NoteTransient`：只累加观测计数与最近一次信息，**不计错误数、不冷却、不禁用**；`List()` 暴露 `transient_err/at/msg`，面板状态列渲染「瞬时错误 N 次（最近 Xm 前）」并在成功请求后清零（即"自上次成功以来"）。这样"客户端报错但面板干净"不再发生 |
-| 抖动可以**根本不发生** | `newTransport()` 接上 `Proxy: http.ProxyFromEnvironment`：容器内设 `HTTPS_PROXY` 即走代理，`NO_PROXY` 排除国内域（国内 API 绕道出海只会更慢更不稳）。compose 已透传两个变量 + 声明 `host.docker.internal:host-gateway`。**只支持 HTTP(S) 代理**（标准库能力、零新依赖）；SOCKS5 需额外依赖，未做 |
+| 抖动可以**根本不发生** | `newTransport()` 接上 `Proxy: http.ProxyFromEnvironment`：容器内设 `HTTPS_PROXY` 即走代理，`NO_PROXY` 排除国内域（国内 API 绕道出海只会更慢更不稳）。compose 已透传两个变量 + 声明 `host.docker.internal:host-gateway`。HTTP(S) 与 SOCKS5 **都支持**——`net/http` 的 proxy scheme 分派里 `socks5`/`socks5h` 是一等公民，零新依赖 |
 
-**当前状态**：代理变量默认为空 ⇒ 行为与改造前一致（直连）。要解决本机的国际链路抖动，
-把 v2rayN 的 HTTP 入站端口填进 `.env` 即可（v2rayN 默认 HTTP 入站为 10809，需在设置里启用）：
+**当前状态（2026-09-30 复核并落地）**：已在本机 `.env` 填好代理并重建容器生效。
 
 ```
-HTTPS_PROXY=http://host.docker.internal:10809
-NO_PROXY=copilot.tencent.com,codebuddy.cn,.myhuaweicloud.com,localhost,127.0.0.1
+HTTPS_PROXY=http://host.docker.internal:10808
+NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
 ```
+
+三个复核中确认的要点（都是原先写错或没写到的）：
+
+1. **端口是 10808，不是 10809**。v2rayN 的 xray 入站（GUI 记 `Protocol: socks`）是**混合口**：
+   实测同时接受 SOCKS5 与 HTTP CONNECT（直发 `CONNECT` 得到 `HTTP/1.1 200 Connection established`），
+   所以**不需要**在 v2rayN 设置里另开 HTTP 入站。原文"v2rayN 默认 HTTP 入站为 10809，需在设置里启用"
+   在本机不成立——10809 根本没监听。
+2. **`NO_PROXY` 不做跨父域覆盖**。`myhuaweicloud.com` 不覆盖 `codearts.huaweicloud.com`
+   （两者是不同父域），必须把 `huaweicloud.com` 也列上。用"死代理"判别法逐域实测确认：
+   命中 `NO_PROXY` ⇒ 直连成功；未命中 ⇒ `proxyconnect ... connection refused`。
+3. **`host.docker.internal` 同时解析出 IPv4/IPv6，而 xray 只监听 `127.0.0.1`**：
+   `fdc4:f303:9324::254`（IPv6）连不上 10808，`192.168.65.254`（IPv4）可以。Go 按解析顺序
+   拨号并回退，实测落在 IPv4；排障时若代理不通先查这里，可直接把主机名写成 `192.168.65.254` 钉死。
+
+**遗留认知更正**：原文断言"容器完全没有代理配置 ⇒ 出网永远直连"**不准确**。本机 WSL2 为
+`networkingMode=mirrored`，Docker Desktop 会把宿主机的系统代理（`127.0.0.1:10808`）透传给
+容器：容器内直连境外的出口 IP 就是东京节点、TCP 建连仅 2ms、且容器能直抵 `google`
+而宿主机直连不能。也就是说**抖动并非"完全没走代理"，而是那条隐式路径本身不稳**
+（6h 243 次、07:30 与 17:00 两波成簇）。显式配置的价值在于路径可见、可排障、可换端口，
+不再依赖 Docker Desktop 的隐式行为。
 
 ### 24.6 登录授权频次闸（v1.4，2026-09-28 事故驱动）
 

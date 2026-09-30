@@ -27,9 +27,11 @@ services:
       # 配置审计转储（OMNIGATE_DEBUG_CONFIG=<目录>，空=关闭）：把 /v3/config 原始响应
       # 按区域落盘，用于"改上游解析前先列全部键路径"（SPEC §33.3）。
       OMNIGATE_DEBUG_CONFIG: ${OMNIGATE_DEBUG_CONFIG:-}
-      # 出网代理：容器默认直连；国内直连国际域名极不稳（实测 6h 243 次 EOF/TLS 超时 → 503），详见 SPEC §28.4 决策 C。填 HTTP 入站即可：
-      #   HTTPS_PROXY=http://host.docker.internal:10809
-      #   NO_PROXY=copilot.tencent.com,codebuddy.cn,.myhuaweicloud.com,localhost,127.0.0.1
+      # 出网代理（SPEC §24.7）：国际域直连极不稳（实测 6h 243 次 EOF/TLS 超时 → 客户端 503）。
+      # v2rayN 的 xray 入站 10808 是**混合口**：SOCKS5 与 HTTP CONNECT 都吃，不必另开 10809。
+      # 容器经 host.docker.internal 到宿主机回环；NO_PROXY 内的国内域直连（绕道出海只会更慢更不稳）。
+      #   HTTPS_PROXY=http://host.docker.internal:10808    （socks5:// 亦可，标准库原生支持）
+      #   NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,myhuaweicloud.com,localhost,127.0.0.1
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
       GOMEMLIMIT: 192MiB

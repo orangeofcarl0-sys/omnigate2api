@@ -38,13 +38,20 @@ const (
 // 接连失败后客户端拿到 503「all accounts unavailable」。而宿主机上就开着代理（v2rayN），
 // 容器先前既不读 proxy 变量、Transport 也没有 Proxy 字段 ⇒ 永远直连。
 //
-// 用法（容器内）：`HTTPS_PROXY=http://host.docker.internal:10809`（v2rayN 的 HTTP 入站），
+// 用法（容器内）：`HTTPS_PROXY=http://host.docker.internal:10808`。本机 v2rayN 的 xray
+// 入站 10808 是**混合口**（GUI 里记 `Protocol: socks`，实测同时吃 SOCKS5 与 HTTP CONNECT），
+// 所以不必再开 10809 HTTP 入站；`socks5://` 亦可——标准库原生支持（`net/http` 的 proxy
+// scheme 分派里 socks5/socks5h 是一等公民，零新依赖）。
+//
 // 并把国内域放进 `NO_PROXY`——国内 API 绕道出海只会更慢更不稳：
 //
 //	NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,snap-access.cn-north-4.myhuaweicloud.com,
 //	         codearts.huaweicloud.com,iam.myhuaweicloud.com,sts.cn-north-4.myhuaweicloud.com,localhost,127.0.0.1
 //
-// 只支持 HTTP(S) 代理（标准库能力，零新依赖）；SOCKS5（v2rayN 默认 10808）需要额外依赖，未做。
+// 注意：`host.docker.internal` 在本机同时解析出 IPv4（192.168.65.254）与 IPv6
+// （fdc4:f303:9324::254），而 xray 只监听 127.0.0.1 ⇒ **IPv6 那条连不上**。Go 按解析
+// 顺序逐个拨号并回退，实测最终落在 IPv4；若某天代理连不上，先怀疑这里——把 `HTTPS_PROXY`
+// 的主机名直接写成 `192.168.65.254` 可钉死 IPv4。
 func newTransport() *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
