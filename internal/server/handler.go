@@ -293,6 +293,11 @@ func NewHandler(cfg Config) *Handler {
 	} else if rt, err := adapt.NewRouteTable(buildDefaultRoutes()); err == nil {
 		h.routes = rt
 	}
+	// 传输层抖动**被重试消化**时回调池子计数（SPEC §24.7）：上游包不认识账号池，
+	// 用回调解耦。不注入也能跑，只是"自愈的抖动"不会出现在面板上。
+	if cfg.Pool != nil {
+		upstream.SetRetryObserver(cfg.Pool.NoteRetry)
+	}
 	h.loadChats()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))

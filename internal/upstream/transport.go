@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -48,10 +49,11 @@ const (
 //	NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,workbuddy.ai,
 //	         myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
 //
-// `workbuddy.ai` 也在此列：它解析到 43.160.158.125（腾讯新加坡边缘，AS132203），
-// **国内直连可达且稳定**（宿主机直连 25/25、容器内 40/40）；而 v2rayN 生效的
-// 「V4-绕过大陆(Whitelist)」规则里它不命中 geosite:cn ⇒ 交给代理反而从海外出口绕一圈
-// （实测出口 38.99.248.46 美国洛杉矶），延迟从 ~490ms 翻到 ~1200ms。
+// `workbuddy.ai` 也在此列（8/9 个账号的 domain 就是它）。但别误会它的作用：容器出网实际由
+// Docker 的 mirrored 网络统一交给 v2rayN 按白名单分流（实测容器直连国内站出口=杭州电信、
+// 直连国外站出口=节点 IP），`NO_PROXY` 只决定 Go 要不要多发一次 CONNECT，**并不能让包绕开
+// v2rayN**。要让它真直连，得在 v2rayN 侧加 `domain:workbuddy.ai → direct` 路由
+// （2026-10-01 实测：宿主直连 6/6=200，同期宿主经代理与容器两条路全部 0/6）。
 // `huaweicloud.com` 与 `myhuaweicloud.com` 是两个父域，Go 的 NO_PROXY **不做跨父域覆盖**，都要列。
 //
 // 注意：`host.docker.internal` 在本机同时解析出 IPv4（192.168.65.254）与 IPv6
@@ -88,7 +90,12 @@ func newTransport() *http.Transport {
 // 重试一次几乎总能成功（实测紧随其后的请求就 200）。
 //
 // 重试的那次把 `Close` 置真，强制新建连接——否则连接池很可能又把那条死连接递回来。
-func doWithRetry(ctx context.Context, c *http.Client, build func(fresh bool) (*http.Request, error), attempts int) (*http.Response, error) {
+//
+// `accountKey` 只用于**观测**（池子记账的键，取 `Auth.UserID`，与 `pool.Account.UID` 同值）：
+// 重试**成功**也要留痕。2026-09-30 复盘发现，此前重试成功时既不写日志也不计数，于是
+// 「瞬时错误 0」被误读成「链路干净」——实际含义只是「没有连续两次都失败」。现在抖动
+// 一发生就记 jitter 日志，被重试消化掉还会额外记一条 recovered 并回调池子计数。
+func doWithRetry(ctx context.Context, c *http.Client, build func(fresh bool) (*http.Request, error), attempts int, accountKey string) (*http.Response, error) {
 	if attempts < 1 {
 		attempts = 1
 	}
@@ -100,6 +107,11 @@ func doWithRetry(ctx context.Context, c *http.Client, build func(fresh bool) (*h
 		}
 		resp, err := c.Do(req)
 		if err == nil {
+			if i > 0 {
+				log.Printf("upstream transport retry recovered account=%s attempt=%d/%d err=%v",
+					accountKey, i+1, attempts, lastErr)
+				noteRetry(accountKey)
+			}
 			return resp, nil
 		}
 		if !isTransientTransportErr(err) {
@@ -110,8 +122,29 @@ func doWithRetry(ctx context.Context, c *http.Client, build func(fresh bool) (*h
 		if ctx != nil && ctx.Err() != nil {
 			return nil, err
 		}
+		// 只在**确实还有下一次**时才记，避免最后一次失败也报 "retrying" 误导排障。
+		if i < attempts-1 {
+			log.Printf("upstream transport jitter (retrying) account=%s attempt=%d/%d err=%v",
+				accountKey, i+1, attempts, err)
+		}
 	}
 	return nil, lastErr
+}
+
+// retryObserver 重试观测回调（由 server 启动时注入一次；nil = 只记日志、不落池子）。
+//
+// 为什么用回调而不是直接调池子：`internal/upstream` 不依赖 `internal/pool`（单向依赖，
+// 见包注释），传输层也不该认识账号池。但它手里正好有账号键（`Auth.UserID`），
+// 于是一根函数指针就能把「抖动被消化」这件事送到面板上。
+var retryObserver func(accountKey string)
+
+// SetRetryObserver 注入重试观测回调（进程启动时调用一次）。
+func SetRetryObserver(fn func(accountKey string)) { retryObserver = fn }
+
+func noteRetry(accountKey string) {
+	if retryObserver != nil && accountKey != "" {
+		retryObserver(accountKey)
+	}
 }
 
 // isTransientTransportErr 传输层抖动判定：值得原地重试一次、且**不该**罚账号或冷却。

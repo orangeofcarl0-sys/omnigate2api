@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"omnigate2api/internal/auth"
 )
 
 // fakeTencent 假 copilot 服务器：按路径分派 chat / refresh。
@@ -188,5 +190,40 @@ func TestClassifyTencentTrialInactive(t *testing.T) {
 	}
 	if got := ClassifyTencent(429, `{"code":6004,"msg":"usage exceeds frequency limit, your usage will reset at 2026-09-29 19:50:20 UTC+8"}`); got != TencentErrModelRateLimit {
 		t.Fatalf("模型级限流被误判: %v", got)
+	}
+}
+
+// 非 chat 路径（宠物/任务/计费/试用）也必须吃瞬时抖动重试。此前它们**完全没有重试**，
+// 抖动一来就是硬失败——2026-09-30 实测 14 小时内 103 次（48 × buddy/travel/status +
+// 55 × activity/growth/tasks），全是 TLS 握手超时，等于成长链每天白丢这些请求。
+func TestTencentDoRetriesTransient(t *testing.T) {
+	acct := &auth.Auth{UserID: "u-1", CloudDragonTok: "tok", Domain: "www.codebuddy.cn"}
+	rt := &flakyRT{fails: 1, inner: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"code":0}`))}, nil
+	})}
+	c := NewTencent(5 * time.Second)
+	c.http = &http.Client{Transport: rt}
+
+	var noted []string
+	SetRetryObserver(func(k string) { noted = append(noted, k) })
+	defer SetRetryObserver(nil)
+
+	raw, status, err := c.tencentDo(acct, tencentHTTPOpts{
+		base: "https://x", method: http.MethodGet, path: "/activity/growth/tasks",
+	})
+	if err != nil {
+		t.Fatalf("抖动后应重试成功: %v", err)
+	}
+	if status != 200 || string(raw) != `{"code":0}` {
+		t.Fatalf("status=%d raw=%s", status, raw)
+	}
+	if len(rt.seen) != 2 {
+		t.Fatalf("应恰好请求 2 次，实际 %d", len(rt.seen))
+	}
+	if !rt.seen[1] {
+		t.Fatalf("重试必须强制新连接（Close=true）: %v", rt.seen)
+	}
+	if len(noted) != 1 || noted[0] != "u-1" {
+		t.Fatalf("重试成功应回调观测钩子并带 UserID，实际 %v", noted)
 	}
 }

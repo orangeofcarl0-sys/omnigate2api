@@ -617,7 +617,7 @@ func (c *Client) SendChatV2(ctx context.Context, body map[string]any, traceID st
 		signRequest(httpReq, raw, cred)
 		httpReq.Close = fresh
 		return httpReq, nil
-	}, 2)
+	}, 2, cred.UserID)
 	if err != nil {
 		return nil, err
 	}

@@ -95,11 +95,15 @@ func TestDoWithRetryRecoversFromTransient(t *testing.T) {
 	})
 	rt := &flakyRT{fails: 1, inner: inner}
 	c := &http.Client{Transport: rt}
+	// 注入观测回调：重试**成功**也必须留痕（否则面板低估抖动率，见 §24.7 复盘）。
+	var noted []string
+	SetRetryObserver(func(k string) { noted = append(noted, k) })
+	defer SetRetryObserver(nil)
 	resp, err := doWithRetry(context.Background(), c, func(fresh bool) (*http.Request, error) {
 		req, _ := http.NewRequest(http.MethodPost, "https://x/v2/chat/completions", strings.NewReader("{}"))
 		req.Close = fresh
 		return req, nil
-	}, 2)
+	}, 2, "acct-1")
 	if err != nil {
 		t.Fatalf("抖动后应重试成功: %v", err)
 	}
@@ -109,6 +113,29 @@ func TestDoWithRetryRecoversFromTransient(t *testing.T) {
 	}
 	if rt.seen[0] || !rt.seen[1] {
 		t.Fatalf("第二次必须强制新连接（Close=true）: %v", rt.seen)
+	}
+	if len(noted) != 1 || noted[0] != "acct-1" {
+		t.Fatalf("重试成功应回调观测钩子一次且带账号键，实际 %v", noted)
+	}
+}
+
+// 一次就成功（无抖动）不得触发观测回调：否则"重试自愈"计数会虚高。
+func TestDoWithRetrySilentWhenNoJitter(t *testing.T) {
+	rt := &flakyRT{fails: 0, inner: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})}
+	var noted []string
+	SetRetryObserver(func(k string) { noted = append(noted, k) })
+	defer SetRetryObserver(nil)
+	resp, err := doWithRetry(context.Background(), &http.Client{Transport: rt}, func(bool) (*http.Request, error) {
+		return http.NewRequest(http.MethodPost, "https://x/y", strings.NewReader("{}"))
+	}, 2, "acct-1")
+	if err != nil {
+		t.Fatalf("应一次成功: %v", err)
+	}
+	resp.Body.Close()
+	if len(noted) != 0 {
+		t.Fatalf("无抖动不该回调观测钩子，实际 %v", noted)
 	}
 }
 
@@ -120,7 +147,7 @@ func TestDoWithRetryGivesUpAndDoesNotRetryBusinessError(t *testing.T) {
 	c := &http.Client{Transport: rt}
 	if _, err := doWithRetry(context.Background(), c, func(bool) (*http.Request, error) {
 		return http.NewRequest(http.MethodPost, "https://x/y", strings.NewReader("{}"))
-	}, 2); err == nil {
+	}, 2, "acct-1"); err == nil {
 		t.Fatal("持续抖动必须把错误抛出去（调用方据此换号/记日志）")
 	}
 	if len(rt.seen) != 2 {
@@ -136,7 +163,7 @@ func TestDoWithRetryGivesUpAndDoesNotRetryBusinessError(t *testing.T) {
 	c2 := &http.Client{Transport: rt2}
 	if _, err := doWithRetry(context.Background(), c2, func(bool) (*http.Request, error) {
 		return http.NewRequest(http.MethodPost, "https://x/y", strings.NewReader("{}"))
-	}, 3); err == nil {
+	}, 3, "acct-1"); err == nil {
 		t.Fatal("应返回错误")
 	}
 	if calls != 1 {

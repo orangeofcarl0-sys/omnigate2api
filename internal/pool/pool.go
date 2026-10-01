@@ -27,6 +27,10 @@ const (
 	CoolNone // 复位用哨兵：无冷却
 )
 
+// retryWindow 重试自愈计数的滚动窗口：条目超过这个时长就从零重计，
+// 于是面板上读到的是「最近一小时抖了几次」这种可直接决策的量。
+const retryWindow = time.Hour
+
 // Account 一个上游账号。
 type Account struct {
 	Name         string `json:"name"`
@@ -66,6 +70,16 @@ type Account struct {
 	transientErr int
 	transientAt  time.Time
 	transientMsg string
+	// retryErr 传输层抖动**被重试消化**的次数，与 transientErr 互补：那个记「两次都失败」，
+	// 这个记「抖了一下但重试救回来了」。2026-09-30 复盘发现只看 transientErr 会系统性
+	// 低估链路抖动——重试成功时既不写日志也不计数，于是面板显示 0 而链路实际在成簇抖。
+	//
+	// 口径是**滚动 retryWindow**，不是"自上次成功以来"：重试救回来之后紧接着就是一次成功，
+	// 若沿用"成功即清零"这个数会立刻被抹掉、永远读到 0（这正是第一版写完实测发现的）。
+	// 滚动窗口直接回答运维真正要问的那句「最近这段时间链路抖不抖」。
+	retryErr int
+	retryAt  time.Time
+	retryWin time.Time
 
 	// refreshMu 串行化**续期**（SPEC §24.5）：refresh_token 是一次性轮换的，两个 goroutine
 	// 同时刷同一个 token 会互相作废（上游回 `the refresh token has been used`）——授权码
@@ -315,6 +329,9 @@ func (p *Pool) List() []map[string]any {
 			"transient_err":     a.transientErr,
 			"transient_at":      rfc3339OrEmpty(a.transientAt),
 			"transient_msg":     a.transientMsg,
+			"retry_err":         a.retryErr,
+			"retry_at":          rfc3339OrEmpty(a.retryAt),
+			"retry_window_min":  int(retryWindow.Minutes()),
 		})
 		a.mu.Unlock()
 	}
@@ -660,7 +677,34 @@ func (p *Pool) NoteTransient(name, msg string) {
 	}
 }
 
+// NoteRetry 记一次**被重试消化的抖动**（传输层换新连接后成功）：同样只观测、不惩罚。
+// 与 NoteTransient 的分工是「抖了但救回来」vs「抖到两次都失败」——两者一起看才是真实抖动率。
+// accountKey 为上游侧 `Auth.UserID`（== 本池 Account.UID）。
+//
+// 记账口径是滚动窗口（见 retryWindow）：条目超过窗口即从零重计，所以面板读到的是
+// 「最近这一小时抖了几次」，而不是一个只增不减的历史总数。
+func (p *Pool) NoteRetry(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, a := range p.accounts {
+		if a.Name != name && a.UID != name {
+			continue
+		}
+		a.mu.Lock()
+		if a.retryWin.IsZero() || now.Sub(a.retryWin) >= retryWindow {
+			a.retryErr, a.retryWin = 0, now
+		}
+		a.retryErr++
+		a.retryAt = now
+		a.mu.Unlock()
+		return
+	}
+}
+
 // ClearTransient 清空瞬时错误观测（面板「清冷却」/成功请求后由调用方决定是否调用）。
+// 只清 transientErr（"自上次成功以来"口径）；retryErr 是滚动窗口计数，不受成功影响
+// ——否则重试刚救回来的那一次会被紧随其后的成功立刻抹掉。
 func (p *Pool) ClearTransient(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

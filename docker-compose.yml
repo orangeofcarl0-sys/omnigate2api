@@ -32,10 +32,10 @@ services:
       # 容器经 host.docker.internal 到宿主机回环；NO_PROXY 内的域直连（绕道出海只会更慢更不稳）。
       #   HTTPS_PROXY=http://host.docker.internal:10808    （socks5:// 亦可，标准库原生支持）
       #   NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,workbuddy.ai,myhuaweicloud.com,huaweicloud.com,localhost,127.0.0.1
-      # workbuddy.ai 为何也在 NO_PROXY 里：它解析到 43.160.158.125（腾讯新加坡边缘，AS132203），
-      # 国内**直连可达且稳定**（宿主机直连 25/25、容器内 40/40）；而 v2rayN 生效的
-      # 「V4-绕过大陆(Whitelist)」里它不命中 geosite:cn ⇒ 走代理反而从海外出口绕一圈
-      # （实测出口 38.99.248.46 美国洛杉矶，非节点名里的日本），延迟从 ~490ms 翻到 ~1200ms。
+      # workbuddy.ai 也在 NO_PROXY 里（8/9 个账号的 domain 就是它）。但注意：容器出网实际
+      # 由 Docker mirrored 网络统一交给 v2rayN 按白名单分流，**NO_PROXY 并不能让它真绕开代理**
+      # （实测容器直连国内站出口=杭州电信、直连国外站出口=节点）。要让它直连得在 v2rayN 里加
+      # `domain:workbuddy.ai → direct` 路由；这条 NO_PROXY 只是语义正确、无副作用（SPEC §24.7 第 4 条）。
       # 注意 huaweicloud.com 与 myhuaweicloud.com 是两个父域，Go 的 NO_PROXY 不做跨父域覆盖，都要列。
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}

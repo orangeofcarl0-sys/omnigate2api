@@ -586,21 +586,38 @@ function winHint(a, model){
     + `（窗口起点 ${fmtTime(w.hit_start)}）`;
 }
 
-// transientNote 瞬时传输错误（EOF / TLS 握手超时等网络抖动）的观测条。
-// 只观测不惩罚（不计错误数、不冷却），但必须显示——否则客户端偶发 5xx/503 而面板一片干净，
-// 用户无从判断（2026-09-29 实测反馈"似乎限流但 dashboard 无反应"，实为传输抖动）。
-// 计数是"自上次成功请求以来"的累计（成功即清零）。
+// transientNote 传输层抖动的观测条。两个计数互补，**必须一起看**：
+//   瞬时错误 = 换新连接重试后**仍然失败**（两次都失败，客户端会看到报错/换号）；
+//   重试自愈 = 抖了一下但重试**救回来了**（客户端无感）。
+// 只看前者会系统性低估真实抖动率——2026-09-30 复盘时面板显示 0，而日志里同一时段
+// 链路正在成簇握手超时（重试成功的那部分当时不留痕）。都是"自上次成功以来"，成功即清零。
 function transientNote(a){
   const n = a.transient_err || 0;
-  if (!n) return "";
-  const t = a.transient_at ? Date.parse(a.transient_at) : NaN;
-  const mins = isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t)/60000));
-  const tip = "传输层抖动（EOF / TLS 握手超时 / 连接重置），不计错误数、不冷却账号——换账号走同一条网络也没用，网关已自动换新连接重试一次。"
-    + "最近一次：" + (a.transient_msg || "—")
-    + (mins === null ? "" : "（" + fmtDur(mins) + " 前）")
-    + "。若频繁出现，先查本机网络/代理。";
-  return `<div style="font-size:11px;margin-top:3px"><span class="badge info" title="${escapeAttr(tip)}">瞬时错误 ${n} 次`
-    + (mins === null ? "" : "（最近 " + fmtDur(mins) + "前）") + `</span></div>`;
+  const r = a.retry_err || 0;
+  if (!n && !r) return "";
+  const parts = [];
+  if (n) {
+    const t = a.transient_at ? Date.parse(a.transient_at) : NaN;
+    const mins = isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t)/60000));
+    const tip = "传输层抖动（EOF / TLS 握手超时 / 连接重置）**重试后仍失败**：不计错误数、不冷却账号——换账号走同一条网络也没用。"
+      + "最近一次：" + (a.transient_msg || "—")
+      + (mins === null ? "" : "（" + fmtDur(mins) + " 前）")
+      + "。若频繁出现，先查本机网络/代理。";
+    parts.push(`<span class="badge info" title="${escapeAttr(tip)}">瞬时错误 ${n} 次`
+      + (mins === null ? "" : "（最近 " + fmtDur(mins) + "前）") + `</span>`);
+  }
+  if (r) {
+    const t = a.retry_at ? Date.parse(a.retry_at) : NaN;
+    const mins = isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t)/60000));
+    const win = a.retry_window_min || 60;
+    const tip = "传输层抖动，但网关**换新连接重试后成功**（客户端无感）。"
+      + "这里显示的是最近 " + win + " 分钟内的次数（滚动窗口，不是历史总数）——"
+      + "它和「瞬时错误」互补：只看后者（两次都失败）会低估真实抖动率。"
+      + (mins === null ? "" : "最近一次在 " + fmtDur(mins) + " 前。")
+      + "频繁出现说明链路不稳，先查本机网络/代理。";
+    parts.push(`<span class="badge warn" title="${escapeAttr(tip)}">重试自愈 ${r} 次（近 ${win} 分钟）</span>`);
+  }
+  return `<div style="font-size:11px;margin-top:3px">` + parts.join(" ") + `</div>`;
 }
 
 // tickCoolChips 让限流倒计时自己走（面板原本只在你点「刷新」时才更新）。

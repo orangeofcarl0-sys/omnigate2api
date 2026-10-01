@@ -73,16 +73,16 @@ type tencentHTTPOpts struct {
 	platform  bool // 活动域客户端平台标识（OMNIGATE_ACTIVITY_PLATFORM，实证用）
 }
 
-// tencentDo 统一执行：设头 → Do → 限长读体；返回（原始体, HTTP 状态, 传输错误）。
-// 业务码判定留给调用方——HTTP 4xx 也可能是幂等成功（如签到 code=10001）。
-func (c *TencentClient) tencentDo(acct *auth.Auth, o tencentHTTPOpts) ([]byte, int, error) {
+// buildTencentReq 组装一次计费/活动/chat 域请求（不含重试语义）。
+// 抽出来是为了让 tencentDo 能**换新连接重建**请求——重试必须重建 body reader。
+func (c *TencentClient) buildTencentReq(acct *auth.Auth, o tencentHTTPOpts) (*http.Request, error) {
 	var rd io.Reader
 	if o.body != nil {
 		rd = bytes.NewReader(o.body)
 	}
 	req, err := http.NewRequest(o.method, o.base+o.path, rd)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	billingHeaders(req, billingCred(acct))
 	if o.desktopUA {
@@ -96,7 +96,25 @@ func (c *TencentClient) tencentDo(acct *auth.Auth, o tencentHTTPOpts) ([]byte, i
 			req.Header.Set("X-Client-Platform", plat)
 		}
 	}
-	resp, err := c.http.Do(req)
+	return req, nil
+}
+
+// tencentDo 统一执行：设头 → Do → 限长读体；返回（原始体, HTTP 状态, 传输错误）。
+// 业务码判定留给调用方——HTTP 4xx 也可能是幂等成功（如签到 code=10001）。
+//
+// 与 chat 路径同样接**瞬时抖动重试**：这些路径此前完全没有重试，抖动一来就是硬失败
+// （2026-09-30 实测 14 小时里 103 次，48 次 `buddy/travel/status` + 55 次
+// `activity/growth/tasks`，全是 TLS 握手超时）。抖动是**网络**的事，不该由调用方
+// （成长链/签到）独自承担。
+func (c *TencentClient) tencentDo(acct *auth.Auth, o tencentHTTPOpts) ([]byte, int, error) {
+	resp, err := doWithRetry(context.Background(), c.http, func(fresh bool) (*http.Request, error) {
+		req, err := c.buildTencentReq(acct, o)
+		if err != nil {
+			return nil, err
+		}
+		req.Close = fresh // 重试强制新连接，别让池子把死连接递回来
+		return req, nil
+	}, 2, acct.UserID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -259,7 +277,7 @@ func (c *TencentClient) ChatStream(ctx context.Context, chatID string, messages 
 		tencentChatHeaders(req, cred, origin)
 		req.Close = fresh // 重试强制新连接，别让池子把死连接递回来
 		return req, nil
-	}, 2)
+	}, 2, cred.UserID)
 	if err != nil {
 		return nil, err
 	}

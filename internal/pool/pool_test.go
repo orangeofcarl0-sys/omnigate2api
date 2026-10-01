@@ -422,3 +422,64 @@ func TestNoteTransientObservableWithoutPenalty(t *testing.T) {
 		t.Fatalf("清除后应为 0，实际 %v", got)
 	}
 }
+
+// 重试**自愈**的抖动也要可见且不惩罚：与 transientErr 互补（那个记"两次都失败"，
+// 这个记"抖了但救回来"）。只看前者会低估真实抖动率（2026-09-30 复盘）。
+func TestNoteRetryObservableWithoutPenalty(t *testing.T) {
+	a := auth.New("t1", "n1", "d1", "tok", "ak", "sk", "2099-01-01T00:00:00Z", "", "v")
+	p, err := New([]*auth.Auth{a}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 用 UID 也能命中（上游侧只拿得到 Auth.UserID）
+	p.NoteRetry("t1")
+	p.NoteRetry("t1")
+	row := p.List()[0]
+	if row["retry_err"] != 2 {
+		t.Fatalf("retry_err=%v，应累计 2", row["retry_err"])
+	}
+	if at, _ := row["retry_at"].(string); at == "" {
+		t.Fatal("应记录最近一次时间（面板据此算「x 分钟前」）")
+	}
+	if row["err_count"] != 0 || row["cooling"] != false || row["disabled"] != false {
+		t.Fatalf("重试自愈不该罚账号: %+v", row)
+	}
+	// 关键：ClearTransient（成功路径）**不得**清掉它——否则重试刚救回来的那次
+	// 会被紧随其后的成功立刻抹掉，计数永远是 0（第一版就踩了这个坑）。
+	p.ClearTransient("t1")
+	if got := p.List()[0]["retry_err"]; got != 2 {
+		t.Fatalf("成功清理不该影响滚动窗口计数，实际 %v", got)
+	}
+	// 但瞬时错误是"自上次成功以来"口径，必须归零
+	if got := p.List()[0]["transient_err"]; got != 0 {
+		t.Fatalf("transient_err 清除后应为 0，实际 %v", got)
+	}
+}
+
+// 滚动窗口到期后从零重计：面板读到的应是"最近一小时抖了几次"这种可决策的量，
+// 而不是一个只增不减、越跑越没意义的历史总数。
+func TestNoteRetryRollsWindow(t *testing.T) {
+	a := auth.New("t1", "n1", "d1", "tok", "ak", "sk", "2099-01-01T00:00:00Z", "", "v")
+	p, err := New([]*auth.Auth{a}, Config{
+		ErrThreshold: 3, ErrCooldown: time.Minute, SoftCooldown: time.Second,
+		MaxConcurrent: 1, KeepaliveWindow: time.Minute,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NoteRetry("t1")
+	p.NoteRetry("t1")
+	// 把窗口起点拨到 retryWindow 之前，等价于"这两次已经出窗口了"
+	p.mu.Lock()
+	p.accounts[0].mu.Lock()
+	p.accounts[0].retryWin = time.Now().Add(-2 * retryWindow)
+	p.accounts[0].mu.Unlock()
+	p.mu.Unlock()
+	p.NoteRetry("t1")
+	if got := p.List()[0]["retry_err"]; got != 1 {
+		t.Fatalf("窗口过期后应从零重计（期望 1），实际 %v", got)
+	}
+}
