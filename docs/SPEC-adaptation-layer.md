@@ -1119,7 +1119,7 @@ S = uid => o(uid).then(ok => ok && a())                             // 登录后
 | 抖动不如换账号、要**原地重试** | `doWithRetry`：EOF / TLS 超时 / 连接重置 / GOAWAY 等**瞬时**传输错误，**换新连接重试一次**（重试请求置 `req.Close=true`，避免池子把死连接递回来）。华为与腾讯两条 chat 路径都接；**非 chat 路径（`tencentDo`：宠物/任务/市场/计费/试用）也接**——它们原先完全没有重试，抖动一来就是硬失败（2026-09-30 实测 14h 内 103 次，48 × `buddy/travel/status` + 55 × `activity/growth/tasks`，全是 TLS 握手超时）。业务错误（`ApiError`，上游真回了错误码）**不重试**——重试只会掩盖语义 |
 | 抖动必须**看得见** | `Pool.NoteTransient`：只累加观测计数与最近一次信息，**不计错误数、不冷却、不禁用**；`List()` 暴露 `transient_err/at/msg`，面板状态列渲染「瞬时错误 N 次（最近 Xm 前）」，成功请求后清零（即"自上次成功以来"）。这样"客户端报错但面板干净"不再发生 |
 | 抖动**被重试消化**了也要看得见 | 2026-09-30 复盘发现只看上一行会**系统性低估**：重试成功时此前既不写日志也不计数，于是面板显示 0 而链路实际在成簇握手超时（"0"的真实含义只是"没有连续两次都失败"）。现在三处补齐：① `doWithRetry` 抖动时记 `transport jitter (retrying)` 日志、重试成功记 `transport retry recovered`；② 上游包不认识账号池，用 `upstream.SetRetryObserver` 回调把计数送到池子（单向依赖不破）；③ `Pool.NoteRetry` 记 `retry_err/retry_at`，面板渲染「重试自愈 N 次（近 1 小时）」。口径是**滚动窗口**而非"自上次成功以来"——否则重试刚救回来的那次会被紧随其后的成功立刻抹掉，永远是 0（第一版实测踩过） |
-| 抖动可以**根本不发生** | `newTransport()` 接上 `Proxy: http.ProxyFromEnvironment`：容器内设 `HTTPS_PROXY` 即走代理，`NO_PROXY` 排除国内域（国内 API 绕道出海只会更慢更不稳）。compose 已透传两个变量 + 声明 `host.docker.internal:host-gateway`。HTTP(S) 与 SOCKS5 **都支持**——`net/http` 的 proxy scheme 分派里 `socks5`/`socks5h` 是一等公民，零新依赖 |
+| 抖动可以**根本不发生** | `newTransport()` 接上 `Proxy: http.ProxyFromEnvironment`：容器内设 `HTTPS_PROXY` 即走代理，compose 已透传 `HTTPS_PROXY`/`NO_PROXY` 两个变量 + 声明 `host.docker.internal:host-gateway`。HTTP(S) 与 SOCKS5 **都支持**——`net/http` 的 proxy scheme 分派里 `socks5`/`socks5h` 是一等公民，零新依赖。⚠️ **但真正消掉抖动的不是这两个变量**：容器出网实际由 Docker mirrored 网络统一交给 v2rayN 分流，`NO_PROXY` 拦不住它；要让国际站直连得在 **v2rayN 侧加路由规则**（见下方第 4 条） |
 
 **当前状态（2026-09-30 落地，2026-10-01 复核更正）**：已在本机 `.env` 填好代理并重建容器生效。
 10-01 复核推翻了一条关键推断（见下方第 4 条）：容器里的 `NO_PROXY` **不能**让流量真绕开 v2rayN。
@@ -1172,6 +1172,22 @@ NO_PROXY=copilot.tencent.com,codebuddy.cn,workbuddy.cn,workbuddy.ai,myhuaweiclou
    注意这是**按实测可达性判，不是按"是不是腾讯"或域名后缀判**——`copilot.tencent.com`（CN 域）
    同理直连，而 `www.workbuddy.ai` 虽带 `.ai` 却是新加坡边缘。改动前先按上面的方法实测
    可达性与出口 IP。
+
+   **已落地（2026-10-01 15:01，实测生效）**：`domain:workbuddy.ai → direct` 已写入本机
+   v2rayN —— 权威源 `guiConfigs/guiNDB.db` 的生效路由「V4-绕过大陆(Whitelist)」（规则 12→13 条）
+   与生成的 `binConfigs/config.json` 两侧同步；v2rayN 是提权进程、且 `api` 未启用（无运行时
+   热加载通道），故必须**整体重启 v2rayN**（只重启内核没用：内核启动时会从内存里的旧路由
+   重新生成 `config.json`）。重启后实测：
+
+   | 观测 | 修复前 | 修复后 |
+   |---|---|---|
+   | 宿主经 10808 → `www.workbuddy.ai` | 0/6（15s 超时） | 6/6，延迟与**真直连一致**（中位 ~1.06s） |
+   | 容器 → `www.workbuddy.ai` | 0/6 | 6/6，中位 **127ms** |
+   | 对照组 `api.ipify.org` 经代理 | 节点 `54.169.239.140` | 仍是节点（说明只改了该域路由） |
+   | 网关日志（等长窗口） | 15 次 jitter + 4 次无重试失败 | **0 次**，同期 16 次真实对话 |
+
+   对照组（`api.ipify.org` 经同一代理）出口仍是节点 `54.169.239.140`，说明这条规则
+   只作用于 `workbuddy.ai`，没有把全局代理一起改成直连。
 
 **遗留认知更正**：原文断言"容器完全没有代理配置 ⇒ 出网永远直连"**不准确**。本机 WSL2 为
 `networkingMode=mirrored`，Docker Desktop 会把宿主机的系统代理（`127.0.0.1:10808`）透传给
