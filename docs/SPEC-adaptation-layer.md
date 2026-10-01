@@ -1049,11 +1049,29 @@ type ChatAPI interface {
 **做法**：`internal/server/modelusage.go` 按 **(账号, 模型)** 记当前窗口的请求数与 token 数；
 撞限时把**当时的计数快照**存下来 —— 那就是阈值观测值（首次撞限即答案）。
 - 窗口边界按上游声明的 reset 推进：过了 reset 就开新窗口（计数归零），**快照保留**（观测值不丢）。
-- 只观测不惩罚；进程内存态（重启清空），但关键结论同时写日志行，长期留痕：
+  从没撞过限（拿不到上游 reset 时刻）时按 `modelRateLimitHorizon`（24h）兜底滚动，
+  否则"窗口用量"会退化成"历史总量"。
+- 只观测不惩罚；关键结论同时写日志行，长期留痕：
   `upstream model rate limit account=… model=… window_requests=N window_tokens=M window_start=…`。
+- **落盘 `data/model_usage.json`**（临时文件 + rename，10s 去抖；撞限时立即落盘——那是要留痕的证据）。
+  为什么必须落盘：窗口是 24h 锚定的，而进程一天可能重启多次；只存内存的话每次重启清零，
+  "这个号用了几成"就只剩重启后那一小段（实测重启 1 分钟撞限时快照读到 `window_tokens=189044`，
+  与真实量级差三个数量级）。
 - 观测面：`GET /admin/api/model-usage`（全量行）；`/admin/api/overview` 的账号行带 `model_window`，
-  面板「模型限流」chip 的提示里直接给出"撞限时本窗口 N 次 / M tokens（窗口起点 …）"。
+  面板**账号状态列直接渲染「模型用量」条**（模型名 + 占比条 + `已用 / 上限`），
+  不再是只藏在「模型限流」chip 的 tooltip 里。
 - **局限**：token 观测依赖上游返回真实 usage（`u.Any()`）；缺 usage 的成功回合只计请求不计 token。
+
+**阈值对照口径（v1.5 补）**：面板要给"用了几成"就得有个分母，而分母分两种来源，
+**面板必须把两者区分开**（沿用本仓"能力只在实证后宣称"的规矩）：
+
+| cap_source | 取值 | 标注 |
+|---|---|---|
+| `observed` | 该 (账号,模型) **撞过限** → 那次撞限时的窗口 token 数就是它的上限观测值 | 直接写数字，无前缀 |
+| `assumed` | 从没撞过，回落到配置 `model_rate_cap_tokens`（env `OMNIGATE_MODEL_RATE_CAP_TOKENS`；**代码不设默认值**——没证据就不替所有人假定一个上限） | 数字前加 `≈`，tooltip 注明"假设值、尚未被撞限实证校准" |
+
+两者都没有（没撞过且未配置）→ **只报用量、不算百分比**：拿空气当分母比不显示更坏。
+一旦某个 pair 首次撞限，它会自动从 `assumed` 切到 `observed`——假设值只是"还没被校准时的临时分母"。
 
 **已知的限流语义（2026-09-29 实测，可复核）**：
 
@@ -1062,7 +1080,7 @@ type ChatAPI interface {
 | 作用域 | **(账号, 模型)** | 同账号 `hy3` 正常、`deepseek-v4.1-flash` 429/6004 |
 | 性质 | **免费档限流 + 付费逃生** | 上游配置 `productFeaturesConfig.ModelRateLimitCap`：`freeId`（如 `deepseek-v4.1-flash`）→ `paidId`（`deepseek-v4.1-flash-sg`，`allowPaidSwitch:true`）；实测付费孪生**未被限**、可正常出话 |
 | 窗口 | 约 **24h、锚定**（重击不后移） | 同一 reset 时刻隔 7 小时看三次不变；同账号同模型连续两天的 reset 为 09-28T19:50:17 / 09-29T19:50:20（相隔 24h、同分钟） |
-| 数字配额 | **未知**（上游不给） | 需本节的按账号计数 + 首次撞限快照才能定出 |
+| 数字配额 | **上游报文里没有**（无 limit/used/remaining） | 上游 6004 只给解封时刻；社区流传的"每模型 2 亿 token"也**查无一手证据**（§28.4.2 末）。故本实现**不按它做硬封禁**，只把它当**可校准的显示分母**：`model_rate_cap_tokens` 由使用者显式配置（代码不设默认值——没证据就不替所有人假定），一旦该 (账号,模型) 撞限就用实测值覆盖（上表 `observed`） |
 
 ### 28.6 国际版账号试用自动激活（v1.4）
 

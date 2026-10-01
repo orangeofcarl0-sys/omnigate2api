@@ -97,6 +97,11 @@ func main() {
 		AccountInit: sch.InitAccount,
 		Usage: server.NewUsageStats(
 			filepath.Join(filepath.Dir(cfg.StateFile), "usage.json"), cfg.Pricing),
+		// (账号,模型) 窗口用量观测的落盘（SPEC §28.5）：窗口是 24h 锚定的，不落盘则每次
+		// 重启清零，"这个号用了几成"就只剩重启后那一小段（实测重启 1 分钟撞限时快照只有
+		// 18 万 token，与真实量级差三个数量级）。与 usage.json 同目录。
+		ModelUsageFile: filepath.Join(filepath.Dir(cfg.StateFile), "model_usage.json"),
+		ModelTokenCap:  cfg.ModelRateCapTokens,
 	})
 	go h.PreheatModels() // 冷启动预热目录+促销缓存（用量统计免费判定依赖，SPEC §34.2）
 
@@ -111,6 +116,7 @@ func main() {
 	}
 	go func() {
 		<-ctx.Done()
+		h.FlushStats() // 观测数据补一次落盘（平时去抖），再停 HTTP
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)

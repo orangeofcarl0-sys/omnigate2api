@@ -73,6 +73,14 @@ input{font:inherit}
 .badge.warn{background:rgba(217,119,6,.12);color:#b45309;border-color:rgba(217,119,6,.3)}
 .badge.bad{background:rgba(220,38,38,.1);color:#b91c1c;border-color:rgba(220,38,38,.28)}
 .badge.info{background:rgba(2,132,199,.1);color:#0369a1;border-color:rgba(2,132,199,.28)}
+/* 模型窗口用量（SPEC §28.5）：账号行内的紧凑条形 + 百分比 */
+.userow{display:flex;flex-wrap:wrap;gap:3px 14px;margin-top:4px;font-size:11px}
+.useitem{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px 6px;max-width:100%}
+.usenums{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.usebar{width:52px;height:6px;border-radius:3px;background:rgba(15,23,42,.10);overflow:hidden;display:inline-block;flex:0 0 auto}
+.usebar>i{display:block;height:100%;background:var(--ok)}
+.usebar.warn>i{background:var(--warn)}
+.usebar.bad>i{background:var(--bad)}
 .mono{font-family:var(--font-mono);font-size:12px}
 .muted{color:var(--muted)}
 .row-actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -586,6 +594,57 @@ function winHint(a, model){
     + `（窗口起点 ${fmtTime(w.hit_start)}）`;
 }
 
+// fmtTokens 大数紧凑显示：84M / 1.02B / 200M（阈值动辄上亿，全写出来读不了）。
+// 三位以上不留小数（200.0M → 200M），避免把窄列撑开。
+function fmtTokens(n){
+  n = Number(n||0);
+  const f = (v, u) => (v >= 100 ? v.toFixed(0) : v.toFixed(1)).replace(/\.0$/, "") + u;
+  if (n >= 1e9) return f(n/1e9, "B");
+  if (n >= 1e6) return f(n/1e6, "M");
+  if (n >= 1e3) return f(n/1e3, "K");
+  return String(n);
+}
+
+// modelUsageNote 每个账号的**模型窗口用量**（SPEC §28.5）：本窗口用了多少 token、占上限几成。
+// 上限口径分两种，面板必须标清（本仓规矩：实证与假设不混为一谈）：
+//   observed = 该 (账号,模型) **撞过限**，那次撞限时的窗口 token 数就是它的上限观测值；
+//   assumed  = 从没撞过，只能用配置 `model_rate_cap_tokens` 的假设值折算，仅供参考、未证实。
+// 窗口是 24h 锚定的，已落盘（data/model_usage.json），重启不清零。
+function modelUsageNote(a){
+  const win = a.model_window || {};
+  const items = Object.keys(win).map(m => ({ m, w: win[m] }))
+    .filter(x => (x.w.tokens||0) > 0 || (x.w.hits||0) > 0)
+    .sort((x, y) => (y.w.tokens||0) - (x.w.tokens||0));
+  if (!items.length) return "";
+  const parts = items.map(({m, w}) => {
+    const pctRaw = Number(w.used_pct||0);
+    const pct = Math.max(0, Math.min(100, pctRaw));
+    const cls = pctRaw >= 90 ? " bad" : pctRaw >= 70 ? " warn" : "";
+    // 实证值不加前缀；假设值加 ≈（并在 tooltip 里说清楚），免得把没证实的上限当权威。
+    const capTxt = w.cap_tokens
+      ? `${w.cap_source === "observed" ? "" : "≈"}${fmtTokens(w.cap_tokens)}`
+      : "上限未知";
+    const tip = `本窗口已用 ${Number(w.tokens||0).toLocaleString()} tokens / ${w.requests||0} 次请求`
+      + `；窗口起点 ${fmtTime(w.window_start)}。`
+      + (w.cap_tokens
+          ? `上限 ${Number(w.cap_tokens).toLocaleString()} tokens —— `
+            + (w.cap_source === "observed"
+                ? "取自该 (账号,模型) 最近一次撞限时的窗口计数（实证值）。"
+                : "取自配置 model_rate_cap_tokens 的假设值（≈），尚未被撞限实证校准。")
+          : "上限未知（没撞过限且未配置假设值）——只报用量，不算百分比。")
+      + (w.hits ? ` 已撞限 ${w.hits} 次，最近一次 ${fmtTime(w.hit_at)}。` : "")
+      + (w.hit_reset_at ? ` 上游声明的重置时刻 ${fmtTime(w.hit_reset_at)}。` : "");
+    // 数字组整体不换行：模型名可以折到下一行，但"条 + 百分比 + 用量"必须留在同一行。
+    const nums = w.cap_tokens
+      ? `<span class="usenums"><span class="usebar${cls}"><i style="width:${pct}%"></i></span>`
+        + `<span>${pctRaw.toFixed(0)}%</span>`
+        + `<span class="muted">${fmtTokens(w.tokens)} / ${capTxt}</span></span>`
+      : `<span class="usenums"><span class="muted">${fmtTokens(w.tokens)} / ${capTxt}</span></span>`;
+    return `<span class="useitem" title="${escapeAttr(tip)}"><span class="mono">${escapeHtml(m)}</span>${nums}</span>`;
+  });
+  return `<div class="userow">${parts.join("")}</div>`;
+}
+
 // transientNote 传输层抖动的观测条。两个计数互补，**必须一起看**：
 //   瞬时错误 = 换新连接重试后**仍然失败**（两次都失败，客户端会看到报错/换号）；
 //   重试自愈 = 抖了一下但重试**救回来了**（客户端无感）。
@@ -712,7 +771,7 @@ function render(data){
         <td>${a.quota_updated_at
           ? `<strong>${Number(a.credits||0).toLocaleString()}</strong>${a.quota_total ? `<div class="muted" style="font-size:11px">共 ${Number(a.quota_total).toLocaleString()}${a.quota_used ? ` · 用 ${Number(a.quota_used).toLocaleString()}` : ""}</div>` : ""}`
           : `<span class="muted" title="尚未查询过余额（额度快照不持久化，重启后需重新查询；调度器每日也会刷新）">未查询</span>`}</td>
-        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${coolChips(a)}${renewalLine(a)}${transientNote(a)}</td>
+        <td>${statusBadge(a)}${a.err_count?` <span class="badge info">err ${a.err_count}</span>`:""}${coolChips(a)}${renewalLine(a)}${modelUsageNote(a)}${transientNote(a)}</td>
         <td><div class="muted"${reasonTip?` title="${escapeAttr(reasonTip)}"`:""}>${escapeHtml(reason)}</div><div class="mono muted" style="font-size:11px">${escapeHtml(until)}</div></td>
         <td><div class="row-actions">
           <button class="btn" data-act="credits" data-uid="${escapeAttr(a.uid)}">积分</button>

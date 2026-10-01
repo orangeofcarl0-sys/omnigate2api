@@ -360,6 +360,7 @@ export OMNIGATE_API_KEY=你的随机密钥
 | `OMNIGATE_STATE_FILE` | 状态文件 | `./data/state.json` |
 | `OMNIGATE_DEFAULT_MODEL` | 默认模型 | `glm-5.2` |
 | `OMNIGATE_TRIAL_COUNTRY` | 国际版账号自动开通试用时补写的国家（`<code>:<EnName>:<本地名>`，SPEC §28.6） | `SG:Singapore:新加坡` |
+| `OMNIGATE_MODEL_RATE_CAP_TOKENS` | (账号,模型) 窗口 token 上限的**假设值**（SPEC §28.5），只用于面板「模型用量」折算"用了几成"；**撞过限的 pair 一律用实证值覆盖它**。上游 6004 报文不含任何数字，故这是待校准的假设（面板会标 `≈`）；`0`/未设 = 不显示百分比。同名字段：`config.json` 的 `model_rate_cap_tokens` | 未设（不显示百分比） |
 | `HTTPS_PROXY` / `NO_PROXY` | 出网代理（SPEC §24.7）：国际域直连极不稳，填 v2rayN 的 xray 混合口 `http://host.docker.internal:10808` 即可（`socks5://` 亦可）；NO_PROXY 排除国内可达域（`huaweicloud.com` 与 `myhuaweicloud.com` 是两个父域，都要列）。⚠️ 容器出网实际由 Docker mirrored 网络统一交给 v2rayN 分流，`NO_PROXY` **不能**让流量真正绕开代理——要让 `workbuddy.ai` 直连得在 v2rayN 里加 `domain:workbuddy.ai → direct` 路由（详见 SPEC §24.7 第 4 条） | 空（直连） |
 | `OMNIGATE_LOGIN_MIN_INTERVAL_SECONDS` | 登录授权频次闸：同渠道两次发起的最小间隔（SPEC §24.6） | `60` |
 | `OMNIGATE_LOGIN_MAX_PER_HOUR` | 登录授权频次闸：滚动窗口内每渠道上限 | `10` |

@@ -131,6 +131,17 @@ func (h *Handler) turnFailure(profile *adapt.UpstreamProfile, matchedKey string)
 	h.indexFor(profile).drop(matchedKey)
 }
 
+// FlushStats 把观测数据立即落盘（优雅退出用）：用量账本与 (账号,模型) 窗口观测。
+// 两者平时都是去抖落盘，退出时补一次，避免丢掉最后十几秒的数据。
+func (h *Handler) FlushStats() {
+	if h.cfg.Usage != nil {
+		h.cfg.Usage.Flush()
+	}
+	if h.modelUsage != nil {
+		h.modelUsage.Flush()
+	}
+}
+
 // recordUsage 落账一次真实上游用量（SPEC §34）。两个收口：流式 streamOut 的
 // usage 帧分支、非流式 completeChat 的 usageEstimate 之后——都只认上游真实
 // usage（Usage.Any()），估算值不落账。免费判定：
@@ -220,6 +231,12 @@ type Config struct {
 	RoutesFile string
 	// Usage Token 用量统计与白嫖金额换算（SPEC §34）；nil = 关闭（不落账、面板显示不可用）。
 	Usage *UsageStats
+	// ModelUsageFile (账号,模型) 窗口用量观测的落盘路径（SPEC §28.5）；空 = 仅内存态。
+	// 窗口是 24h 锚定的，不落盘则每次重启清零，"用了几成"就只剩重启后那一小段。
+	ModelUsageFile string
+	// ModelTokenCap (账号,模型) 窗口 token 上限**假设值**（0 = 不设）——仅在某个 pair
+	// 从未撞过限、拿不到实证值时用于面板的"用了几成"折算；撞过限的一律用实证值。
+	ModelTokenCap int64
 	// AccountInit 登录成功后的新账号初始化钩子（凭证校验 + 额度快照 + 当日签到/
 	// 福利领取）：main 注入调度器 Scheduler.InitAccount（SPEC §24.3）。nil = 跳过
 	// （测试/嵌入式）。不设它会怎样：新账号要等下一个 Tick（默认 30 分钟）才有额度
@@ -280,7 +297,7 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{
 		cfg: cfg, mux: http.NewServeMux(), oauth: newOAuthStore(),
 		loginGuard:    newLoginGuard(defaultLoginGuardConfig()),
-		modelUsage:    newModelUsageStats(),
+		modelUsage:    newModelUsageStats(cfg.ModelUsageFile, cfg.ModelTokenCap),
 		chats:         map[string]string{},
 		convAcct:      map[string]string{},
 		tencentStates: map[string]tencentState{},

@@ -9,15 +9,30 @@
 // 那个快照就是阈值本身的观测值（首次撞限即答案，多窗口重复即可确认）。窗口边界按上游声明的
 // reset 时刻推进：过了 reset 就开新窗口（与 §24.7 观察到的"锚定约 24h、重击不后移"一致）。
 //
-// 只读观测、不参与任何惩罚；进程内存态（重启清空——阈值观测要的是连续窗口内的计数，
-// 关键结论同时会写进日志行，便于长期留痕）。
+// 只读观测、不参与任何惩罚。
+//
+// 落盘（`data/model_usage.json`）：窗口是 **24h 锚定**的，而进程一天可能重启多次——不落盘的话
+// 每次重启都把窗口清零，"用了几成"就永远只能看到重启后那一小段（实测：重启 1 分钟就撞限时
+// 快照读到 window_tokens=189044，与真实 2 亿差了三个数量级）。快照与窗口一并持久化。
+//
+// 阈值对照口径（面板「模型用量」）：**能实证就用实证**——某 (账号, 模型) 撞过限，
+// 那次的 `hit_tokens` 就是该 pair 的上限观测值（`cap_source=observed`）；没撞过才回落到
+// 配置里的假设值 `Config.ModelTokenCap`（`cap_source=assumed`），面板会标出这个区别。
+// 这条沿用本仓"能力只在实证后宣称"的规矩：假设值不打实证的旗号。
 package server
 
 import (
+	"encoding/json"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 )
+
+// modelUsageFlushInterval 落盘去抖：两次落盘的最小间隔（撞限时不受此限，那是要留痕的证据）。
+const modelUsageFlushInterval = 10 * time.Second
 
 // modelWindow 一个 (账号, 模型) 的当前窗口与最近一次撞限快照。
 type modelWindow struct {
@@ -41,10 +56,18 @@ type modelWindow struct {
 type modelUsageStats struct {
 	mu  sync.Mutex
 	win map[string]*modelWindow
+
+	file      string // 落盘路径；空 = 不持久化（测试用）
+	capTokens int64  // 假设的 (账号,模型) 窗口 token 上限；<=0 = 不知道
+	lastFlush time.Time
 }
 
-func newModelUsageStats() *modelUsageStats {
-	return &modelUsageStats{win: map[string]*modelWindow{}}
+// newModelUsageStats file 为空则不落盘；capTokens <=0 表示不设假设上限
+// （面板只展示用量与实证撞限值，不显示"用了几成"）。
+func newModelUsageStats(file string, capTokens int64) *modelUsageStats {
+	s := &modelUsageStats{win: map[string]*modelWindow{}, file: file, capTokens: capTokens}
+	s.load()
+	return s
 }
 
 func modelUsageKey(account, model string) string { return account + "\x00" + model }
@@ -57,19 +80,26 @@ func (s *modelUsageStats) NoteRequest(account, model string, in, out int64, now 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	w := s.win[modelUsageKey(account, model)]
+	k := modelUsageKey(account, model)
+	w := s.win[k]
 	if w == nil {
 		w = &modelWindow{start: now}
-		s.win[modelUsageKey(account, model)] = w
+		s.win[k] = w
 	}
-	if !w.hitResetAt.IsZero() && !now.Before(w.hitResetAt) {
+	switch {
+	case !w.hitResetAt.IsZero() && !now.Before(w.hitResetAt):
 		// 上游声明的窗口已过：开新窗口（撞限快照保留，用于面板展示"上次撞限时的计数"）。
 		w.start, w.requests, w.tokens = now, 0, 0
 		w.resetSeen, w.hitResetAt = w.hitResetAt, time.Time{}
+	case w.hitResetAt.IsZero() && !w.start.IsZero() && now.Sub(w.start) >= modelRateLimitHorizon:
+		// 从没撞过限、也就没拿到上游的 reset 时刻：按 horizon 兜底滚动，
+		// 否则这个窗口会一直累加，"窗口用量"变成"历史总量"。
+		w.start, w.requests, w.tokens = now, 0, 0
 	}
 	w.requests++
 	w.tokens += in + out
 	w.lastAt = now
+	s.flushLocked(false)
 }
 
 // NoteLimit 记一次撞限（6004），返回**撞限时本窗口的计数**（= 阈值观测值）供日志留痕。
@@ -87,6 +117,7 @@ func (s *modelUsageStats) NoteLimit(account, model string, resetAt, now time.Tim
 	w.hits++
 	w.hitRequests, w.hitTokens, w.hitStart = w.requests, w.tokens, w.start
 	w.hitAt, w.hitResetAt = now, resetAt
+	s.flushLocked(true) // 阈值证据：立即落盘，不等去抖
 	return w.hitRequests, w.hitTokens, w.hitStart
 }
 
@@ -104,6 +135,35 @@ type modelWindowRow struct {
 	HitStart    string `json:"hit_start,omitempty"`
 	HitAt       string `json:"hit_at,omitempty"`
 	HitResetAt  string `json:"hit_reset_at,omitempty"`
+
+	// 阈值对照（见文件头）：cap_tokens 优先取该 pair 的实证撞限值，否则用配置的假设值。
+	CapTokens       int64   `json:"cap_tokens,omitempty"`
+	CapSource       string  `json:"cap_source,omitempty"` // observed | assumed
+	UsedPct         float64 `json:"used_pct,omitempty"`   // 本窗口已用占比（0–100+）
+	RemainingTokens int64   `json:"remaining_tokens,omitempty"`
+}
+
+// row 由内部窗口构造输出行（含阈值对照口径）。
+func (s *modelUsageStats) row(account, model string, w *modelWindow) modelWindowRow {
+	out := modelWindowRow{
+		Account: account, Model: model,
+		WindowStart: w.start.Format(time.RFC3339), Requests: w.requests, Tokens: w.tokens,
+		LastAt: tsOrEmpty(w.lastAt),
+		Hits:   w.hits, HitRequests: w.hitRequests, HitTokens: w.hitTokens,
+		HitStart: tsOrEmpty(w.hitStart), HitAt: tsOrEmpty(w.hitAt),
+		HitResetAt: tsOrEmpty(w.hitResetAt),
+	}
+	// 实证优先：撞过限的 pair，那次撞限时的窗口 token 数就是它的上限观测值。
+	if w.hitTokens > 0 {
+		out.CapTokens, out.CapSource = w.hitTokens, "observed"
+	} else if s.capTokens > 0 {
+		out.CapTokens, out.CapSource = s.capTokens, "assumed"
+	}
+	if out.CapTokens > 0 {
+		out.UsedPct = float64(out.Tokens) / float64(out.CapTokens) * 100
+		out.RemainingTokens = out.CapTokens - out.Tokens
+	}
+	return out
 }
 
 // Snapshot 当前观测全量（按账号、模型排序）。
@@ -116,14 +176,7 @@ func (s *modelUsageStats) Snapshot() []modelWindowRow {
 	out := make([]modelWindowRow, 0, len(s.win))
 	for k, w := range s.win {
 		acct, model := splitModelUsageKey(k)
-		out = append(out, modelWindowRow{
-			Account: acct, Model: model,
-			WindowStart: w.start.Format(time.RFC3339), Requests: w.requests, Tokens: w.tokens,
-			LastAt: tsOrEmpty(w.lastAt),
-			Hits:   w.hits, HitRequests: w.hitRequests, HitTokens: w.hitTokens,
-			HitStart: tsOrEmpty(w.hitStart), HitAt: tsOrEmpty(w.hitAt),
-			HitResetAt: tsOrEmpty(w.hitResetAt),
-		})
+		out = append(out, s.row(acct, model, w))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Account != out[j].Account {
@@ -150,16 +203,134 @@ func (s *modelUsageStats) ForAccount(account string) map[string]modelWindowRow {
 		if out == nil {
 			out = map[string]modelWindowRow{}
 		}
-		out[model] = modelWindowRow{
-			Account: acct, Model: model,
-			WindowStart: w.start.Format(time.RFC3339), Requests: w.requests, Tokens: w.tokens,
-			LastAt: tsOrEmpty(w.lastAt),
-			Hits:   w.hits, HitRequests: w.hitRequests, HitTokens: w.hitTokens,
-			HitStart: tsOrEmpty(w.hitStart), HitAt: tsOrEmpty(w.hitAt),
-			HitResetAt: tsOrEmpty(w.hitResetAt),
-		}
+		out[model] = s.row(acct, model, w)
 	}
 	return out
+}
+
+// CapTokens 当前假设的上限（面板提示用；0 = 未设）。
+func (s *modelUsageStats) CapTokens() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.capTokens
+}
+
+// ---------------------------------------------------------------------------
+// 落盘
+// ---------------------------------------------------------------------------
+
+// modelUsageFile 落盘形状：账号 → 模型 → 窗口状态（嵌套 map 比扁平的 \x00 键可读得多）。
+type modelUsageFile struct {
+	Accounts map[string]map[string]modelWindowState `json:"accounts"`
+}
+
+// modelWindowState 落盘的窗口状态。时间一律用 RFC3339 字符串：空值自然省略
+// （time.Time 的 omitempty 对零值结构体不生效，会写出 4 个 0001-01-01 噪音）。
+type modelWindowState struct {
+	Start       string `json:"start"`
+	Requests    int    `json:"requests"`
+	Tokens      int64  `json:"tokens"`
+	LastAt      string `json:"last_at,omitempty"`
+	Hits        int    `json:"hits,omitempty"`
+	HitRequests int    `json:"hit_requests,omitempty"`
+	HitTokens   int64  `json:"hit_tokens,omitempty"`
+	HitStart    string `json:"hit_start,omitempty"`
+	HitAt       string `json:"hit_at,omitempty"`
+	HitResetAt  string `json:"hit_reset_at,omitempty"`
+	ResetSeen   string `json:"reset_seen,omitempty"`
+}
+
+// parseTS 解析落盘时间戳；空串/坏值 → 零值（宁可少一条时间，也别因一处坏值丢整个文件）。
+func parseTS(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func (s *modelUsageStats) load() {
+	if s.file == "" {
+		return
+	}
+	raw, err := os.ReadFile(s.file)
+	if err != nil {
+		return // 首次运行：无文件即空表
+	}
+	var f modelUsageFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		log.Printf("model usage: 解析 %s 失败（忽略，从空开始）: %v", s.file, err)
+		return
+	}
+	for acct, models := range f.Accounts {
+		for model, st := range models {
+			s.win[modelUsageKey(acct, model)] = &modelWindow{
+				start: parseTS(st.Start), requests: st.Requests, tokens: st.Tokens, lastAt: parseTS(st.LastAt),
+				hits: st.Hits, hitRequests: st.HitRequests, hitTokens: st.HitTokens,
+				hitStart: parseTS(st.HitStart), hitAt: parseTS(st.HitAt), hitResetAt: parseTS(st.HitResetAt),
+				resetSeen: parseTS(st.ResetSeen),
+			}
+		}
+	}
+}
+
+// flushLocked 落盘（临时文件 + rename 原子替换）。调用方需持锁。
+// force=true 时跳过去抖（撞限证据要立刻留痕）。
+func (s *modelUsageStats) flushLocked(force bool) {
+	if s.file == "" {
+		return
+	}
+	if !force && time.Since(s.lastFlush) < modelUsageFlushInterval {
+		return
+	}
+	s.lastFlush = time.Now()
+	out := modelUsageFile{Accounts: map[string]map[string]modelWindowState{}}
+	for k, w := range s.win {
+		acct, model := splitModelUsageKey(k)
+		if acct == "" || model == "" {
+			continue
+		}
+		if out.Accounts[acct] == nil {
+			out.Accounts[acct] = map[string]modelWindowState{}
+		}
+		out.Accounts[acct][model] = modelWindowState{
+			Start: tsOrEmpty(w.start), Requests: w.requests, Tokens: w.tokens, LastAt: tsOrEmpty(w.lastAt),
+			Hits: w.hits, HitRequests: w.hitRequests, HitTokens: w.hitTokens,
+			HitStart: tsOrEmpty(w.hitStart), HitAt: tsOrEmpty(w.hitAt), HitResetAt: tsOrEmpty(w.hitResetAt),
+			ResetSeen: tsOrEmpty(w.resetSeen),
+		}
+	}
+	raw, err := json.MarshalIndent(out, "", " ")
+	if err != nil {
+		log.Printf("model usage: 序列化失败: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.file), 0o700); err != nil {
+		log.Printf("model usage: 建目录失败: %v", err)
+		return
+	}
+	tmp := s.file + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		log.Printf("model usage: 写盘失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.file); err != nil {
+		log.Printf("model usage: 替换失败: %v", err)
+	}
+}
+
+// Flush 立即落盘（优雅退出用）。
+func (s *modelUsageStats) Flush() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked(true)
 }
 
 func splitModelUsageKey(k string) (string, string) {

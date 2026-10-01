@@ -53,6 +53,13 @@ type Config struct {
 	// （国内 ¥0.014/积分、国际 $0.03/credits、汇率 7.15）。
 	Pricing *server.Pricing `json:"pricing,omitempty"`
 
+	// ModelRateCapTokens (账号,模型) 窗口 token 上限的**假设值**（SPEC §28.5），只用于
+	// 面板「模型用量」的"用了几成"折算；**撞过限的 pair 一律用实证值覆盖它**
+	// （撞限时那一瞬的窗口 token 数就是该 pair 的上限观测值）。上游 6004 报文不含任何
+	// 数字，故这个值本质是待校准的假设——0 = 不显示百分比，只报用量与实证撞限值。
+	// env：OMNIGATE_MODEL_RATE_CAP_TOKENS。
+	ModelRateCapTokens int64 `json:"model_rate_cap_tokens,omitempty"`
+
 	SoftRateDur    time.Duration
 	ErrCooldownDur time.Duration
 }
@@ -153,6 +160,11 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("OMNIGATE_KEEPALIVE_WINDOW"); v != "" {
 		c.KeepaliveWindow = v
+	}
+	if v := os.Getenv("OMNIGATE_MODEL_RATE_CAP_TOKENS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			c.ModelRateCapTokens = n
+		}
 	}
 }
 
